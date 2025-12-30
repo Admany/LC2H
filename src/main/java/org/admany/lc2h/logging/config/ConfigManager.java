@@ -131,7 +131,7 @@ public class ConfigManager {
         // General Settings
         comments.put("enableAsyncDoubleBlockBatcher", "Enable async batching for double blocks");
         comments.put("enableLostCitiesGenerationLock", "Recommended: serialize nearby Lost Cities chunk-gen to avoid bugged/duplicated chunks (may reduce max throughput)");
-        comments.put("enableLostCitiesPartSliceCompat", "Recommended: fix addon packs with invalid part heights (prevents stray blocks around streets/rails)");
+        comments.put("enableLostCitiesPartSliceCompat", "Recommended: prevent crashes from broken/invalid Lost Cities building parts (safe bounds checks)");
         comments.put("enableScatteredParts2OverlayFix", "Recommended: fix scattered buildings parts2 being placed one floor too high (prevents stacked duplicate copies)");
         comments.put("enableCacheStatsLogging", "Enable cache stats logging");
         comments.put("enableFloatingVegetationRemoval", "Enable removal of floating vegetation after terrain generation");

@@ -260,8 +260,8 @@ public class Lc2hConfigScreen extends Screen {
         addToggle(layout, "Lost Cities Safe Gen Lock (Recommended)", working.enableLostCitiesGenerationLock,
                 "Reduces rare Lost Cities chunk-gen bugs (duplicated/bugged chunks). Leave ON unless you're troubleshooting performance.", false,
                 val -> working.enableLostCitiesGenerationLock = val);
-        addToggle(layout, "Addon Pack Part Slice Fix (Recommended)", working.enableLostCitiesPartSliceCompat,
-                "Fixes some addon packs that ship invalid part heights (prevents stray blocks around streets/rails). Leave ON unless you're troubleshooting.", false,
+        addToggle(layout, "Part Safety Checks (Recommended)", working.enableLostCitiesPartSliceCompat,
+                "Prevents rare crashes from broken/invalid Lost Cities parts in addon packs. Leave ON unless you're troubleshooting.", false,
                 val -> working.enableLostCitiesPartSliceCompat = val);
         addToggle(layout, "Scattered Parts2 Overlay Fix (Recommended)", working.enableScatteredParts2OverlayFix,
                 "Fixes a Lost Cities scattered-structure bug that can create stacked duplicate copies 6 blocks higher (addon packs often trigger this).", false,
