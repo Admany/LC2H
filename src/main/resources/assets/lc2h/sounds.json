@@ -1,0 +1,18 @@
+{
+  "countdown": {
+    "sounds": [
+      {
+        "name": "lc2h:countdown",
+        "stream": false
+      }
+    ]
+  },
+  "button_click": {
+    "sounds": [
+      {
+        "name": "lc2h:button_click",
+        "stream": false
+      }
+    ]
+  }
+}

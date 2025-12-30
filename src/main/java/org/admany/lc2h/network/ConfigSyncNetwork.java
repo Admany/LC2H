@@ -1,0 +1,140 @@
+package org.admany.lc2h.network;
+
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import net.minecraft.client.Minecraft;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraftforge.network.NetworkDirection;
+import net.minecraftforge.network.NetworkEvent;
+import net.minecraftforge.network.NetworkRegistry;
+import net.minecraftforge.network.PacketDistributor;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraftforge.network.simple.SimpleChannel;
+
+import org.admany.lc2h.logging.config.ConfigManager;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Supplier;
+
+
+public final class ConfigSyncNetwork {
+    private static final Logger LOGGER = LogManager.getLogger();
+    private static final String PROTOCOL = "1";
+    private static final SimpleChannel CHANNEL = NetworkRegistry.ChannelBuilder
+        .named(ResourceLocation.fromNamespaceAndPath("lc2h", "config_sync"))
+        .networkProtocolVersion(() -> PROTOCOL)
+        .clientAcceptedVersions(PROTOCOL::equals)
+        .serverAcceptedVersions(PROTOCOL::equals)
+        .simpleChannel();
+    private static final String SNAPSHOT_TYPE = "lc2h-config-snapshot";
+    private static final String APPLY_TYPE = "lc2h-config-apply";
+
+    private ConfigSyncNetwork() {
+    }
+
+    public static void register() {
+        CHANNEL.registerMessage(0, Payload.class, Payload::encode, Payload::decode, ConfigSyncNetwork::handlePayload,
+            Optional.of(NetworkDirection.PLAY_TO_SERVER));
+        CHANNEL.registerMessage(1, Payload.class, Payload::encode, Payload::decode, ConfigSyncNetwork::handlePayload,
+            Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+    }
+
+    private static void handlePayload(Payload msg, Supplier<NetworkEvent.Context> ctxSup) {
+        NetworkEvent.Context ctx = ctxSup.get();
+        if (ctx.getDirection().getReceptionSide().isServer()) {
+            ServerPlayer sender = ctx.getSender();
+            if (sender == null) {
+                ctx.setPacketHandled(true);
+                return;
+            }
+            ctx.enqueueWork(() -> handleApplyOnServer(sender.server, sender, new String(msg.data)));
+        } else {
+            ctx.enqueueWork(() -> handleSnapshotOnClient(new String(msg.data)));
+        }
+        ctx.setPacketHandled(true);
+    }
+
+    private static void handleApplyOnServer(MinecraftServer server, ServerPlayer sender, String json) {
+        try {
+            JsonObject obj = JsonParser.parseString(json).getAsJsonObject();
+            String cfgString = obj.get("config").getAsString();
+            UUID playerId = UUID.fromString(obj.get("player").getAsString());
+            if (!server.getPlayerList().isOp(sender.getGameProfile()) || !sender.getUUID().equals(playerId)) {
+                LOGGER.warn("[LC2H] Rejected config apply from non-OP {}", playerId);
+                return;
+            }
+            ConfigManager.Config cfg = ConfigManager.GSON.fromJson(cfgString, ConfigManager.Config.class);
+            if (cfg != null) {
+                ConfigManager.writePrettyJsonConfig(cfg);
+                ConfigManager.CONFIG = cfg;
+                ConfigManager.initializeGlobals();
+                byte[] snapshot = ConfigManager.GSON.toJson(ConfigManager.CONFIG).getBytes();
+                CHANNEL.send(PacketDistributor.PLAYER.with(() -> sender), new Payload(buildSnapshotPayload(snapshot)));
+                LOGGER.info("[LC2H] Applied config from {}", sender.getGameProfile().getName());
+            }
+        } catch (Exception e) {
+            LOGGER.warn("[LC2H] Failed to handle config apply: {}", e.getMessage());
+        }
+    }
+
+    private static void handleSnapshotOnClient(String json) {
+        try {
+            JsonObject obj = JsonParser.parseString(json).getAsJsonObject();
+            String type = obj.get("type").getAsString();
+            if (!SNAPSHOT_TYPE.equals(type)) return;
+            String cfgString = obj.get("config").getAsString();
+            ConfigManager.Config cfg = ConfigManager.GSON.fromJson(cfgString, ConfigManager.Config.class);
+            if (cfg != null) {
+                ConfigManager.CONFIG = cfg;
+                ConfigManager.writePrettyJsonConfig(cfg);
+                ConfigManager.initializeGlobals();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static byte[] buildApplyPayload(ConfigManager.Config cfg, UUID player) {
+        JsonObject obj = new JsonObject();
+        obj.addProperty("type", APPLY_TYPE);
+        obj.addProperty("config", ConfigManager.GSON.toJson(cfg));
+        obj.addProperty("player", player.toString());
+        return obj.toString().getBytes();
+    }
+
+    private static byte[] buildSnapshotPayload(byte[] cfgBytes) {
+        JsonObject obj = new JsonObject();
+        obj.addProperty("type", SNAPSHOT_TYPE);
+        obj.addProperty("config", new String(cfgBytes));
+        return obj.toString().getBytes();
+    }
+
+    public static boolean sendApplyRequest(ConfigManager.Config cfg) {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc == null || mc.getConnection() == null || mc.player == null) {
+            return false;
+        }
+        try {
+            UUID player = mc.player.getUUID();
+            byte[] data = buildApplyPayload(cfg, player);
+            CHANNEL.sendToServer(new Payload(data));
+            return true;
+        } catch (Exception e) {
+            LOGGER.warn("[LC2H] Failed to send config apply: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    public record Payload(byte[] data) {
+        public static void encode(Payload msg, net.minecraft.network.FriendlyByteBuf buf) {
+            buf.writeByteArray(msg.data);
+        }
+
+        public static Payload decode(net.minecraft.network.FriendlyByteBuf buf) {
+            return new Payload(buf.readByteArray());
+        }
+    }
+}
