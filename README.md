@@ -1,126 +1,316 @@
-# 🌿 LOST CITIES: MULTITHREADED 🌿
+<div style="font-family:'JetBrains Mono','Courier New',monospace;color:#e0e0e0">
 
-Lost Cities: Multithreaded breathes new life into city exploration by dramatically speeding up world generation. Wander through urban landscapes without the stuttering that typically plagues these complex environments.
+<h1 style="text-align:center;color:#ffffff">《▓ LC²H | Lost Cities Hybrid ▓》</h1>
 
-[![Support on Ko-fi](https://i.imgur.com/138LVzD.png)](https://ko-fi.com/blackrift_studios)
+<p style="text-align:center">
+  <a href="https://gravelhost.com/BlackRiftStudios"><img src="https://i.imghippo.com/files/XpJ5581voA.png"></a><br>
+  <a href="https://github.com/Admany/Quantified-API"><img src="https://i.imghippo.com/files/k1781Ug.png"></a>
+</p>
 
-## 🚀 Major Performance Boost
+<hr style="border-color:#444">
 
-This mod gives a **huge performance boost** to The Lost Cities, making city chunks generate as fast as vanilla terrain - sometimes even faster! Both Intel i5-12500H and AMD Ryzen 5 8400F systems showed dramatic improvements in chunk generation and gameplay smoothness.
+<!-- COMPAT NOTICE -->
+<div style="border:1px solid #ef5350;color:#ffcdd2;padding:10px">
+  <p style="font-size:18px;color:#ffebee">《▒ Compatibility Notice ▒》</p>
+  <p>
+    <strong>C2ME</strong> has <strong>not been tested</strong> on <strong>V3.0.0</strong> yet.<br>
+    - Full support is planned/being tested<br>
+    - Treat as experimental for now (expect errors, crashes)
+  </p>
+</div>
 
-## 🌟 Perfect Companion for ChaosZPack
+<br>
 
-This mod works perfectly with Lost Cities addons like ChaosZPack! I've personally tested compatibility to ensure a seamless experience with ChaosCraft_HD's excellent addon.
 
-**[👉 Check out ChaosZPack for Lost Cities 👈](https://www.curseforge.com/minecraft/mc-mods/chaoszpack-lostcities)**
+<hr style="border-color:#333">
 
-## 🔭 Distant Horizons Compatible!
+<div style="border:1px solid #ffd54f;padding:12px;background-color:#222;color:#fff">
 
-**BREAKTHROUGH:** This mod makes Distant Horizons Multithreaded World Gen work perfectly with Lost Cities! The massive cliff/terrain gap issue that made these mods incompatible is now FIXED! Enjoy stunning city vistas with unprecedented view distances.
+  <p style="font-size:16px;color:#ffeb3b"><strong>《▒ New License Recap - Modpack Usage ▒》</strong></p>
 
-**[👉 Get Distant Horizons for Amazing View Distances 👈](https://www.curseforge.com/minecraft/mc-mods/distant-horizons)**
+  <p style="color:#fff9c4">
+    The Software is now under a <strong>new license (BRSSLA v1.3)</strong> with updated terms. 
+    Modpack usage rules have changed. Please read carefully!!!
+  </p>
 
-## ⚠️ Important Version Notice
+  <ul style="color:#fff9c4">
+    <li>Any modpack hosted on <a href="https://curseforge.com" style="color:#ffe082">CurseForge</a> is automatically allowed to include the Software.</li>
+    <li>Non-commercial usage is allowed until total downloads exceed <strong>100,000</strong> globally.</li>
+    <li>Above 100,000 downloads, the modpack is considered <strong>commercial</strong> and must request a license from BlackRift Studios.</li>
+    <li>Non-compliant modpacks can be blacklisted and/or have the Software disabled.</li>
+    <li>Always retain proper credit and do not bypass licensing enforcement.</li>
+  </ul>
 
-The latest version of Lost Cities: Multithreaded will **always only support the latest version of The Lost Cities**. This ensures optimal performance and compatibility.
+  <p style="color:#ffe082">
+    <strong>Unaffected modpacks:</strong> Cursed Walking, DeceasedCraft, ZombieCraft
+  </p>
 
-If you encounter any issues after a Lost Cities update or need help with compatibility, please report them in our dedicated support channel: **[LC Multithreaded Support](https://discord.com/channels/1342898880609779723/1404738678193917994)**
+  <p style="color:#ffe082">
+    TLDR: <strong>CurseForge modpacks under 100k downloads = free to use. Above that = contact us for a commercial license.</strong>
+  </p>
 
-I'm committed to providing quick fixes (typically within an hour of submission) whenever possible to ensure you can continue enjoying your gameplay with minimal disruption.
+</div>
 
-### ⚡ Key Improvements
+<!-- WHAT IS -->
+<p style="font-size:18px;color:#90caf9">《▒ What Is LC²H ▒》</p>
 
-* Smooth Exploration: No more freezes when entering new city areas
-* Better Server Performance: Reduced lag for all players on multiplayer servers
-* Instant Generation: Cities appear almost as quickly as vanilla terrain
-* Distant Horizons Compatible: Fixed the terrain cliff issue, making these mods work together!
+<p>
+LC²H is a performance and stability rework layer for <strong>The Lost Cities</strong>.
+</p>
 
-Note: The look and layout of cities remains untouched - only the performance is enhanced!
+<p>
+It keeps the visuals and identity of Lost Cities, but completely replaces how the generator executes internally.
+</p>
 
-## 💬 Frequently Asked Questions
+<p style="color:#ffffff;font-weight:700">
+V3 moves the entire Lost Cities generation pipeline off the Minecraft main thread.
+</p>
 
-### 🔄 Can I add this mod to my existing Lost Cities world or server?
+<p>
+This means city generation no longer blocks ticks, no longer freezes the game loop, and no longer causes exploration stutter.
+</p>
 
-Absolutely! The mod can be added to existing worlds, though I recommend creating a backup first as this is still in BETA. I've personally tested version migrations (from V1.1.0-BETA to V1.2.0-BETA), and the mod seamlessly adapts without losing functionality.
+<p>
+City chunks are generated asynchronously, in parallel, and fed back safely to Minecraft only when ready.
+</p>
 
-### 💾 Why has my world folder size increased?
+<hr style="border-color:#333">
 
-Starting with V1.2.0-BETA, the mod stores calculated data in a cache folder (`world/lcmultithreadingcache`). This cache can grow up to 500MB, but the mod automatically attempts to clean older data when it exceeds 100MB. You can manually clear this cache at any time using the command `/lcmultithreaded cache wipeDisk`.
+<!-- V3 -->
+<p style="font-size:18px;color:#81c784">《▒ V3.0.0 - A Real Rework ▒》</p>
 
-### 🧮 Why does my RAM usage increase by ~100MB?
+<p>
+V3.0.0 is not a patch and not an extension of V2.
+</p>
 
-The mod maintains a memory cache for recently generated content to dramatically improve performance. When this cache approaches capacity, older data is either moved to disk storage or removed entirely, maintaining optimal memory usage.
+<p style="color:#c8e6c9">
+It is a ground up rebuild that restructures Lost Cities into a job based, fully async pipeline.
+</p>
 
-### ⏮️ Will you make this compatible with older versions of Lost Cities?
+<ul style="color:#a5d6a7">
+<li>explicit job-based generator API</li>
+<li>enterprise grade async scheduler</li>
+<li>parallel worker pools under load</li>
+<li>translation layer for thread-safe data</li>
+<li>multi tier caching system</li>
+<li>optional GPU acceleration via Quantified API</li>
+</ul>
 
-Currently, no. Code differences between versions make compatibility challenging. While I'm considering future support for 1.21.1, I don't plan to support older versions as this would require using older Java versions - essentially requiring a complete rewrite of the mod.
+<p>
+V3 pushes Lost Cities into a performance tier it was never designed to reach.
+</p>
 
-### 👥 How can I help improve this mod?
+<hr style="border-color:#333">
 
-I welcome community contributions! The best way to help is by reporting issues or suggesting improvements in our dedicated channel on the BlackRift Studios Discord server. Your feedback directly impacts development priorities.
+<!-- STRUCTURE CONTROL -->
+<p style="font-size:18px;color:#ff7043">《▒ City Safe Structure System ▒》</p>
 
-## 🔧 Vital Fixes to Lost Cities
+<p style="color:#ffccbc">
+V3 introduces a new structure control system designed specifically for dense city environments.
+</p>
 
-- Fixed null blockstate crashes that would cause sudden game freezes
-- Repaired vine generation issues that affected building appearance
-- Solved building data lookup problems causing server lag spikes
-- Fixed thread safety issues during concurrent generation
-- Balanced memory usage to prevent unnecessary resource consumption
-- Closed the huge cliff gap when using with Distant Horizons
+<p>
+All vanilla and modded world structures such as villages, ruined nether portals, and other random structure features are actively prevented from spawning inside city boundaries.
+</p>
 
-## 📊 Real-World Performance
+<p>
+This guarantees that no structures generate inside buildings, clip through streets, or float above cities.
+</p>
 
-With Lost Cities: Multithreaded installed:
+<p>
+In addition, V3 automatically cleans up common worldgen artifacts.
+</p>
 
-- Cities generate as fast as vanilla terrain
-- Your exploration remains uninterrupted by technical hiccups
-- Building generation happens almost instantly
-- Servers maintain stability even with multiple players exploring
-- Performance improves on both high-end and modest PCs
+<ul style="color:#ffab91">
+<li>removes floating vines</li>
+<li>clears bugged tall grass placements</li>
+<li>prevents vegetation from spawning mid air above cities</li>
+</ul>
 
-The difference is immediately noticeable - what once took seconds now appears in the blink of an eye!
+<p>
+The result is fully clean city skylines with zero visual corruption.
+</p>
 
-## 🎮 Compatibility
+<hr style="border-color:#333">
 
-- Minecraft 1.20.1 with Forge
-- The Lost Cities 1.20-7.4.2 (latest version)
-- Works with most modpacks and optimization mods
-- Simple installation - just drop into your mods folder and enjoy!
-- Perfectly compatible with Distant Horizons Multithreaded World Gen!
+<!-- CONFIG UI -->
+<p style="font-size:18px;color:#ffd54f">《▒ Config UI - Commands Replaced ▒》</p>
 
-## 🌐 Community
+<p style="color:#ffecb3">
+All command based configuration has been removed in V3.
+</p>
 
-Join our friendly community for support and updates:
-[BlackRift Studios Discord](https://discord.gg/UPZ8BAJYvB)
+<p>
+Configuration is now handled through a proper in game UI.
+</p>
 
-## 👋 About Me
+<p>
+Path:
+</p>
 
-Hey there! I'm Admany, and I created this mod to solve the performance issues I was experiencing with The Lost Cities. I co-founded BlackRift Studios with my partner ChaosCraft_HD, and we're working together to create awesome mods for the Minecraft community.
+<ul style="color:#ffe082">
+<li>Mods → LC²H → Config</li>
+<li>Config button is located near the Done button</li>
+</ul>
 
-This mod is my solution to the lag problems in Lost Cities. I've written it from scratch without using any of McJty's code, which is why it will remain closed-source.
+<p>
+The config UI includes an integrated benchmarking tool.
+When run, it produces a final performance score.
+Higher scores indicate better performance.
 
-Big thanks to **McJty** for creating The Lost Cities in the first place - it's an amazing mod that just needed some performance love!
+On heavily modded packs such as ChaosZProject or ZombieCraft, a score in the 30k–40k range is considered excellent.
+This means LC²H was fast enough to keep up with Minecraft’s generation workload while still maintaining performance headroom.
+</p>
 
-## ⚖️ Usage Guidelines
+<ul style="color:#ffe082">
+<li>benchmarking tool is located at the bottom of the config screen</li>
+</ul>
 
-© 2025 Admany - All Rights Reserved
+<p>
+The UI acts as the control center for power modes, caches, diagnostics, and performance testing.
+</p>
 
-**Modpack & Server Usage:** For modpacks or servers with over 100,000 downloads, please reach out for permission to include this mod. I'm typically happy to grant permission - I just like to know where my work is being used!
+<hr style="border-color:#333">
 
-**Code Protection:** Please respect that the code within this mod's JAR file is protected by copyright. Rather than decompiling or modifying the code directly, I welcome collaboration! If you have ideas or want to contribute, please contact me directly.
+<!-- TECH DIFF -->
+<p style="font-size:18px;color:#64b5f6">《▒ V2 vs V3 - Technical Differences ▒》</p>
 
-**Regarding Lost Cities:** This mod and its code are my original work. While I may collaborate with McJty in the future, any implementation requires permission as the creator of this content.
+<p style="color:#bbdefb">
+V2 focused on partial async hooks layered on top of Lost Cities.
+</p>
 
-**Smaller Projects:** Feel free to include this mod in smaller modpacks and servers! Attribution to Admany/BlackRift Studios is appreciated and helps support continued development of this and other projects.
+<p>
+Most heavy logic still depended on the main thread and shared unsafe state.
+</p>
 
-Thank you for respecting these guidelines! 💚
+<p style="color:#bbdefb">
+V3 fully separates Lost Cities logic from Minecraft execution flow.
+</p>
 
-## 💬 My Policy Explained
+<ul style="color:#90caf9">
+<li>V2 reused existing generator hooks</li>
+<li>V3 replaces the generator pipeline entirely</li>
+<li>V2 reduced lag spikes</li>
+<li>V3 eliminates them under normal load</li>
+<li>V2 was limited by MC thread safety</li>
+<li>V3 enforces thread isolation by design</li>
+</ul>
 
-I'm not trying to be restrictive - this is simply about proper credit. I don't want large modpacks or mods using my work and claiming it as their own performance feature while making money from it. Smaller modpacks and servers are welcome to include this mod with proper attribution.
+<p>
+This architectural change is what allows V3 to scale with hardware instead of fighting it.
+</p>
 
-This policy protects my work while still allowing the community to benefit from these optimizations.
+<hr style="border-color:#333">
 
----
+<!-- PERF -->
+<p style="font-size:18px;color:#ce93d8">《▒ Performance Snapshot ▒》</p>
 
-Lost Cities: Multithreaded • Created by Admany • BlackRift Studios
+<p style="color:#e1bee7">
+Higher is faster. Visual comparison only.
+</p>
+
+<pre style="color:#f3e5f5">
+Speed
+│
+│                 █
+│                 █       
+│                 █
+│        █        █
+│        █        █        3. LC²H V3
+│ █      █        █
+│ █      █        █        2. Vanilla
+│  
+│  1.     2.       3.      1. LC²H V2 (Behind Vanilla by 20%)
+└──────────────────────────────
+</pre>
+
+<p>
+V3 is designed to keep city generation ahead of vanilla, even at high density.
+</p>
+
+<hr style="border-color:#333">
+
+<!-- WHY FAST -->
+<p style="font-size:18px;color:#4dd0e1">《▒ Why V3 Feels So Fast ▒》</p>
+
+<p>
+Lost Cities compresses expensive logic into a small generation window.
+</p>
+
+<p>
+V3 expands that window by executing the heavy steps in parallel async worker pools.
+</p>
+
+<ul style="color:#b2ebf2">
+<li>main thread is no longer the bottleneck</li>
+<li>workers stay saturated</li>
+<li>caches prevent rebuild storms</li>
+</ul>
+
+<p>
+Optional GPU acceleration offloads selected compute heavy paths when supported.
+</p>
+
+<hr style="border-color:#333">
+
+<!-- TRANSLATION -->
+<p style="font-size:18px;color:#ff8a65">《▒ The Translation Layer ▒》</p>
+
+<p style="color:#ffccbc">
+Lost Cities was never designed to be thread safe.
+</p>
+
+<p>
+V3 extracts required data, converts it into a safe representation, and isolates worker threads from unsafe state.
+</p>
+
+<p>
+This is what allows nearly all Lost Cities work to run off thread without corruption or crashes.
+</p>
+
+<hr style="border-color:#333">
+
+<!-- CREDITS -->
+<div style="border:1px solid #616161;padding:14px;background-color:#111;color:#e0e0e0">
+
+  <p style="font-size:18px;color:#b0bec5">《▒ Credits & Creator ▒》</p>
+
+  <p style="color:#cfd8dc">
+    Huge thanks to <strong>McJty</strong> for creating <strong>The Lost Cities</strong>.
+  </p>
+
+  <p>
+    LC²H exists because Lost Cities deserved to scale to modern hardware without sacrificing stability or visual identity.
+  </p>
+
+  <p style="color:#b0bec5">
+    All credit for the original concept, visuals, and gameplay design goes to McJty.
+  </p>
+
+  <hr style="border-color:#444">
+
+  <p style="color:#90caf9">
+    <strong>About the author</strong>
+  </p>
+
+  <p>
+    I'm <strong>Admany</strong>, founder of <strong>BlackRift Studios</strong>.
+  </p>
+
+  <p>
+    LC²H is built to take Lost Cities fully off the main thread, remove generation bottlenecks, and make large scale city exploration smooth on both servers and heavy modpacks.
+  </p>
+
+  <p style="color:#9e9e9e">
+    LC²H is not affiliated with Mojang or McJty.  
+    This project is a performance rework layer, not a replacement in any way!
+  </p>
+
+</div>
+
+<!-- FOOTER -->
+<p style="text-align:center;color:#9e9e9e">
+LC²H - Version 3.0.0 - Created by Admany - BlackRift Studios - December 21, 2025
+</p>
+
+</div>
