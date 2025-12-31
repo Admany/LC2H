@@ -142,7 +142,7 @@ public final class DiagnosticsReporter {
 
         boolean warn = elapsedSec >= STARTUP_WATCHDOG_BACKLOG_WARN_SEC;
         if (warn) {
-            LC2H.LOGGER.warn("[LC2H] startup-watchdog: t={}s planned={}, applyQueue={}, plannerPending={}, plannerBatches={}, warmupQueuedRegions={}, warmupActiveBatches={}, parallelActiveSlices={}, parallelQueuedSlices={}, plannerKinds={}",
+            LC2H.LOGGER.debug("[LC2H] startup-watchdog: t={}s planned={}, applyQueue={}, plannerPending={}, plannerBatches={}, warmupQueuedRegions={}, warmupActiveBatches={}, parallelActiveSlices={}, parallelQueuedSlices={}, plannerKinds={}",
                 elapsedSec, planned, applyQueue, planner.pendingTasks(), planner.batchCount(), regions, active, parallelActive, parallelQueued, planner.pendingByKind());
         } else {
             LC2H.LOGGER.debug("[LC2H] startup-watchdog: t={}s planned={}, applyQueue={}, plannerPending={}, plannerBatches={}, warmupQueuedRegions={}, warmupActiveBatches={}, parallelActiveSlices={}, parallelQueuedSlices={}, plannerKinds={}",

@@ -571,6 +571,9 @@ public final class AsyncMultiChunkPlanner {
         }
         long seed = provider.getSeed();
         String dimensionId = "unknown";
+        String profileName = "unknown";
+        String worldStyleName = "unknown";
+        String multiSettingsSignature = "unknown";
         try {
             ResourceKey<net.minecraft.world.level.Level> type = provider.getType();
             if (type != null) {
@@ -578,7 +581,31 @@ public final class AsyncMultiChunkPlanner {
             }
         } catch (Throwable ignored) {
         }
-        return new SeedDescriptor(dimensionId, seed);
+        try {
+            var profile = provider.getProfile();
+            if (profile != null && profile.getName() != null) {
+                profileName = profile.getName();
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            var worldStyle = provider.getWorldStyle();
+            if (worldStyle != null && worldStyle.getName() != null) {
+                worldStyleName = worldStyle.getName();
+            }
+            if (worldStyle != null) {
+                var settings = worldStyle.getMultiSettings();
+                if (settings != null) {
+                    multiSettingsSignature = settings.areasize() + ":"
+                        + settings.minimum() + ":"
+                        + settings.maximum() + ":"
+                        + settings.attempts() + ":"
+                        + String.format(java.util.Locale.ROOT, "%.3f", settings.correctStyleFactor());
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return new SeedDescriptor(dimensionId, seed, profileName, worldStyleName, multiSettingsSignature);
     }
 
     private static String cacheKey(SeedDescriptor descriptor, ChunkCoord coord) {
@@ -590,11 +617,19 @@ public final class AsyncMultiChunkPlanner {
         }
         int chunkX = coord != null ? coord.chunkX() : 0;
         int chunkZ = coord != null ? coord.chunkZ() : 0;
-        return dimension + ":" + seed + ":" + chunkX + ":" + chunkZ;
+        return dimension + ":" + seed + ":" + sanitize(descriptor.profile()) + ":" + sanitize(descriptor.worldStyle())
+            + ":" + sanitize(descriptor.multiSettings()) + ":" + chunkX + ":" + chunkZ;
     }
 
-    private record SeedDescriptor(String dimension, long seed) {
-        private static final SeedDescriptor UNKNOWN = new SeedDescriptor("unknown", 0L);
+    private record SeedDescriptor(String dimension, long seed, String profile, String worldStyle, String multiSettings) {
+        private static final SeedDescriptor UNKNOWN = new SeedDescriptor("unknown", 0L, "unknown", "unknown", "unknown");
+    }
+
+    private static String sanitize(String value) {
+        if (value == null || value.isBlank()) {
+            return "unknown";
+        }
+        return value.replace(':', '_').replace('|', '_').replace(' ', '_');
     }
 
     private static void scheduleWarmBuildingInfo(IDimensionInfo provider, MultiChunk multiChunk, ChunkCoord multiCoord) {

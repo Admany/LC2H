@@ -121,6 +121,35 @@ public abstract class MixinBuildingInfo {
         self.cellars = clamped;
     }
 
+    @Redirect(
+        method = "<init>",
+        at = @At(
+            value = "FIELD",
+            target = "Lmcjty/lostcities/worldgen/lost/BuildingInfo;floors:I",
+            opcode = Opcodes.PUTFIELD
+        ),
+        require = 0
+    )
+    private void lc2h$clampFloors(BuildingInfo self, int value) {
+        int clamped = value;
+        try {
+            ILostCityBuilding bt = self.buildingType;
+            if (bt != null) {
+                int max = bt.getMaxFloors();
+                if (max >= 0) {
+                    clamped = Math.min(clamped, max);
+                }
+                int min = bt.getMinFloors();
+                if (min >= 0) {
+                    clamped = Math.max(clamped, min);
+                }
+            }
+        } catch (Throwable ignored) {
+            // Never break worldgen if a modded building behaves oddly.
+        }
+        self.floors = clamped;
+    }
+
     @Shadow public static boolean isCityRaw(ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile) { return false; }
     @Shadow private static void initMultiBuildingSection(LostChunkCharacteristics characteristics, ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile) {}
     @Shadow private static int getAverageCityLevel(LostChunkCharacteristics thisone, ChunkCoord coord, IDimensionInfo provider) { return 0; }
@@ -145,8 +174,6 @@ public abstract class MixinBuildingInfo {
         require = 0
     )
     private Holder<Biome> lc2h$useProviderBiome(WorldGenLevel world, BlockPos pos) {
-        // BuildingInfo is sometimes constructed off-thread in LC2H pipelines.
-        // WorldGenLevel.getBiome can depend on chunk state, provider.getBiome uses the biome source directly.
         try {
             return provider != null ? provider.getBiome(pos) : world.getBiome(pos);
         } catch (Throwable t) {
