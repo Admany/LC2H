@@ -163,14 +163,25 @@ repositories {
     mavenCentral()
 }
 
+def quantifiedJars = fileTree(dir: 'libs', include: ['quantified-*.jar']).files
+if (quantifiedJars.isEmpty()) {
+    throw new GradleException("Missing quantified jar in libs (expected quantified-*.jar)")
+}
+def quantifiedJar = quantifiedJars.sort { it.name }.last()
+def lostcitiesJars = fileTree(dir: 'libs', include: ['lostcities-*.jar']).files
+if (lostcitiesJars.isEmpty()) {
+    throw new GradleException("Missing lostcities jar in libs (expected lostcities-*.jar)")
+}
+def lostcitiesJar = lostcitiesJars.sort { it.name }.last()
+
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
 
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
 
 
-    implementation fg.deobf(files('libs/quantified-1.0.0.jar'))
-    compileOnly files('libs/lostcities-1.20-7.4.5.jar')
+    implementation fg.deobf(files(quantifiedJar))
+    compileOnly files(lostcitiesJar)
 
     implementation 'com.github.oshi:oshi-core:6.4.5'
 }
@@ -255,7 +266,7 @@ tasks.register('lc2hCopyRefmap', Copy) {
     onlyIf {
         def src = file("$buildDir/tmp/compileJava/compileJava-refmap.json")
         def dst = file("$buildDir/resources/main/mixins.lc2h.refmap.json")
-        src.exists() && !dst.exists()
+        src.exists() && (!dst.exists() || dst.length() < 100)
     }
 }
 

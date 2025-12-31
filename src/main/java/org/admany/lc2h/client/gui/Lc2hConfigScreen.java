@@ -133,6 +133,16 @@ public class Lc2hConfigScreen extends Screen {
     private final Map<EditBox, Float> textFieldAlpha = new IdentityHashMap<>();
     private final Map<EditBox, Float> textFieldOffsetY = new IdentityHashMap<>();
     private final Map<Button, Float> buttonPulse = new IdentityHashMap<>();
+    private boolean restartWarningVisible = false;
+    private float restartWarningProgress = 0f;
+    private Component restartWarningDetail = Component.empty();
+    private float restartCloseHover = 0f;
+    private float restartLaterHover = 0f;
+    private final int[] restartCloseRect = new int[4];
+    private final int[] restartLaterRect = new int[4];
+    private static final Component RESTART_WARNING_TITLE = Component.literal("Restart Required");
+    private static final Component RESTART_CLOSE_LABEL = Component.literal("Close Game");
+    private static final Component RESTART_LATER_LABEL = Component.literal("Do It Later");
 
     private record LabelEntry(int x, int y, int descStartY, Component title,
                               List<FormattedCharSequence> lines, boolean requiresRestart) { }
@@ -215,6 +225,11 @@ public class Lc2hConfigScreen extends Screen {
         this.textFieldAlpha.clear();
         this.textFieldOffsetY.clear();
         this.buttonPulse.clear();
+        this.restartWarningVisible = false;
+        this.restartWarningProgress = 0f;
+        this.restartWarningDetail = Component.empty();
+        this.restartCloseHover = 0f;
+        this.restartLaterHover = 0f;
 
         controller.registerBenchmarkListener();
 
@@ -263,101 +278,21 @@ public class Lc2hConfigScreen extends Screen {
         addToggle(layout, "Part Safety Checks (Recommended)", working.enableLostCitiesPartSliceCompat,
                 "Prevents rare crashes from broken/invalid Lost Cities parts in addon packs. Leave ON unless you're troubleshooting.", false,
                 val -> working.enableLostCitiesPartSliceCompat = val);
-        addToggle(layout, "Scattered Parts2 Overlay Fix (Recommended)", working.enableScatteredParts2OverlayFix,
-                "Fixes a Lost Cities scattered-structure bug that can create stacked duplicate copies 6 blocks higher (addon packs often trigger this).", false,
-                val -> working.enableScatteredParts2OverlayFix = val);
         addToggle(layout, "Enable Cache Stats Logging", working.enableCacheStatsLogging,
                 "Log cache statistics periodically.", false, val -> working.enableCacheStatsLogging = val);
         addToggle(layout, "Hide Experimental Warning", working.hideExperimentalWarning,
                 "Hide the vanilla experimental warning screen for this mod.", false, val -> working.hideExperimentalWarning = val);
         addToggle(layout, "Debug Logging", working.enableDebugLogging,
                 "Enable verbose debug logging for warmup/memory operations.", false, val -> working.enableDebugLogging = val);
-
-        /*
-        EntryPlacement powerProfilePlacement = prepareEntry(layout, "Power Profile",
-                "Select the operational power profile for LC²H. 'BALANCED' is recommended; 'BOOST' prioritizes throughput; 'CONSERVE' minimizes resource usage.",
-                false, 180, 20);
-        String initialProfile = (working.powerProfile != null && !working.powerProfile.isEmpty())
-                ? working.powerProfile
-                : (powerProfiles != null && !powerProfiles.isEmpty() ? powerProfiles.get(0) : "N/A");
-        working.powerProfile = initialProfile;
-        CustomButton profileBtn = createAnimatedButton(powerProfilePlacement.controlX(), powerProfilePlacement.controlY(),
-                powerProfilePlacement.controlWidth(), powerProfilePlacement.controlHeight(), Component.literal("Profile: " + initialProfile), b -> {
-                    String nextProfile = controller.cyclePowerProfile();
-                    if (nextProfile == null || nextProfile.isEmpty()) {
-                        nextProfile = powerProfiles != null && !powerProfiles.isEmpty() ? powerProfiles.get(0) : "N/A";
-                        working.powerProfile = nextProfile;
-                    }
-                    b.setMessage(Component.literal("Profile: " + nextProfile));
-                });
-        profileBtn.active = powerProfiles != null && !powerProfiles.isEmpty();
-        addRenderableWidget(profileBtn);
-
-        this.batchSizeBox = addNumberField(layout, "Operation Batch Size",
-                "Number of asynchronous operations submitted per batch. Increasing this enhances throughput but increases CPU and memory footprint.",
-                String.valueOf(working.batchSize), false);
-        this.thresholdBox = addNumberField(layout, "Background Score Threshold",
-                "Minimum score to route tasks to background queues (0.0 - 1.0). Applies instantly.",
-                String.valueOf(working.backgroundScoreThreshold), false);
-
-        addSectionHeader(layout, Component.literal("THREADING - Performance Tuning"));
-        addToggle(layout, "Enable Noise Threading", working.enableNoiseThreading,
-                "Toggle noise generator on/off (restart recommended)", true, val -> working.enableNoiseThreading = val);
-        addToggle(layout, "Enable Building Threading", working.enableBuildingThreading,
-                "Toggle building generator on/off", true, val -> working.enableBuildingThreading = val);
-        addToggle(layout, "Enable Cache Threading", working.enableCacheThreading,
-                "Toggle cache threading (restart required)", true, val -> working.enableCacheThreading = val);
-
-        EntryPlacement logicalPlacement = prepareEntry(layout, "Use Hyperthreading (Logical Cores)",
-                "When enabled, LC²H will utilize logical CPU cores. For dedicated servers, a restart may be required for changes to fully apply.",
-                true, 180, 20);
-        CustomButton logicalBtn = createAnimatedButton(logicalPlacement.controlX(), logicalPlacement.controlY(),
-                logicalPlacement.controlWidth(), logicalPlacement.controlHeight(),
-                Component.literal(working.useLogicalCores ? "Logical Cores" : "Physical Only"), b -> {
-                    working.useLogicalCores = !working.useLogicalCores;
-                    b.setMessage(Component.literal(working.useLogicalCores ? "Logical Cores" : "Physical Only"));
-                });
-        addRenderableWidget(logicalBtn);
-
-        this.overrideCoreBox = addNumberField(layout, "Override Core Count (0 = auto)",
-                "Explicitly set the maximum number of CPU cores LC²H may utilize. '0' will auto-detect; restart recommended after changes.",
-                String.valueOf(working.overrideCoreCount), true);
-        this.noiseThreadsBox = addNumberField(layout, "Noise Threads",
-                "Configure dedicated threads for noise generation. Use '0' to let the system choose; restart is recommended to apply.",
-                String.valueOf(working.noiseThreadCount), true);
-        this.buildingThreadsBox = addNumberField(layout, "Building Threads",
-                "Configure dedicated threads for building generation. Small improvements may produce diminishing returns; restart recommended.",
-                String.valueOf(working.buildingThreadCount), true);
-        this.cacheThreadsBox = addNumberField(layout, "Cache Threads",
-                "Threads dedicated to cache operations; tuning may increase throughput but will consume more resources (restart recommended).",
-                String.valueOf(working.cacheThreadCount), true);
-
-        addSectionHeader(layout, Component.literal("PRELOADER - Warmup Engine"));
-        addToggle(layout, "Enable Preloader", working.enablePreloader,
-                "Toggle player-based preloading on/off.", false, val -> working.enablePreloader = val);
-        this.preloaderIntervalBox = addNumberField(layout, "Preloader Interval (seconds)",
-                "How often the preloader ticks (seconds). Applies instantly on singleplayer.",
-                String.valueOf(working.preloaderIntervalSeconds), false);
-
-        addSectionHeader(layout, Component.literal("ADVANCED SETTINGS"));
-        addToggle(layout, "Automated Error Fallback", working.autoFallbackOnError,
-                "Automatically fallback to conservative execution on repeated async failures to preserve stability.",
-                false, val -> working.autoFallbackOnError = val);
-        addToggle(layout, "Enable Cache Stats Logging", working.enableCacheStatsLogging,
-                "Log cache statistics periodically.", false, val -> working.enableCacheStatsLogging = val);
-        addToggle(layout, "Enable Performance Monitoring", working.enablePerformanceMonitoring,
-                "Enable performance monitoring introspection.", false, val -> working.enablePerformanceMonitoring = val);
-
-        */
         addSectionHeader(layout, Component.literal("CITY EDGE"));
         addToggle(layout, "Enable City Blend", working.cityBlendEnabled,
-                "Smoothly blend city edges into surrounding terrain. [EXPERIMENTAL]", false, val -> working.cityBlendEnabled = val);
+                "Smoothly blend city edges into surrounding terrain. [EXPERIMENTAL]", Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendEnabled = val);
         addToggle(layout, "Clear Trees Near City Border", working.cityBlendClearTrees,
-                "Prevent trees from generating close to city borders.", false, val -> working.cityBlendClearTrees = val);
+                "Prevent trees from generating close to city borders.", Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendClearTrees = val);
         this.blendWidthBox = addNumberField(layout, "Blend Width (blocks)",
-                "How many blocks to blend from city edge into terrain.", String.valueOf(working.cityBlendWidth), false);
+                "How many blocks to blend from city edge into terrain.", String.valueOf(working.cityBlendWidth), Lc2hConfigController.RESTART_CITY_EDGE);
         this.blendSoftnessBox = addNumberField(layout, "Blend Softness",
-                "Softness of the falloff (higher = softer).", String.valueOf(working.cityBlendSoftness), false);
+                "Softness of the falloff (higher = softer).", String.valueOf(working.cityBlendSoftness), Lc2hConfigController.RESTART_CITY_EDGE);
 
         addSectionHeader(layout, Component.literal("BENCHMARK - Performance Validation"));
         addActionButton(layout, "Automated Throughput Trial",
@@ -382,11 +317,11 @@ public class Lc2hConfigScreen extends Screen {
 
         CustomButton applyButton = createAnimatedButton(this.contentLeft, footerY, 160, 20,
                 Component.literal("Apply & Save"), btn -> {
-                    Lc2hConfigController.FormValues values = new Lc2hConfigController.FormValues(
-                            blendWidthBox.getValue(),
-                            blendSoftnessBox.getValue()
-                    );
-                    controller.applyChanges(values, Minecraft.getInstance());
+                    Lc2hConfigController.FormValues values = buildFormValues();
+                    boolean needsRestart = controller.applyChanges(values, Minecraft.getInstance());
+                    if (needsRestart) {
+                        showRestartWarning(null);
+                    }
                 }, false);
         addRenderableWidget(applyButton);
 
@@ -424,6 +359,10 @@ public class Lc2hConfigScreen extends Screen {
                     state[0] = !state[0];
                     onChange.accept(state[0]);
                     b.setMessage(Component.literal(state[0] ? "Enabled" : "Disabled"));
+                    boolean needsRestart = controller.applyToggleChange(Minecraft.getInstance(), false);
+                    if (needsRestart) {
+                        showRestartWarning(title);
+                    }
                 });
         addRenderableWidget(button);
     }
@@ -558,6 +497,11 @@ public class Lc2hConfigScreen extends Screen {
             scrollOffset = targetScrollOffset;
         }
         fadeIn = Math.min(1f, fadeIn + 0.02f);
+        float warningTarget = restartWarningVisible ? 1f : 0f;
+        restartWarningProgress += (warningTarget - restartWarningProgress) * 0.18f;
+        if (!restartWarningVisible && restartWarningProgress < 0.01f) {
+            restartWarningProgress = 0f;
+        }
         targetScrollOffset = clamp(0f, (float)maxScrollOffset, targetScrollOffset);
         scrollOffset = clamp(0f, (float)maxScrollOffset, scrollOffset);
     }
@@ -566,6 +510,7 @@ public class Lc2hConfigScreen extends Screen {
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         int screenW = this.width;
         int screenH = this.height;
+        boolean modalActive = isRestartWarningActive();
 
         renderUniverseBackground(graphics, screenW, screenH, partialTick);
 
@@ -575,16 +520,19 @@ public class Lc2hConfigScreen extends Screen {
         int outerRight = this.contentRight + 24;
 
         renderHeader(graphics, outerLeft, outerRight, headerTop, headerBottom);
-        renderContentArea(graphics, mouseX, mouseY, partialTick);
+        renderContentArea(graphics, mouseX, mouseY, partialTick, !modalActive);
         renderFooter(graphics);
-        renderTextContent(graphics);
-        renderScrollBar(graphics);
+        if (!modalActive) {
+            renderTextContent(graphics);
+            renderScrollBar(graphics);
 
-        int bodyTop = this.contentTop;
-        int bodyBottom = Math.max(bodyTop, (this.footerY - 12) - 8);
-        withBodyScissor(graphics, bodyTop, bodyBottom, () -> Lc2hConfigScreen.super.render(graphics, mouseX, mouseY, partialTick));
-        renderButtonHighlights(graphics);
-        renderButtonText(graphics);
+            int bodyTop = this.contentTop;
+            int bodyBottom = Math.max(bodyTop, (this.footerY - 12) - 8);
+            withBodyScissor(graphics, bodyTop, bodyBottom, () -> Lc2hConfigScreen.super.render(graphics, mouseX, mouseY, partialTick));
+            renderButtonHighlights(graphics);
+            renderButtonText(graphics);
+        }
+        renderRestartWarning(graphics, mouseX, mouseY);
     }
 
     private void renderUniverseBackground(GuiGraphics graphics, int screenW, int screenH, float partialTick) {
@@ -708,7 +656,7 @@ public class Lc2hConfigScreen extends Screen {
         }
     }
 
-    private void renderContentArea(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+    private void renderContentArea(GuiGraphics graphics, int mouseX, int mouseY, float partialTick, boolean renderWidgets) {
         int bodyTop = this.contentTop;
         int footerTop = this.footerY - 12;
         int bodyBottom = Math.max(bodyTop, footerTop - 8);
@@ -722,11 +670,13 @@ public class Lc2hConfigScreen extends Screen {
         int fadeZone = 24;
         int maxSlide = 8;
 
-        withBodyScissor(graphics, bodyTop, bodyBottomClipped, () -> {
-            renderScrollableWidgets(graphics, mouseX, mouseY, bodyTop, bodyBottomClipped, fadeZone, maxSlide);
-            renderTextFields(graphics, bodyTop, bodyBottomClipped, fadeZone, maxSlide);
-        });
-        renderFixedButtons(graphics, mouseX, mouseY);
+        if (renderWidgets) {
+            withBodyScissor(graphics, bodyTop, bodyBottomClipped, () -> {
+                renderScrollableWidgets(graphics, mouseX, mouseY, bodyTop, bodyBottomClipped, fadeZone, maxSlide);
+                renderTextFields(graphics, bodyTop, bodyBottomClipped, fadeZone, maxSlide);
+            });
+            renderFixedButtons(graphics, mouseX, mouseY);
+        }
     }
 
     private void renderScrollableWidgets(GuiGraphics graphics, int mouseX, int mouseY, int bodyTop, int bodyBottomClipped, int fadeZone, int maxSlide) {
@@ -794,28 +744,30 @@ public class Lc2hConfigScreen extends Screen {
         int currentColor = blendColors(baseColor, hoverColor, hover * 0.3f);
         currentColor = adjustColorBrightness(currentColor, pulse);
 
-        graphics.fill(x - 3, y - 3, x + width + 3, y + height + 3, (bgAlpha << 24) | 0x0A0A15);
-        graphics.fill(x - 2, y - 2, x + width + 2, y + height + 2, (bgAlpha << 24) | borderColor);
-        graphics.fill(x - 1, y - 1, x + width + 1, y + height + 1, (bgAlpha << 24) | currentColor);
+        int outerPadX = 2;
+        int outerPadY = 3;
+        int midPadX = 1;
+        int midPadY = 2;
+        int innerPadX = 0;
+        int innerPadY = 1;
+
+        graphics.fill(x - outerPadX, y - outerPadY, x + width + outerPadX, y + height + outerPadY, (bgAlpha << 24) | 0x0A0A15);
+        graphics.fill(x - midPadX, y - midPadY, x + width + midPadX, y + height + midPadY, (bgAlpha << 24) | borderColor);
+        graphics.fill(x - innerPadX, y - innerPadY, x + width + innerPadX, y + height + innerPadY, (bgAlpha << 24) | currentColor);
 
         if (hover > 0.01f) {
             int glowAlpha = (int)(hover * 80 * fadeIn);
             for (int i = 0; i < 3; i++) {
                 int glowSize = i * 2;
-                graphics.fill(x - 3 - glowSize, y - 3 - glowSize,
-                        x + width + 3 + glowSize, y + height + 3 + glowSize,
+                int glowPadX = outerPadX + glowSize;
+                int glowPadY = outerPadY + glowSize;
+                graphics.fill(x - glowPadX, y - glowPadY,
+                        x + width + glowPadX, y + height + glowPadY,
                         (glowAlpha / (i + 2) << 24) | borderColor);
             }
         }
 
-        float scale = 1f + hover * 0.05f;
-        int scaledWidth = (int)(width * scale);
-        int scaledHeight = (int)(height * scale);
-        int offsetX = (width - scaledWidth) / 2;
-        int offsetY = (height - scaledHeight) / 2;
-
-        graphics.fill(x + offsetX, y + offsetY, x + offsetX + scaledWidth, y + offsetY + scaledHeight,
-                (bgAlpha << 24) | currentColor);
+        graphics.fill(x, y, x + width, y + height, (bgAlpha << 24) | currentColor);
     }
 
     private void renderTextFields(GuiGraphics graphics, int bodyTop, int bodyBottomClipped, int fadeZone, int maxSlide) {
@@ -867,6 +819,7 @@ public class Lc2hConfigScreen extends Screen {
     private void renderFixedButtons(GuiGraphics graphics, int mouseX, int mouseY) {
         for (Map.Entry<Button, int[]> entry : buttonRects.entrySet()) {
             if (buttonOriginalY.containsKey(entry.getKey())) continue;
+            if (!entry.getKey().visible) continue;
             int[] r = entry.getValue();
             if (r == null) continue;
             int bx = r[0], by = r[1], bw = r[2], bh = r[3];
@@ -890,24 +843,27 @@ public class Lc2hConfigScreen extends Screen {
         int currentColor = blendColors(baseColor, hoverColor, hover);
         currentColor = adjustColorBrightness(currentColor, pulse);
 
-        graphics.fill(x - 3, y - 3, x + width + 3, y + height + 3, 0xAA0A0A15);
-        graphics.fill(x - 2, y - 2, x + width + 2, y + height + 2, accentColor);
-        graphics.fill(x - 1, y - 1, x + width + 1, y + height + 1, currentColor);
+        int outerPadX = 2;
+        int outerPadY = 3;
+        int midPadX = 1;
+        int midPadY = 2;
+        int innerPadX = 0;
+        int innerPadY = 1;
 
-        float scale = 1f + hover * 0.08f;
-        int scaledWidth = (int)(width * scale);
-        int scaledHeight = (int)(height * scale);
-        int offsetX = (width - scaledWidth) / 2;
-        int offsetY = (height - scaledHeight) / 2;
+        graphics.fill(x - outerPadX, y - outerPadY, x + width + outerPadX, y + height + outerPadY, 0xAA0A0A15);
+        graphics.fill(x - midPadX, y - midPadY, x + width + midPadX, y + height + midPadY, accentColor);
+        graphics.fill(x - innerPadX, y - innerPadY, x + width + innerPadX, y + height + innerPadY, currentColor);
 
-        graphics.fill(x + offsetX, y + offsetY, x + offsetX + scaledWidth, y + offsetY + scaledHeight, currentColor);
+        graphics.fill(x, y, x + width, y + height, currentColor);
 
         if (hover > 0.01f) {
             int glowAlpha = (int)(hover * 100);
             for (int i = 0; i < 4; i++) {
                 int glowSize = i * 3;
-                graphics.fill(x - 4 - glowSize, y - 4 - glowSize,
-                        x + width + 4 + glowSize, y + height + 4 + glowSize,
+                int glowPadX = outerPadX + 1 + glowSize;
+                int glowPadY = outerPadY + 1 + glowSize;
+                graphics.fill(x - glowPadX, y - glowPadY,
+                        x + width + glowPadX, y + height + glowPadY,
                         (glowAlpha / (i + 3) << 24) | accentColor);
             }
         }
@@ -1047,6 +1003,7 @@ public class Lc2hConfigScreen extends Screen {
         for (Map.Entry<Button, int[]> entry : buttonRects.entrySet()) {
             Button cb = entry.getKey();
             if (buttonOriginalY.containsKey(cb)) continue;
+            if (!cb.visible) continue;
             int[] r = entry.getValue();
             if (r == null) continue;
             int bx = r[0];
@@ -1088,6 +1045,7 @@ public class Lc2hConfigScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
+        if (isRestartWarningActive()) return true;
         if (controller.isBenchmarkRunning()) return true;
 
         int bodyTop = this.contentTop;
@@ -1108,6 +1066,9 @@ public class Lc2hConfigScreen extends Screen {
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (isRestartWarningActive()) {
+            return handleRestartWarningClick(mouseX, mouseY);
+        }
         if (controller.isBenchmarkRunning()) {
             return true;
         }
@@ -1116,6 +1077,12 @@ public class Lc2hConfigScreen extends Screen {
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (isRestartWarningActive()) {
+            if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
+                closeRestartWarning();
+            }
+            return true;
+        }
         if (controller.isBenchmarkRunning()) {
             if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
                 controller.requestUserCancelFromClient("User pressed ESC");
@@ -1135,6 +1102,181 @@ public class Lc2hConfigScreen extends Screen {
             return max;
         }
         return Math.max(min, Math.min(max, value));
+    }
+
+    private Lc2hConfigController.FormValues buildFormValues() {
+        return new Lc2hConfigController.FormValues(
+                blendWidthBox.getValue(),
+                blendSoftnessBox.getValue()
+        );
+    }
+
+    private void showRestartWarning(String optionTitle) {
+        if (optionTitle == null || optionTitle.isBlank()) {
+            restartWarningDetail = Component.literal("One or more changes need a restart to fully apply.");
+        } else {
+            restartWarningDetail = Component.literal(optionTitle + " needs a restart to fully apply.");
+        }
+        restartWarningVisible = true;
+    }
+
+    private void closeRestartWarning() {
+        restartWarningVisible = false;
+    }
+
+    private boolean isRestartWarningActive() {
+        return restartWarningProgress > 0.01f;
+    }
+
+    private boolean handleRestartWarningClick(double mouseX, double mouseY) {
+        if (isInRect(mouseX, mouseY, restartCloseRect)) {
+            controller.playClickSound();
+            Minecraft.getInstance().stop();
+            return true;
+        }
+        if (isInRect(mouseX, mouseY, restartLaterRect)) {
+            controller.playClickSound();
+            closeRestartWarning();
+            return true;
+        }
+        return true;
+    }
+
+    private void renderRestartWarning(GuiGraphics graphics, int mouseX, int mouseY) {
+        if (restartWarningProgress <= 0.01f) {
+            return;
+        }
+        float eased = 1f - (float) Math.pow(1f - restartWarningProgress, 3);
+        renderBlurOverlay(graphics, eased);
+
+        int modalWidth = Math.min(420, Math.max(280, this.contentWidth - 40));
+        int modalHeight = 170;
+        int baseX = (this.width - modalWidth) / 2;
+        int baseY = (this.height - modalHeight) / 2;
+
+        float scale = 0.9f + 0.1f * eased;
+        int drawWidth = Math.round(modalWidth * scale);
+        int drawHeight = Math.round(modalHeight * scale);
+        int drawX = baseX + (modalWidth - drawWidth) / 2;
+        int drawY = baseY + (modalHeight - drawHeight) / 2;
+
+        int borderColor = applyAlpha(0x3A86FF, eased);
+        int frameColor = applyAlpha(0x1A1A2E, eased);
+        int fillColor = applyAlpha(0x0A0A15, eased);
+
+        graphics.fill(drawX - 3, drawY - 3, drawX + drawWidth + 3, drawY + drawHeight + 3, applyAlpha(0x000000, eased * 0.35f));
+        graphics.fill(drawX - 2, drawY - 2, drawX + drawWidth + 2, drawY + drawHeight + 2, borderColor);
+        graphics.fill(drawX - 1, drawY - 1, drawX + drawWidth + 1, drawY + drawHeight + 1, frameColor);
+        graphics.fill(drawX, drawY, drawX + drawWidth, drawY + drawHeight, fillColor);
+
+        int titleColor = applyAlpha(0xFF6B6B, eased);
+        int glowColor = applyAlpha(0x552222, eased);
+        renderCenteredTextWithGlow(graphics, this.font, RESTART_WARNING_TITLE, drawX + drawWidth / 2, drawY + 16, titleColor, glowColor);
+
+        int textAreaWidth = drawWidth - 40;
+        List<FormattedCharSequence> lines = this.font.split(restartWarningDetail, textAreaWidth);
+        int textY = drawY + 42;
+        int textColor = applyAlpha(0xFFFFFF, eased);
+        for (FormattedCharSequence line : lines) {
+            graphics.drawString(this.font, line, drawX + 20, textY, textColor);
+            textY += this.font.lineHeight + 2;
+        }
+
+        int buttonWidth = 140;
+        int buttonHeight = 18;
+        int gap = 14;
+        int buttonsTotalWidth = buttonWidth * 2 + gap;
+        int buttonsX = drawX + (drawWidth - buttonsTotalWidth) / 2;
+        int buttonsY = drawY + drawHeight - buttonHeight - 18;
+
+        restartCloseRect[0] = buttonsX;
+        restartCloseRect[1] = buttonsY;
+        restartCloseRect[2] = buttonWidth;
+        restartCloseRect[3] = buttonHeight;
+        restartLaterRect[0] = buttonsX + buttonWidth + gap;
+        restartLaterRect[1] = buttonsY;
+        restartLaterRect[2] = buttonWidth;
+        restartLaterRect[3] = buttonHeight;
+
+        boolean overClose = isInRect(mouseX, mouseY, restartCloseRect);
+        boolean overLater = isInRect(mouseX, mouseY, restartLaterRect);
+        restartCloseHover += ((overClose ? 1f : 0f) - restartCloseHover) * 0.2f;
+        restartLaterHover += ((overLater ? 1f : 0f) - restartLaterHover) * 0.2f;
+
+        float pulse = 1f + (float) Math.sin(time * 0.08f) * 0.05f;
+        renderModalButton(graphics, restartCloseRect[0], restartCloseRect[1], restartCloseRect[2], restartCloseRect[3], restartCloseHover, pulse, eased);
+        renderModalButton(graphics, restartLaterRect[0], restartLaterRect[1], restartLaterRect[2], restartLaterRect[3], restartLaterHover, pulse, eased);
+
+        int buttonTextColor = applyAlpha(0xFFFFFF, eased);
+        graphics.drawCenteredString(this.font, RESTART_CLOSE_LABEL,
+                restartCloseRect[0] + restartCloseRect[2] / 2,
+                restartCloseRect[1] + (restartCloseRect[3] - this.font.lineHeight) / 2 + 1,
+                buttonTextColor);
+        graphics.drawCenteredString(this.font, RESTART_LATER_LABEL,
+                restartLaterRect[0] + restartLaterRect[2] / 2,
+                restartLaterRect[1] + (restartLaterRect[3] - this.font.lineHeight) / 2 + 1,
+                buttonTextColor);
+    }
+
+    private void renderBlurOverlay(GuiGraphics graphics, float alpha) {
+        int baseAlpha = Math.min(235, Math.round(210 * alpha));
+        graphics.fill(0, 0, this.width, this.height, (baseAlpha << 24) | 0x0A0A15);
+
+        int noiseAlpha = Math.max(0, Math.min(80, Math.round(55 * alpha)));
+        int step = 10;
+        int offset = (int) (time % step);
+        for (int y = 0; y < this.height; y += step) {
+            int lineAlpha = noiseAlpha + (((y + offset) % (step * 2) == 0) ? 18 : 6);
+            graphics.fill(0, y, this.width, Math.min(this.height, y + 2), (lineAlpha << 24) | 0x1A1A2E);
+        }
+        for (int x = 0; x < this.width; x += step) {
+            int lineAlpha = noiseAlpha + (((x + offset) % (step * 2) == 0) ? 16 : 4);
+            graphics.fill(x, 0, Math.min(this.width, x + 2), this.height, (lineAlpha << 24) | 0x151523);
+        }
+    }
+
+    private void renderModalButton(GuiGraphics graphics, int x, int y, int width, int height, float hover, float pulse, float alpha) {
+        int baseColor = adjustColorBrightness(0x1A1A2E, pulse);
+        int hoverColor = adjustColorBrightness(0x3A3A5E, pulse);
+        int accentColor = 0x3A86FF;
+
+        int currentColor = blendColors(baseColor, hoverColor, hover);
+        int border = applyAlpha(accentColor, alpha);
+        int fill = applyAlpha(currentColor, alpha);
+        int bg = applyAlpha(0x0A0A15, alpha * 0.8f);
+
+        int outerPadX = 2;
+        int outerPadY = 3;
+        int midPadX = 1;
+        int midPadY = 2;
+        int innerPadX = 0;
+        int innerPadY = 1;
+
+        graphics.fill(x - outerPadX, y - outerPadY, x + width + outerPadX, y + height + outerPadY, bg);
+        graphics.fill(x - midPadX, y - midPadY, x + width + midPadX, y + height + midPadY, border);
+        graphics.fill(x - innerPadX, y - innerPadY, x + width + innerPadX, y + height + innerPadY, fill);
+        graphics.fill(x, y, x + width, y + height, fill);
+
+        if (hover > 0.01f) {
+            int glowAlpha = (int)(hover * 90 * alpha);
+            for (int i = 0; i < 3; i++) {
+                int glowSize = i * 2;
+                int glowPadX = outerPadX + glowSize;
+                int glowPadY = outerPadY + glowSize;
+                graphics.fill(x - glowPadX, y - glowPadY,
+                        x + width + glowPadX, y + height + glowPadY,
+                        (glowAlpha / (i + 2) << 24) | (accentColor & 0xFFFFFF));
+            }
+        }
+    }
+
+    private int applyAlpha(int color, float alpha) {
+        int a = Math.max(0, Math.min(255, Math.round(alpha * 255)));
+        return (a << 24) | (color & 0xFFFFFF);
+    }
+
+    private boolean isInRect(double mouseX, double mouseY, int[] rect) {
+        return mouseX >= rect[0] && mouseX < rect[0] + rect[2] && mouseY >= rect[1] && mouseY < rect[1] + rect[3];
     }
 
     @Override

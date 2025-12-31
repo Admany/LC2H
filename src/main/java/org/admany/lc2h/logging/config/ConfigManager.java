@@ -17,7 +17,6 @@ public class ConfigManager {
     public static boolean ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER = true;
     public static boolean ENABLE_LOSTCITIES_GENERATION_LOCK = true;
     public static boolean ENABLE_LOSTCITIES_PART_SLICE_COMPAT = true;
-    public static boolean ENABLE_SCATTERED_PARTS2_OVERLAY_FIX = true;
     public static boolean CITY_BLEND_ENABLED = true;
     public static int CITY_BLEND_WIDTH = 36;
     public static double CITY_BLEND_SOFTNESS = 1.4;
@@ -46,7 +45,6 @@ public class ConfigManager {
         public boolean enableAsyncDoubleBlockBatcher = true;
         public boolean enableLostCitiesGenerationLock = true;
         public boolean enableLostCitiesPartSliceCompat = true;
-        public boolean enableScatteredParts2OverlayFix = true;
         public boolean enableCacheStatsLogging = true;
         public boolean enableFloatingVegetationRemoval = true;
         public boolean enableExplosionDebris = false;
@@ -132,7 +130,6 @@ public class ConfigManager {
         comments.put("enableAsyncDoubleBlockBatcher", "Enable async batching for double blocks");
         comments.put("enableLostCitiesGenerationLock", "Recommended: serialize nearby Lost Cities chunk-gen to avoid bugged/duplicated chunks (may reduce max throughput)");
         comments.put("enableLostCitiesPartSliceCompat", "Recommended: prevent crashes from broken/invalid Lost Cities building parts (safe bounds checks)");
-        comments.put("enableScatteredParts2OverlayFix", "Recommended: fix scattered buildings parts2 being placed one floor too high (prevents stacked duplicate copies)");
         comments.put("enableCacheStatsLogging", "Enable cache stats logging");
         comments.put("enableFloatingVegetationRemoval", "Enable removal of floating vegetation after terrain generation");
         comments.put("enableExplosionDebris", "Enable Lost Cities explosion debris spill into adjacent chunks (can add rubble around streets)");
@@ -166,7 +163,6 @@ public class ConfigManager {
                 "enableAsyncDoubleBlockBatcher",
                 "enableLostCitiesGenerationLock",
                 "enableLostCitiesPartSliceCompat",
-                "enableScatteredParts2OverlayFix",
                 "enableCacheStatsLogging",
                 "enableFloatingVegetationRemoval",
                 "enableExplosionDebris",
@@ -255,7 +251,6 @@ public class ConfigManager {
         ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER = CONFIG.enableAsyncDoubleBlockBatcher;
         ENABLE_LOSTCITIES_GENERATION_LOCK = CONFIG.enableLostCitiesGenerationLock;
         ENABLE_LOSTCITIES_PART_SLICE_COMPAT = CONFIG.enableLostCitiesPartSliceCompat;
-        ENABLE_SCATTERED_PARTS2_OVERLAY_FIX = CONFIG.enableScatteredParts2OverlayFix;
         ENABLE_CACHE_STATS_LOGGING = CONFIG.enableCacheStatsLogging;
         ENABLE_FLOATING_VEGETATION_REMOVAL = CONFIG.enableFloatingVegetationRemoval;
         ENABLE_EXPLOSION_DEBRIS = CONFIG.enableExplosionDebris;

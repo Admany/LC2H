@@ -5,6 +5,9 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.player.Player;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.level.ChunkEvent;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.admany.lc2h.LC2H;
@@ -193,6 +196,19 @@ public class MainThreadChunkApplier {
         if (event.phase == TickEvent.Phase.END) {
             drain(server);
         }
+    }
+
+    @SubscribeEvent
+    public static void onChunkUnload(ChunkEvent.Unload event) {
+        if (!(event.getChunk() instanceof LevelChunk chunk)) {
+            return;
+        }
+        if (!(event.getLevel() instanceof ServerLevel level)) {
+            return;
+        }
+        ChunkCoord coord = new ChunkCoord(level.dimension(), chunk.getPos().x, chunk.getPos().z);
+        APPLIED_CHUNKS.remove(coord);
+        ENQUEUED_CHUNKS.remove(coord);
     }
 
     private static void drain(MinecraftServer server) {

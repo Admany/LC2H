@@ -27,7 +27,10 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+import java.util.Map;
 
 record RegionProviderPair(IDimensionInfo provider, RegionCoord region) {}
 
@@ -44,7 +47,8 @@ public final class AsyncChunkWarmup {
     private static final long PREFETCH_COOLDOWN_MS = 5000;
     private static final int MAX_CONCURRENT_BATCHES = 1;
 
-    private static final ConcurrentHashMap<RegionCoord, Boolean> PRE_SCHEDULE_CACHE = new ConcurrentHashMap<>();
+    // Encoded timestamps (sign bit indicates GPU-ready schedule).
+    private static final ConcurrentHashMap<RegionCoord, Long> PRE_SCHEDULE_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentLinkedQueue<RegionProviderPair> REGION_BUFFER = new ConcurrentLinkedQueue<>();
     private static final AtomicBoolean flushScheduled = new AtomicBoolean(false);
 
@@ -61,10 +65,16 @@ public final class AsyncChunkWarmup {
     private static final AtomicReference<String> lastOpenClStatusKey = new AtomicReference<>("");
     private static final AtomicBoolean openClProbeStarted = new AtomicBoolean(false);
     private static volatile boolean gpuReadyOnce = false;
+    private static final AtomicBoolean gpuAvailabilityListenerRegistered = new AtomicBoolean(false);
     private static final AtomicBoolean warmupRetryScheduled = new AtomicBoolean(false);
     private static volatile java.util.concurrent.ScheduledExecutorService warmupRetryExecutor;
     private static final long WARMUP_RETRY_DELAY_MS = 3_000L;
     private static final boolean GPU_ENABLED = Boolean.parseBoolean(System.getProperty("lc2h.gpu.enable", "true"));
+    private static final long PRE_SCHEDULE_TTL_MS = Math.max(0L, Long.getLong("lc2h.warmup.preScheduleTtlMs", TimeUnit.MINUTES.toMillis(10)));
+    private static final int PRE_SCHEDULE_PRUNE_SCAN = Math.max(10, Integer.getInteger("lc2h.warmup.preSchedulePruneScan", 512));
+    private static final int PRE_SCHEDULE_PRUNE_EVERY = Math.max(10, Integer.getInteger("lc2h.warmup.preSchedulePruneEvery", 512));
+    private static final AtomicInteger preScheduleOps = new AtomicInteger(0);
+    private static final long GPU_READY_FLAG = Long.MIN_VALUE;
 
     private AsyncChunkWarmup() {
     }
@@ -80,13 +90,22 @@ public final class AsyncChunkWarmup {
             }
             return;
         }
+        if (!QuantifiedOpenCL.isGpuReady()) {
+            if (gpuAvailabilityListenerRegistered.compareAndSet(false, true)) {
+                QuantifiedOpenCL.registerGpuAvailabilityListener(AsyncChunkWarmup::onGpuAvailable);
+            }
+            if (!fromRetry) {
+                LC2H.LOGGER.info("LC2H: Deferring GPU warmup until Quantified probe confirms availability");
+            }
+            logOpenClStatusMaybe("initializeGpuWarmup");
+            return;
+        }
         ensureOpenClProbeScheduled();
         if (!isOpenClAvailable()) {
             if (!fromRetry) {
                 LC2H.LOGGER.info("LC2H: Deferring GPU warmup until Quantified OpenCL is available");
             }
             logOpenClStatusMaybe("initializeGpuWarmup");
-            scheduleWarmupRetry();
             return;
         }
         try {
@@ -97,13 +116,15 @@ public final class AsyncChunkWarmup {
                     LC2H.LOGGER.info("LC2H: GPU warmup initialized successfully");
                 } else {
                     LC2H.LOGGER.info("LC2H: GPU warmup initialization deferred (OpenCL not available yet)");
-                    scheduleWarmupRetry();
                 }
             }
         } catch (Throwable t) {
             LC2H.LOGGER.warn("LC2H: Failed to initialize GPU warmup: {}", t.getMessage());
-            scheduleWarmupRetry();
         }
+    }
+
+    private static void onGpuAvailable() {
+        initializeGpuWarmup(true);
     }
 
     public static boolean isWarmupDebugLoggingEnabled() {
@@ -112,7 +133,20 @@ public final class AsyncChunkWarmup {
 
     public static boolean isPreScheduled(ChunkCoord center) {
         RegionCoord region = RegionCoord.fromChunk(center);
-        return PRE_SCHEDULE_CACHE.containsKey(region);
+        Long cached = PRE_SCHEDULE_CACHE.get(region);
+        if (cached == null) {
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        if (isExpired(cached, now)) {
+            PRE_SCHEDULE_CACHE.remove(region, cached);
+            return false;
+        }
+        if (isGpuReadyFlag(cached)) {
+            return true;
+        }
+        // If GPU is ready now and this region was only CPU-scheduled earlier, allow a GPU reschedule.
+        return !isOpenClAvailable();
     }
 
     public static void preSchedule(IDimensionInfo provider, ChunkCoord center) {
@@ -146,15 +180,41 @@ public final class AsyncChunkWarmup {
 
         RegionCoord region = RegionCoord.fromChunk(center);
 
-        if (PRE_SCHEDULE_CACHE.putIfAbsent(region, Boolean.TRUE) != null) {
+        long now = System.currentTimeMillis();
+        maybePrunePreScheduleCache(now);
+        boolean gpuReady = isOpenClAvailable();
+        java.util.concurrent.atomic.AtomicBoolean shouldSchedule = new java.util.concurrent.atomic.AtomicBoolean(false);
+        PRE_SCHEDULE_CACHE.compute(region, (key, existing) -> {
+            if (existing == null) {
+                shouldSchedule.set(true);
+                return encodeTimestamp(now, gpuReady);
+            }
+            if (isExpired(existing, now)) {
+                shouldSchedule.set(true);
+                return encodeTimestamp(now, gpuReady);
+            }
+            if (isGpuReadyFlag(existing)) {
+                return existing;
+            }
+            if (gpuReady) {
+                shouldSchedule.set(true);
+                return encodeTimestamp(now, true);
+            }
+            return existing;
+        });
+
+        if (!shouldSchedule.get()) {
             cacheHits.incrementAndGet();
             if (VERBOSE_LOGGING) {
-                LC2H.LOGGER.debug("Skipping preSchedule for region {} (already cached)", region);
+                LC2H.LOGGER.debug("Skipping preSchedule for region {} (cached, gpuReady={})", region, gpuReady);
             }
             return;
         }
 
         cacheMisses.incrementAndGet();
+        if (VERBOSE_LOGGING && gpuReady) {
+            LC2H.LOGGER.debug("Scheduling region {} with GPU-ready warmup", region);
+        }
 
         REGION_BUFFER.add(new RegionProviderPair(provider, region));
 
@@ -377,6 +437,9 @@ public final class AsyncChunkWarmup {
     }
 
     private static boolean isOpenClAvailable() {
+        if (QuantifiedOpenCL.isGpuReady()) {
+            return true;
+        }
         try {
             return OpenCLManager.isAvailable();
         } catch (Throwable t) {
@@ -579,6 +642,31 @@ public final class AsyncChunkWarmup {
         return cacheMisses.get();
     }
 
+    public static int pruneExpiredEntries() {
+        return pruneExpiredEntries(System.currentTimeMillis());
+    }
+
+    private static int pruneExpiredEntries(long now) {
+        if (PRE_SCHEDULE_TTL_MS <= 0 || PRE_SCHEDULE_CACHE.isEmpty()) {
+            return 0;
+        }
+        int removed = 0;
+        int scanned = 0;
+        for (Map.Entry<RegionCoord, Long> entry : PRE_SCHEDULE_CACHE.entrySet()) {
+            if (PRE_SCHEDULE_PRUNE_SCAN > 0 && scanned >= PRE_SCHEDULE_PRUNE_SCAN) {
+                break;
+            }
+            scanned++;
+            Long value = entry.getValue();
+            if (value != null && isExpired(value, now)) {
+                if (PRE_SCHEDULE_CACHE.remove(entry.getKey(), value)) {
+                    removed++;
+                }
+            }
+        }
+        return removed;
+    }
+
     public static void shutdown() {
         REGION_BUFFER.clear();
         PRE_SCHEDULE_CACHE.clear();
@@ -589,5 +677,36 @@ public final class AsyncChunkWarmup {
         if (executor != null) {
             executor.shutdownNow();
         }
+    }
+
+    private static long encodeTimestamp(long nowMs, boolean gpuReady) {
+        long ts = nowMs & Long.MAX_VALUE;
+        return gpuReady ? (ts | GPU_READY_FLAG) : ts;
+    }
+
+    private static boolean isGpuReadyFlag(long encoded) {
+        return (encoded & GPU_READY_FLAG) != 0;
+    }
+
+    private static boolean isExpired(long encoded, long nowMs) {
+        if (PRE_SCHEDULE_TTL_MS <= 0) {
+            return false;
+        }
+        long ts = encoded & Long.MAX_VALUE;
+        return (nowMs - ts) > PRE_SCHEDULE_TTL_MS;
+    }
+
+    private static void maybePrunePreScheduleCache(long nowMs) {
+        if (PRE_SCHEDULE_TTL_MS <= 0) {
+            return;
+        }
+        int ops = preScheduleOps.incrementAndGet();
+        if (ops < PRE_SCHEDULE_PRUNE_EVERY) {
+            return;
+        }
+        if (!preScheduleOps.compareAndSet(ops, 0)) {
+            return;
+        }
+        pruneExpiredEntries(nowMs);
     }
 }

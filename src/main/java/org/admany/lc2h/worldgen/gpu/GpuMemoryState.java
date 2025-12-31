@@ -635,6 +635,18 @@ final class GpuMemoryState {
         }
     }
 
+    static long getCurrentMemoryBytes() {
+        synchronized (MEMORY_LOCK) {
+            return currentMemoryBytes;
+        }
+    }
+
+    static int getCurrentEntryCount() {
+        synchronized (MEMORY_LOCK) {
+            return MEMORY_SIZES.size();
+        }
+    }
+
     static void clearQuantifiedAPICaches() {
         try {
             CacheManager.clearAllCaches();

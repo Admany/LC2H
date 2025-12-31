@@ -33,6 +33,22 @@ public final class GPUMemoryManager {
         return GpuMemoryState.getMemoryStats();
     }
 
+    public static long getCachedBytes() {
+        return GpuMemoryState.getCurrentMemoryBytes();
+    }
+
+    public static int getCachedEntryCount() {
+        return GpuMemoryState.getCurrentEntryCount();
+    }
+
+    public static long getDiskCacheEntryCount() {
+        return GpuDiskCache.getBackingCacheEntryCount();
+    }
+
+    public static long getDiskCacheBytes() {
+        return GpuDiskCache.estimateBackingCacheBytes();
+    }
+
     public static void continuousCleanup() {
         GpuMemoryState.continuousCleanup();
     }

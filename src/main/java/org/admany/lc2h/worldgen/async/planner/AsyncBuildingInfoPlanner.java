@@ -11,14 +11,24 @@ import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.quantified.core.common.parallel.config.ParallelConfig;
 import org.admany.quantified.core.common.parallel.metrics.ParallelMetrics;
 
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class AsyncBuildingInfoPlanner {
 
     private static final ConcurrentHashMap<ChunkCoord, Object> BUILDING_INFO_CACHE = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<ChunkCoord, Long> BUILDING_INFO_CACHE_TS = new ConcurrentHashMap<>();
+    private static final long BUILDING_INFO_CACHE_TTL_MS = Math.max(30_000L,
+        Long.getLong("lc2h.buildinginfo.cacheTtlMs", TimeUnit.MINUTES.toMillis(20)));
+    private static final int BUILDING_INFO_CACHE_PRUNE_SCAN = Math.max(128,
+        Integer.getInteger("lc2h.buildinginfo.cachePruneScan", 512));
+    private static final int BUILDING_INFO_CACHE_PRUNE_EVERY = Math.max(64,
+        Integer.getInteger("lc2h.buildinginfo.cachePruneEvery", 128));
+    private static final AtomicInteger BUILDING_INFO_PRUNE_COUNTER = new AtomicInteger(0);
     private static final long FAILURE_RETRY_DELAY_NS = TimeUnit.SECONDS.toNanos(5);
 
     private static final class InFlightMarker {
@@ -59,12 +69,14 @@ public final class AsyncBuildingInfoPlanner {
         Objects.requireNonNull(provider, "provider");
         Objects.requireNonNull(coord, "coord");
 
-        Object existing = BUILDING_INFO_CACHE.get(coord);
+        long now = System.currentTimeMillis();
+        Object existing = getCachedEntry(coord, now);
         if (existing != null) {
             if (existing instanceof FailureMarker fm) {
-                long now = System.nanoTime();
-                if (fm.canRetry(now)) {
+                long nowNs = System.nanoTime();
+                if (fm.canRetry(nowNs)) {
                     BUILDING_INFO_CACHE.remove(coord, existing);
+                    BUILDING_INFO_CACHE_TS.remove(coord);
                 } else {
                     return;
                 }
@@ -79,6 +91,8 @@ public final class AsyncBuildingInfoPlanner {
         if (BUILDING_INFO_CACHE.putIfAbsent(coord, new InFlightMarker()) != null) {
             return;
         }
+        BUILDING_INFO_CACHE_TS.put(coord, now);
+        maybePrune(now);
 
         boolean debugLogging = AsyncChunkWarmup.isWarmupDebugLoggingEnabled();
 
@@ -99,14 +113,16 @@ public final class AsyncBuildingInfoPlanner {
     }
 
     public static Object getIfReady(ChunkCoord coord) {
-        Object cached = BUILDING_INFO_CACHE.get(coord);
+        long now = System.currentTimeMillis();
+        Object cached = getCachedEntry(coord, now);
         if (cached == null) {
             return null;
         }
         if (cached instanceof FailureMarker fm) {
-            long now = System.nanoTime();
-            if (fm.canRetry(now)) {
+            long nowNs = System.nanoTime();
+            if (fm.canRetry(nowNs)) {
                 BUILDING_INFO_CACHE.remove(coord, cached);
+                BUILDING_INFO_CACHE_TS.remove(coord);
             }
             return null;
         }
@@ -114,6 +130,7 @@ public final class AsyncBuildingInfoPlanner {
             return null;
         }
         if (cached instanceof mcjty.lostcities.worldgen.lost.BuildingInfo) {
+            touchTimestamp(coord, now);
             return cached;
         }
         // Defensive: don't ever expose sentinel values to callers.
@@ -124,12 +141,14 @@ public final class AsyncBuildingInfoPlanner {
         Objects.requireNonNull(provider, "provider");
         Objects.requireNonNull(coord, "coord");
 
-        Object existing = BUILDING_INFO_CACHE.get(coord);
+        long now = System.currentTimeMillis();
+        Object existing = getCachedEntry(coord, now);
         if (existing != null) {
             if (existing instanceof FailureMarker fm) {
-                long now = System.nanoTime();
-                if (fm.canRetry(now)) {
+                long nowNs = System.nanoTime();
+                if (fm.canRetry(nowNs)) {
                     BUILDING_INFO_CACHE.remove(coord, existing);
+                    BUILDING_INFO_CACHE_TS.remove(coord);
                 } else {
                     return;
                 }
@@ -157,16 +176,18 @@ public final class AsyncBuildingInfoPlanner {
             token.close();
             return;
         }
+        BUILDING_INFO_CACHE_TS.put(coord, now);
+        maybePrune(now);
 
         long startNs = System.nanoTime();
         try {
             INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() + 1);
             mcjty.lostcities.worldgen.lost.BuildingInfo.getChunkCharacteristics(coord, provider);
             Object buildingInfo = mcjty.lostcities.worldgen.lost.BuildingInfo.getBuildingInfo(coord, provider);
-            BUILDING_INFO_CACHE.put(coord, buildingInfo);
+            putCachedEntry(coord, buildingInfo, System.currentTimeMillis());
         } catch (Throwable t) {
             LC2H.LOGGER.warn("Sync building info warmup failed for {}: {}", coord, t.getMessage());
-            BUILDING_INFO_CACHE.put(coord, new FailureMarker(System.nanoTime() + FAILURE_RETRY_DELAY_NS));
+            putCachedEntry(coord, new FailureMarker(System.nanoTime() + FAILURE_RETRY_DELAY_NS), System.currentTimeMillis());
         } finally {
             INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() - 1);
             recordTiming(System.nanoTime() - startNs);
@@ -194,6 +215,7 @@ public final class AsyncBuildingInfoPlanner {
             for (int dz = 0; dz < areaSize; dz++) {
                 ChunkCoord key = new ChunkCoord(topLeft.dimension(), topLeft.chunkX() + dx, topLeft.chunkZ() + dz);
                 BUILDING_INFO_CACHE.remove(key);
+                BUILDING_INFO_CACHE_TS.remove(key);
                 GPU_DATA_CACHE.remove(key);
             }
         }
@@ -206,6 +228,7 @@ public final class AsyncBuildingInfoPlanner {
             PlannerBatchQueue.flushKind(PlannerTaskKind.BUILDING_INFO);
 
             BUILDING_INFO_CACHE.clear();
+            BUILDING_INFO_CACHE_TS.clear();
             GPU_DATA_CACHE.clear();
 
             LC2H.LOGGER.info("AsyncBuildingInfoPlanner: Shutdown complete");
@@ -222,14 +245,14 @@ public final class AsyncBuildingInfoPlanner {
             INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() + 1);
             mcjty.lostcities.worldgen.lost.BuildingInfo.getChunkCharacteristics(coord, provider);
             Object buildingInfo = mcjty.lostcities.worldgen.lost.BuildingInfo.getBuildingInfo(coord, provider);
-            BUILDING_INFO_CACHE.put(coord, buildingInfo);
+            putCachedEntry(coord, buildingInfo, System.currentTimeMillis());
             if (debugLogging) {
                 long endTime = System.nanoTime();
                 LC2H.LOGGER.debug("Finished BuildingInfo compute for {} in {} ms", coord, (endTime - startTime) / 1_000_000);
             }
         } catch (Throwable t) {
             LC2H.LOGGER.warn("Async building info warmup failed for {}: {}", coord, t.getMessage());
-            BUILDING_INFO_CACHE.put(coord, new FailureMarker(System.nanoTime() + FAILURE_RETRY_DELAY_NS));
+            putCachedEntry(coord, new FailureMarker(System.nanoTime() + FAILURE_RETRY_DELAY_NS), System.currentTimeMillis());
         } finally {
             INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() - 1);
             recordTiming(System.nanoTime() - startNs);
@@ -317,5 +340,83 @@ public final class AsyncBuildingInfoPlanner {
         }
 
         LIMITER.setLimit(desired);
+    }
+
+    public static void pruneExpiredEntries() {
+        pruneExpiredEntries(System.currentTimeMillis(), BUILDING_INFO_CACHE_PRUNE_SCAN);
+    }
+
+    private static Object getCachedEntry(ChunkCoord coord, long nowMs) {
+        Object cached = BUILDING_INFO_CACHE.get(coord);
+        if (cached == null) {
+            return null;
+        }
+        if (!isFresh(coord, nowMs)) {
+            BUILDING_INFO_CACHE.remove(coord, cached);
+            BUILDING_INFO_CACHE_TS.remove(coord);
+            return null;
+        }
+        return cached;
+    }
+
+    private static void putCachedEntry(ChunkCoord coord, Object value, long nowMs) {
+        if (coord == null) {
+            return;
+        }
+        if (value == null) {
+            BUILDING_INFO_CACHE.remove(coord);
+            BUILDING_INFO_CACHE_TS.remove(coord);
+            return;
+        }
+        BUILDING_INFO_CACHE.put(coord, value);
+        BUILDING_INFO_CACHE_TS.put(coord, nowMs);
+        maybePrune(nowMs);
+    }
+
+    private static void touchTimestamp(ChunkCoord coord, long nowMs) {
+        if (coord == null) {
+            return;
+        }
+        if (BUILDING_INFO_CACHE_TS.containsKey(coord)) {
+            BUILDING_INFO_CACHE_TS.put(coord, nowMs);
+        }
+    }
+
+    private static boolean isFresh(ChunkCoord coord, long nowMs) {
+        if (BUILDING_INFO_CACHE_TTL_MS <= 0L) {
+            return true;
+        }
+        Long ts = BUILDING_INFO_CACHE_TS.get(coord);
+        return ts != null && (nowMs - ts) <= BUILDING_INFO_CACHE_TTL_MS;
+    }
+
+    private static void maybePrune(long nowMs) {
+        if (BUILDING_INFO_CACHE_TTL_MS <= 0L) {
+            return;
+        }
+        int count = BUILDING_INFO_PRUNE_COUNTER.incrementAndGet();
+        if (count >= BUILDING_INFO_CACHE_PRUNE_EVERY) {
+            BUILDING_INFO_PRUNE_COUNTER.set(0);
+            pruneExpiredEntries(nowMs, BUILDING_INFO_CACHE_PRUNE_SCAN);
+        }
+    }
+
+    private static void pruneExpiredEntries(long nowMs, int maxScan) {
+        if (BUILDING_INFO_CACHE_TS.isEmpty() || BUILDING_INFO_CACHE_TTL_MS <= 0L) {
+            return;
+        }
+        int scanned = 0;
+        for (Map.Entry<ChunkCoord, Long> entry : BUILDING_INFO_CACHE_TS.entrySet()) {
+            if (maxScan > 0 && scanned >= maxScan) {
+                break;
+            }
+            scanned++;
+            Long ts = entry.getValue();
+            if (ts != null && (nowMs - ts) > BUILDING_INFO_CACHE_TTL_MS) {
+                ChunkCoord key = entry.getKey();
+                BUILDING_INFO_CACHE_TS.remove(key, ts);
+                BUILDING_INFO_CACHE.remove(key);
+            }
+        }
     }
 }

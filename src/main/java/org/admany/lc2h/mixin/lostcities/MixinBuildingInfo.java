@@ -20,6 +20,7 @@ import net.minecraft.world.level.LevelReader;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.WorldGenLevel;
 import org.objectweb.asm.Opcodes;
+import org.admany.lc2h.diagnostics.ChunkGenTracker;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
@@ -496,6 +497,10 @@ public abstract class MixinBuildingInfo {
             try {
                 BuildingInfo created = lc2h$create(key, provider);
                 LC2H_BUILDING_INFO_MAP.put(key, created);
+                try {
+                    ChunkGenTracker.recordBuildingInfo(created);
+                } catch (Throwable ignored) {
+                }
                 return created;
             } catch (Throwable t) {
                 // Don't cache failures. Log with coords/dim for easier diagnosis.

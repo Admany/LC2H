@@ -47,7 +47,7 @@ public class MixinLostCityFeature {
 	        }
 	    }
 
-    @Inject(method = "place", at = @At("HEAD"), remap = true)
+    @Inject(method = "place", at = @At("HEAD"), remap = true, cancellable = true)
     private void lc2h$warmupFeature(FeaturePlaceContext<?> context, CallbackInfoReturnable<Boolean> cir) {
         WorldGenLevel level = context.level();
         if (!(level instanceof WorldGenRegion region)) {
@@ -69,21 +69,21 @@ public class MixinLostCityFeature {
             center.z
         );
 
-        if (LostCityFeatureGuards.PLACED_CHUNKS.containsKey(coord)) {
+        long now = System.currentTimeMillis();
+        if (LostCityFeatureGuards.isPlacedRecently(coord, now)) {
             if (LostCityFeatureGuards.TRACE_PLACE) {
-                org.admany.lc2h.LC2H.LOGGER.info("[LC2H] LostCityFeature.place skipped (already placed) coord={} thread={}", coord, Thread.currentThread().getName());
+                org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityFeature.place skipped (already placed) coord={} thread={}", coord, Thread.currentThread().getName());
             }
             cir.setReturnValue(true);
             cir.cancel();
             return;
         }
 
-        long now = System.currentTimeMillis();
         Long inFlight = LostCityFeatureGuards.IN_FLIGHT_PLACE_MS.putIfAbsent(coord, now);
         if (inFlight != null) {
             if ((now - inFlight) < LostCityFeatureGuards.PLACE_GUARD_MS) {
                 if (LostCityFeatureGuards.TRACE_PLACE) {
-                    org.admany.lc2h.LC2H.LOGGER.info("[LC2H] LostCityFeature.place skipped (in-flight) coord={} thread={}", coord, Thread.currentThread().getName());
+                    org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityFeature.place skipped (in-flight) coord={} thread={}", coord, Thread.currentThread().getName());
                 }
                 cir.setReturnValue(true);
                 cir.cancel();
@@ -91,18 +91,18 @@ public class MixinLostCityFeature {
             }
             LostCityFeatureGuards.IN_FLIGHT_PLACE_MS.put(coord, now);
         }
-        Long last = LostCityFeatureGuards.LAST_SUCCESSFUL_PLACE_MS.get(coord);
+        Long last = LostCityFeatureGuards.getLastSuccess(coord, now);
         if (last != null && (now - last) < LostCityFeatureGuards.PLACE_GUARD_MS) {
             LostCityFeatureGuards.IN_FLIGHT_PLACE_MS.remove(coord);
             if (LostCityFeatureGuards.TRACE_PLACE) {
-                org.admany.lc2h.LC2H.LOGGER.info("[LC2H] LostCityFeature.place skipped (recent) coord={} thread={}", coord, Thread.currentThread().getName());
+                org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityFeature.place skipped (recent) coord={} thread={}", coord, Thread.currentThread().getName());
             }
             cir.setReturnValue(true);
             cir.cancel();
             return;
         }
         if (LostCityFeatureGuards.TRACE_PLACE) {
-            org.admany.lc2h.LC2H.LOGGER.info("[LC2H] LostCityFeature.place begin coord={} thread={}", coord, Thread.currentThread().getName());
+            org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityFeature.place begin coord={} thread={}", coord, Thread.currentThread().getName());
         }
 
         if (!AsyncChunkWarmup.isPreScheduled(coord)) {
@@ -144,10 +144,9 @@ public class MixinLostCityFeature {
         ChunkPos center = region.getCenter();
         ChunkCoord coord = new ChunkCoord(provider.getType(), center.x, center.z);
         LostCityFeatureGuards.IN_FLIGHT_PLACE_MS.remove(coord);
-        LostCityFeatureGuards.PLACED_CHUNKS.put(coord, Boolean.TRUE);
-        LostCityFeatureGuards.LAST_SUCCESSFUL_PLACE_MS.put(coord, System.currentTimeMillis());
+        LostCityFeatureGuards.markPlaced(coord, System.currentTimeMillis());
         if (LostCityFeatureGuards.TRACE_PLACE) {
-            org.admany.lc2h.LC2H.LOGGER.info("[LC2H] LostCityFeature.place end coord={} thread={}", coord, Thread.currentThread().getName());
+            org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityFeature.place end coord={} thread={}", coord, Thread.currentThread().getName());
         }
 
         try {

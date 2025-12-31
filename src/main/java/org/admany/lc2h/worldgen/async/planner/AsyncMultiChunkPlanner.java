@@ -608,8 +608,8 @@ public final class AsyncMultiChunkPlanner {
 
         org.admany.lc2h.async.AsyncManager.submitTask("warmBuildingInfo", () -> warmBuildingInfo(provider, multiChunk), null, org.admany.lc2h.async.Priority.LOW)
             .whenComplete((ignored, throwable) -> {
+                WARM_BUILDING_INFO_SUBMITTED.remove(multiCoord);
                 if (throwable != null) {
-                    WARM_BUILDING_INFO_SUBMITTED.remove(multiCoord);
                     LC2H.LOGGER.error("Warm building info failed for {}: {}", multiCoord, throwable.getMessage());
                 }
             });

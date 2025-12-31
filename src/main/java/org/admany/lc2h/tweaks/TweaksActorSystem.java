@@ -10,12 +10,19 @@ import java.lang.reflect.Field;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 public final class TweaksActorSystem {
 
     private static final ConcurrentHashMap<ComputationRequestKey, CompletableFuture<ComputationResult>> IN_FLIGHT = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<ComputationRequestKey, ComputationResult> VALIDATED_RESULTS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<ComputationRequestKey, Long> VALIDATED_TS = new ConcurrentHashMap<>();
+    private static final long VALIDATED_TTL_MS = Math.max(0L, Long.getLong("lc2h.tweaks.validatedTtlMs", TimeUnit.MINUTES.toMillis(10)));
+    private static final int VALIDATED_PRUNE_SCAN = Math.max(10, Integer.getInteger("lc2h.tweaks.validatedPruneScan", 512));
+    private static final int VALIDATED_PRUNE_EVERY = Math.max(10, Integer.getInteger("lc2h.tweaks.validatedPruneEvery", 512));
+    private static final AtomicInteger validatedOps = new AtomicInteger(0);
 
     private TweaksActorSystem() {
     }
@@ -30,12 +37,14 @@ public final class TweaksActorSystem {
                             throw new IllegalStateException("Rejected async result for " + describe(key));
                         }
                         VALIDATED_RESULTS.put(key, result);
+                        VALIDATED_TS.put(key, System.currentTimeMillis());
                         return result;
                     });
 
             future.whenComplete((res, err) -> {
                 if (err != null) {
                     VALIDATED_RESULTS.remove(key);
+                    VALIDATED_TS.remove(key);
                 }
                 IN_FLIGHT.remove(key, future);
             });
@@ -105,10 +114,29 @@ public final class TweaksActorSystem {
     }
 
     public static Optional<ComputationResult> getValidatedResult(ComputationRequestKey key) {
-        return Optional.ofNullable(VALIDATED_RESULTS.get(key));
+        if (key == null) {
+            return Optional.empty();
+        }
+        long now = System.currentTimeMillis();
+        if (VALIDATED_TTL_MS > 0) {
+            Long ts = VALIDATED_TS.get(key);
+            if (ts == null || (now - ts) > VALIDATED_TTL_MS) {
+                VALIDATED_RESULTS.remove(key);
+                VALIDATED_TS.remove(key);
+                return Optional.empty();
+            }
+        }
+        ComputationResult result = VALIDATED_RESULTS.get(key);
+        if (result != null && VALIDATED_TTL_MS > 0) {
+            VALIDATED_TS.put(key, now);
+        }
+        maybePruneValidated(now);
+        return Optional.ofNullable(result);
     }
 
     public static void shutdown() {
+        VALIDATED_RESULTS.clear();
+        VALIDATED_TS.clear();
     }
 
     public static int getInFlightCount() {
@@ -117,6 +145,47 @@ public final class TweaksActorSystem {
 
     public static int getValidatedCount() {
         return VALIDATED_RESULTS.size();
+    }
+
+    public static int pruneExpiredEntries() {
+        return pruneExpiredEntries(System.currentTimeMillis());
+    }
+
+    private static int pruneExpiredEntries(long now) {
+        if (VALIDATED_TTL_MS <= 0 || VALIDATED_TS.isEmpty()) {
+            return 0;
+        }
+        int removed = 0;
+        int scanned = 0;
+        for (var entry : VALIDATED_TS.entrySet()) {
+            if (VALIDATED_PRUNE_SCAN > 0 && scanned >= VALIDATED_PRUNE_SCAN) {
+                break;
+            }
+            scanned++;
+            Long ts = entry.getValue();
+            if (ts != null && (now - ts) > VALIDATED_TTL_MS) {
+                ComputationRequestKey key = entry.getKey();
+                if (VALIDATED_TS.remove(key, ts)) {
+                    VALIDATED_RESULTS.remove(key);
+                    removed++;
+                }
+            }
+        }
+        return removed;
+    }
+
+    private static void maybePruneValidated(long now) {
+        if (VALIDATED_TTL_MS <= 0) {
+            return;
+        }
+        int ops = validatedOps.incrementAndGet();
+        if (ops < VALIDATED_PRUNE_EVERY) {
+            return;
+        }
+        if (!validatedOps.compareAndSet(ops, 0)) {
+            return;
+        }
+        pruneExpiredEntries(now);
     }
 
     private static String describe(ComputationRequestKey key) {

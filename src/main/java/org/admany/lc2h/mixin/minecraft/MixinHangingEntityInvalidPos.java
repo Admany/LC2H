@@ -24,8 +24,17 @@ public abstract class MixinHangingEntityInvalidPos extends Entity {
     @Shadow
     public abstract boolean survives();
 
-    @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
+    @Inject(method = "tick", at = @At("HEAD"), cancellable = true, require = 0)
     private void lc2h$skipInvalidHangingEntityLog(CallbackInfo ci) {
+        handleInvalidHangingEntity(ci);
+    }
+
+    @Inject(method = "m_8119_", at = @At("HEAD"), cancellable = true, require = 0, remap = false)
+    private void lc2h$skipInvalidHangingEntityLogSrg(CallbackInfo ci) {
+        handleInvalidHangingEntity(ci);
+    }
+
+    private void handleInvalidHangingEntity(CallbackInfo ci) {
         Level level = this.level();
         if (level != null && !level.isClientSide && !this.survives()) {
             // Vanilla would log an error and then discard; we keep the discard

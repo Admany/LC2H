@@ -3,14 +3,24 @@ package org.admany.lc2h.worldgen.async.generator;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.util.cache.CacheTtl;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class AsyncPaletteGenerator {
 
-    private static final ConcurrentHashMap<ChunkCoord, Boolean> COMPUTATION_CACHE = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<ChunkCoord, Long> COMPUTATION_CACHE = new ConcurrentHashMap<>();
+    private static final long COMPUTATION_CACHE_TTL_MS = Math.max(30_000L,
+        Long.getLong("lc2h.palette.cacheTtlMs", TimeUnit.MINUTES.toMillis(20)));
+    private static final int COMPUTATION_CACHE_PRUNE_SCAN = Math.max(128,
+        Integer.getInteger("lc2h.palette.cachePruneScan", 512));
+    private static final int COMPUTATION_CACHE_PRUNE_EVERY = Math.max(64,
+        Integer.getInteger("lc2h.palette.cachePruneEvery", 128));
+    private static final AtomicInteger COMPUTATION_CACHE_PRUNE_COUNTER = new AtomicInteger(0);
 
     public static final ConcurrentHashMap<ChunkCoord, float[]> GPU_DATA_CACHE = new ConcurrentHashMap<>();
 
@@ -21,9 +31,11 @@ public final class AsyncPaletteGenerator {
         Objects.requireNonNull(provider, "provider");
         Objects.requireNonNull(coord, "coord");
 
-        if (COMPUTATION_CACHE.putIfAbsent(coord, Boolean.TRUE) != null) {
+        long now = System.currentTimeMillis();
+        if (CacheTtl.markIfFresh(COMPUTATION_CACHE, coord, COMPUTATION_CACHE_TTL_MS, now)) {
             return;
         }
+        maybePrune(now);
 
         boolean debugLogging = AsyncChunkWarmup.isWarmupDebugLoggingEnabled();
 
@@ -289,5 +301,21 @@ public final class AsyncPaletteGenerator {
     }
 
     private static void cacheAddonPalette(ChunkCoord coord, int x, int z, String palette) {
+    }
+
+    public static void pruneExpiredEntries() {
+        long now = System.currentTimeMillis();
+        CacheTtl.pruneExpired(COMPUTATION_CACHE, COMPUTATION_CACHE_TTL_MS, COMPUTATION_CACHE_PRUNE_SCAN, now);
+    }
+
+    private static void maybePrune(long nowMs) {
+        if (COMPUTATION_CACHE_TTL_MS <= 0L) {
+            return;
+        }
+        int count = COMPUTATION_CACHE_PRUNE_COUNTER.incrementAndGet();
+        if (count >= COMPUTATION_CACHE_PRUNE_EVERY) {
+            COMPUTATION_CACHE_PRUNE_COUNTER.set(0);
+            CacheTtl.pruneExpired(COMPUTATION_CACHE, COMPUTATION_CACHE_TTL_MS, COMPUTATION_CACHE_PRUNE_SCAN, nowMs);
+        }
     }
 }

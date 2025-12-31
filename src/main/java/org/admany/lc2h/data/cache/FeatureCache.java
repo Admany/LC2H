@@ -7,12 +7,21 @@ import java.util.Map;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 public class FeatureCache {
 
-    private static final Map<String, Object> memoryCache = new ConcurrentHashMap<>();
+    private static final Map<String, LocalEntry> memoryCache = new ConcurrentHashMap<>();
     private static final int MAX_MEMORY_CACHE_SIZE = 500;
+    private static final long LOCAL_TTL_MS = Math.max(1_000L,
+        Long.getLong("lc2h.featureCache.localTtlMs", TimeUnit.MINUTES.toMillis(20)));
+    private static final long QUANTIFIED_MAX_ENTRIES = Math.max(1L,
+        Long.getLong("lc2h.featureCache.maxEntries", 10_000L));
+    private static final Duration MEMORY_TTL = Duration.ofMinutes(Math.max(1L,
+        Long.getLong("lc2h.featureCache.memoryTtlMinutes", 20L)));
+    private static final Duration DISK_TTL = Duration.ofHours(Math.max(1L,
+        Long.getLong("lc2h.featureCache.diskTtlHours", 24L)));
 
     private static final String MEMORY_CACHE = "feature_memory";
     private static final String DISK_CACHE = "feature_disk";
@@ -47,29 +56,31 @@ public class FeatureCache {
             if (value == null) return;
 
             String cacheName = useDiskCache ? DISK_CACHE : MEMORY_CACHE;
+            long now = System.currentTimeMillis();
 
             if (quantifiedAvailable && cacheManager != null) {
                 Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
                 if (useDiskCache) {
                     try {
                         quantifiedApiClass.getMethod("putCached", String.class, String.class, Object.class, Duration.class, long.class, boolean.class)
-                            .invoke(null, cacheName, key, value, Duration.ofHours(24), 10000L, true);
+                            .invoke(null, cacheName, key, value, DISK_TTL, QUANTIFIED_MAX_ENTRIES, true);
                     } catch (Exception e) {
                         LC2H.LOGGER.debug("[LC2H] Could not use disk cache", e);
                     }
                 } else {
                     try {
-                        quantifiedApiClass.getMethod("putCached", String.class, String.class, Object.class)
-                            .invoke(null, cacheName, key, value);
+                        quantifiedApiClass.getMethod("putCached", String.class, String.class, Object.class, Duration.class, long.class, boolean.class)
+                            .invoke(null, cacheName, key, value, MEMORY_TTL, QUANTIFIED_MAX_ENTRIES, true);
                     } catch (Exception e) {
                         LC2H.LOGGER.debug("[LC2H] Could not use memory cache", e);
                     }
                 }
             }
 
-            memoryCache.put(key, value);
+            memoryCache.put(key, new LocalEntry(value, now));
+            pruneExpiredLocalEntries(now);
             if (memoryCache.size() > MAX_MEMORY_CACHE_SIZE) {
-                String oldestKey = memoryCache.keySet().iterator().next();
+                String oldestKey = findOldestLocalKey();
                 memoryCache.remove(oldestKey);
                 LC2H.LOGGER.debug("[LC2H] Evicted memory cache entry: " + oldestKey);
             }
@@ -84,27 +95,33 @@ public class FeatureCache {
 
     public static Object get(String key, boolean checkDiskCache) {
         try {
-            Object value = memoryCache.get(key);
-            if (value != null) {
-                return value;
+            long now = System.currentTimeMillis();
+            LocalEntry local = memoryCache.get(key);
+            if (local != null) {
+                if ((now - local.lastAccessMs) <= LOCAL_TTL_MS) {
+                    local.lastAccessMs = now;
+                    return local.value;
+                }
+                memoryCache.remove(key, local);
             }
 
+            Object value = null;
             if (quantifiedAvailable && cacheManager != null) {
                 Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
                 String cacheName = checkDiskCache ? DISK_CACHE : MEMORY_CACHE;
                 try {
                     if (checkDiskCache) {
                         value = quantifiedApiClass.getMethod("getCached", String.class, String.class, Supplier.class, Duration.class, long.class, boolean.class)
-                            .invoke(null, new Object[]{cacheName, key, (Supplier<Object>) () -> null, Duration.ofHours(24), 10000L, true});
+                            .invoke(null, new Object[]{cacheName, key, (Supplier<Object>) () -> null, DISK_TTL, QUANTIFIED_MAX_ENTRIES, true});
                     } else {
-                        value = quantifiedApiClass.getMethod("getCached", String.class, String.class, Supplier.class)
-                            .invoke(null, new Object[]{cacheName, key, (Supplier<Object>) () -> null});
+                        value = quantifiedApiClass.getMethod("getCached", String.class, String.class, Supplier.class, Duration.class, long.class, boolean.class)
+                            .invoke(null, new Object[]{cacheName, key, (Supplier<Object>) () -> null, MEMORY_TTL, QUANTIFIED_MAX_ENTRIES, true});
                     }
                 } catch (Exception e) {
                     LC2H.LOGGER.debug("[LC2H] Could not retrieve from Quantified cache", e);
                 }
                 if (value != null) {
-                    memoryCache.put(key, value);
+                    memoryCache.put(key, new LocalEntry(value, now));
                     return value;
                 }
             }
@@ -152,14 +169,7 @@ public class FeatureCache {
         Long quantifiedEntries = null;
 
         try {
-            if (memoryCache.size() > MAX_MEMORY_CACHE_SIZE / 2) {
-                int toRemove = memoryCache.size() - (MAX_MEMORY_CACHE_SIZE / 2);
-                for (int i = 0; i < toRemove && !memoryCache.isEmpty(); i++) {
-                    String oldestKey = memoryCache.keySet().iterator().next();
-                    memoryCache.remove(oldestKey);
-                    localEntries++;
-                }
-            }
+            localEntries = pruneLocalEntriesByAge(maxAgeMs);
 
             if (quantifiedAvailable && cacheManager != null) {
                 quantifiedEntries = (Long) cacheManager.getClass().getMethod("clearOldCaches", long.class).invoke(cacheManager, maxAgeMs);
@@ -185,6 +195,16 @@ public class FeatureCache {
         return (int) Math.min(Integer.MAX_VALUE, total);
     }
 
+    public static long getLocalEntryCount() {
+        pruneExpiredLocalEntries(System.currentTimeMillis());
+        return memoryCache.size();
+    }
+
+    public static long getLocalMemoryBytes() {
+        pruneExpiredLocalEntries(System.currentTimeMillis());
+        return memoryCache.size() * 256L;
+    }
+
     public static long getMemoryUsageMB() {
         if (quantifiedAvailable && cacheManager != null) {
             try {
@@ -193,6 +213,7 @@ public class FeatureCache {
                 LC2H.LOGGER.debug("[LC2H] Could not get memory usage from cache manager", e);
             }
         }
+        pruneExpiredLocalEntries(System.currentTimeMillis());
         return (memoryCache.size() * 256L) / (1024 * 1024);
     }
 
@@ -204,6 +225,7 @@ public class FeatureCache {
                 LC2H.LOGGER.debug("[LC2H] Could not check memory pressure from cache manager", e);
             }
         }
+        pruneExpiredLocalEntries(System.currentTimeMillis());
         return memoryCache.size() > MAX_MEMORY_CACHE_SIZE * 0.9;
     }
 
@@ -259,6 +281,7 @@ public class FeatureCache {
     }
 
     public static CacheStats snapshot() {
+        pruneExpiredLocalEntries(System.currentTimeMillis());
         long local = memoryCache.size();
         Long quantified = null;
 
@@ -338,6 +361,74 @@ public class FeatureCache {
                 return OptionalLong.empty();
             }
             return OptionalLong.of(quantifiedEntries);
+        }
+    }
+
+    public static void pruneExpiredEntries() {
+        pruneExpiredLocalEntries(System.currentTimeMillis());
+    }
+
+    private static void pruneExpiredLocalEntries(long now) {
+        if (LOCAL_TTL_MS <= 0L || memoryCache.isEmpty()) {
+            return;
+        }
+        for (Map.Entry<String, LocalEntry> entry : memoryCache.entrySet()) {
+            LocalEntry local = entry.getValue();
+            if (local == null) {
+                continue;
+            }
+            if ((now - local.lastAccessMs) > LOCAL_TTL_MS) {
+                memoryCache.remove(entry.getKey(), local);
+            }
+        }
+    }
+
+    private static long pruneLocalEntriesByAge(long maxAgeMs) {
+        if (maxAgeMs <= 0L) {
+            return 0L;
+        }
+        long now = System.currentTimeMillis();
+        long removed = 0L;
+        for (Map.Entry<String, LocalEntry> entry : memoryCache.entrySet()) {
+            LocalEntry local = entry.getValue();
+            if (local == null) {
+                continue;
+            }
+            if ((now - local.lastAccessMs) > maxAgeMs) {
+                if (memoryCache.remove(entry.getKey(), local)) {
+                    removed++;
+                }
+            }
+        }
+        return removed;
+    }
+
+    private static String findOldestLocalKey() {
+        long oldest = Long.MAX_VALUE;
+        String oldestKey = null;
+        for (Map.Entry<String, LocalEntry> entry : memoryCache.entrySet()) {
+            LocalEntry local = entry.getValue();
+            if (local == null) {
+                continue;
+            }
+            if (local.lastAccessMs < oldest) {
+                oldest = local.lastAccessMs;
+                oldestKey = entry.getKey();
+            }
+        }
+        if (oldestKey == null) {
+            return memoryCache.keySet().iterator().next();
+        }
+        return oldestKey;
+    }
+
+    private static final class LocalEntry {
+        private final Object value;
+        private volatile long lastAccessMs;
+
+        private LocalEntry(Object value, long lastAccessMs) {
+            this.value = value;
+            this.lastAccessMs = lastAccessMs;
         }
     }
 }

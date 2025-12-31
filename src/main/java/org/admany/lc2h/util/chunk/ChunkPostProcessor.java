@@ -229,7 +229,9 @@ public class ChunkPostProcessor {
         if (!(chunk.getLevel() instanceof ServerLevel)) {
             return;
         }
-        CHUNK_SCAN_PROGRESS.remove(chunkKey(chunk.getPos().x, chunk.getPos().z));
+        long key = chunkKey(chunk.getPos().x, chunk.getPos().z);
+        CHUNK_SCAN_PROGRESS.remove(key);
+        COMPLETED_CHUNKS.remove(key);
     }
 
     @SubscribeEvent

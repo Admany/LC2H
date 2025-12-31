@@ -18,6 +18,7 @@ import java.util.logging.Handler;
 import java.util.logging.Level;
 import org.admany.lc2h.diagnostics.DiagnosticsReporter;
 import org.admany.lc2h.diagnostics.StallDetector;
+import org.admany.lc2h.diagnostics.ChunkGenTracker;
 import org.admany.lc2h.logging.config.ConfigManager;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.admany.lc2h.util.server.ServerRescheduler;
@@ -30,8 +31,10 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraft.commands.Commands;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
+import mcjty.lostcities.varia.ChunkCoord;
 
 @Mod(LC2H.MODID)
 public class LC2H {
@@ -253,6 +256,26 @@ public class LC2H {
                         ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal("Queued rescan for chunk " + pos), false);
                         return 1;
                     })
+                ).then(
+                    Commands.literal("chunkinfo").executes(ctx -> {
+                        ServerPlayer player = ctx.getSource().getPlayerOrException();
+                        ChunkPos pos = player.chunkPosition();
+                        ChunkCoord coord = new ChunkCoord(player.level().dimension(), pos.x, pos.z);
+                        String report = ChunkGenTracker.buildReport(coord);
+                        ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal(report), false);
+                        return 1;
+                    }).then(
+                        Commands.argument("chunkX", IntegerArgumentType.integer()).then(
+                            Commands.argument("chunkZ", IntegerArgumentType.integer()).executes(ctx -> {
+                                int chunkX = IntegerArgumentType.getInteger(ctx, "chunkX");
+                                int chunkZ = IntegerArgumentType.getInteger(ctx, "chunkZ");
+                                ChunkCoord coord = new ChunkCoord(ctx.getSource().getLevel().dimension(), chunkX, chunkZ);
+                                String report = ChunkGenTracker.buildReport(coord);
+                                ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal(report), false);
+                                return 1;
+                            })
+                        )
+                    )
                 )
             );
         } catch (Throwable t) {

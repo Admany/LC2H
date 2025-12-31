@@ -22,22 +22,22 @@ import java.util.function.Function;
 public abstract class MixinRegistryAssetRegistryWorldStyleFallback {
 
     @Unique
-    private static final ResourceLocation LC2H_WORLDSTYLES_REGISTRY_ID = new ResourceLocation("lostcities", "worldstyles");
+    private static final ResourceLocation LC2H_WORLDSTYLES_REGISTRY_ID = ResourceLocation.fromNamespaceAndPath("lostcities", "worldstyles");
 
     @Unique
-    private static final ResourceLocation LC2H_WORLDSTYLE_STANDARD = new ResourceLocation("lostcities", "standard");
+    private static final ResourceLocation LC2H_WORLDSTYLE_STANDARD = ResourceLocation.fromNamespaceAndPath("lostcities", "standard");
 
     @Unique
-    private static final ResourceLocation LC2H_WORLDSTYLE_STANDARD_EVERYWHERE = new ResourceLocation("lostcities", "standard_everywhere");
+    private static final ResourceLocation LC2H_WORLDSTYLE_STANDARD_EVERYWHERE = ResourceLocation.fromNamespaceAndPath("lostcities", "standard_everywhere");
 
     @Unique
-    private static final ResourceLocation LC2H_CITYSTYLES_REGISTRY_ID = new ResourceLocation("lostcities", "citystyles");
+    private static final ResourceLocation LC2H_CITYSTYLES_REGISTRY_ID = ResourceLocation.fromNamespaceAndPath("lostcities", "citystyles");
 
     @Unique
-    private static final ResourceLocation LC2H_CITYSTYLE_STANDARD = new ResourceLocation("lostcities", "citystyle_standard");
+    private static final ResourceLocation LC2H_CITYSTYLE_STANDARD = ResourceLocation.fromNamespaceAndPath("lostcities", "citystyle_standard");
 
     @Unique
-    private static final ResourceLocation LC2H_CITYSTYLE_BORDER = new ResourceLocation("lostcities", "citystyle_border");
+    private static final ResourceLocation LC2H_CITYSTYLE_BORDER = ResourceLocation.fromNamespaceAndPath("lostcities", "citystyle_border");
 
     @Shadow @Final private Map<ResourceLocation, Object> assets;
     @Shadow @Final private ResourceKey<Registry<Object>> registryKey;

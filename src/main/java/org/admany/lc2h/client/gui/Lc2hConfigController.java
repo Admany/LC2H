@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 final class Lc2hConfigController {
+    static final boolean RESTART_CITY_EDGE = true;
     private final ConfigManager.Config initialConfig;
     private final UiState uiState;
 
@@ -115,41 +116,69 @@ final class Lc2hConfigController {
         }
     }
 
-    void applyChanges(FormValues values, Minecraft minecraft) {
+    boolean applyChanges(FormValues values, Minecraft minecraft) {
+        return applyChanges(values, minecraft, true);
+    }
+
+    boolean applyToggleChange(Minecraft minecraft, boolean showStatus) {
+        ConfigManager.Config baseConfig = ConfigManager.CONFIG != null ? ConfigManager.CONFIG : initialConfig;
+        ConfigManager.Config updated = toConfig(uiState, baseConfig);
+        return applyConfig(updated, minecraft, baseConfig, showStatus);
+    }
+
+    private boolean applyChanges(FormValues values, Minecraft minecraft, boolean showStatus) {
         if (values == null) {
-            return;
+            return false;
         }
         tryParseInt(values.cityBlendWidth(), v -> uiState.cityBlendWidth = Math.max(4, v));
         tryParseDouble(values.cityBlendSoftness(), v -> uiState.cityBlendSoftness = Math.max(0.5, v));
 
         ConfigManager.Config baseConfig = ConfigManager.CONFIG != null ? ConfigManager.CONFIG : initialConfig;
         ConfigManager.Config updated = toConfig(uiState, baseConfig);
-        boolean needsRestart = false;
+        return applyConfig(updated, minecraft, baseConfig, showStatus);
+    }
 
+    private boolean applyConfig(ConfigManager.Config updated, Minecraft minecraft, ConfigManager.Config baseConfig, boolean showStatus) {
+        boolean needsRestart = requiresRestartForChanges(baseConfig, updated);
         boolean isDedicated = minecraft != null && minecraft.getSingleplayerServer() == null;
         if (isDedicated) {
             boolean sent = ConfigSyncNetwork.sendApplyRequest(updated);
-            if (sent) {
-                statusMessage = Component.literal("Sent config changes to server (OP only).");
-                statusColor = 0x55FF55;
-            } else {
-                statusMessage = Component.literal("Failed to send config to server. Ensure config sync is reachable.");
-                statusColor = 0xFF5555;
+            if (showStatus) {
+                if (sent) {
+                    statusMessage = Component.literal("Sent config changes to server (OP only).");
+                    statusColor = 0x55FF55;
+                } else {
+                    statusMessage = Component.literal("Failed to send config to server. Ensure config sync is reachable.");
+                    statusColor = 0xFF5555;
+                }
             }
-            return;
+            return needsRestart;
         }
 
         ConfigManager.writePrettyJsonConfig(updated);
         ConfigManager.CONFIG = updated;
         ConfigManager.initializeGlobals();
 
-        if (needsRestart && (minecraft == null || minecraft.getSingleplayerServer() == null)) {
-            statusMessage = Component.literal("Saved. One or more changes require a server restart to take effect.");
-            statusColor = 0xFF5555;
-        } else {
-            statusMessage = Component.literal("Saved and applied.");
-            statusColor = 0x55FF55;
+        if (showStatus) {
+            if (needsRestart && (minecraft == null || minecraft.getSingleplayerServer() == null)) {
+                statusMessage = Component.literal("Saved. One or more changes require a server restart to take effect.");
+                statusColor = 0xFF5555;
+            } else {
+                statusMessage = Component.literal("Saved and applied.");
+                statusColor = 0x55FF55;
+            }
         }
+        return needsRestart;
+    }
+
+    private static boolean requiresRestartForChanges(ConfigManager.Config before, ConfigManager.Config after) {
+        if (!RESTART_CITY_EDGE || before == null || after == null) {
+            return false;
+        }
+        if (before.cityBlendEnabled != after.cityBlendEnabled) return true;
+        if (before.cityBlendWidth != after.cityBlendWidth) return true;
+        if (Double.compare(before.cityBlendSoftness, after.cityBlendSoftness) != 0) return true;
+        return before.cityBlendClearTrees != after.cityBlendClearTrees;
     }
 
     private void tryParseInt(String value, IntConsumer consumer) {
@@ -180,7 +209,6 @@ final class Lc2hConfigController {
         c.enableAsyncDoubleBlockBatcher = src.enableAsyncDoubleBlockBatcher;
         c.enableLostCitiesGenerationLock = src.enableLostCitiesGenerationLock;
         c.enableLostCitiesPartSliceCompat = src.enableLostCitiesPartSliceCompat;
-        c.enableScatteredParts2OverlayFix = src.enableScatteredParts2OverlayFix;
         c.enableCacheStatsLogging = src.enableCacheStatsLogging;
         c.enableFloatingVegetationRemoval = src.enableFloatingVegetationRemoval;
         c.enableExplosionDebris = src.enableExplosionDebris;
@@ -201,7 +229,6 @@ final class Lc2hConfigController {
         state.enableAsyncDoubleBlockBatcher = config.enableAsyncDoubleBlockBatcher;
         state.enableLostCitiesGenerationLock = config.enableLostCitiesGenerationLock;
         state.enableLostCitiesPartSliceCompat = config.enableLostCitiesPartSliceCompat;
-        state.enableScatteredParts2OverlayFix = config.enableScatteredParts2OverlayFix;
         state.enableCacheStatsLogging = config.enableCacheStatsLogging;
         state.enableFloatingVegetationRemoval = config.enableFloatingVegetationRemoval;
         state.enableExplosionDebris = config.enableExplosionDebris;
@@ -219,7 +246,6 @@ final class Lc2hConfigController {
         config.enableAsyncDoubleBlockBatcher = state.enableAsyncDoubleBlockBatcher;
         config.enableLostCitiesGenerationLock = state.enableLostCitiesGenerationLock;
         config.enableLostCitiesPartSliceCompat = state.enableLostCitiesPartSliceCompat;
-        config.enableScatteredParts2OverlayFix = state.enableScatteredParts2OverlayFix;
         config.enableCacheStatsLogging = state.enableCacheStatsLogging;
         config.enableFloatingVegetationRemoval = state.enableFloatingVegetationRemoval;
         config.enableExplosionDebris = state.enableExplosionDebris;
@@ -242,7 +268,6 @@ final class Lc2hConfigController {
         public boolean enableAsyncDoubleBlockBatcher;
         public boolean enableLostCitiesGenerationLock;
         public boolean enableLostCitiesPartSliceCompat;
-        public boolean enableScatteredParts2OverlayFix;
         public boolean enableCacheStatsLogging;
         public boolean enableFloatingVegetationRemoval;
         public boolean enableExplosionDebris;

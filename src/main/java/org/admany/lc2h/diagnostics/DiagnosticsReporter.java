@@ -3,11 +3,22 @@ package org.admany.lc2h.diagnostics;
 import net.minecraft.server.MinecraftServer;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.core.MainThreadChunkApplier;
+import org.admany.lc2h.data.cache.FeatureCache;
+import org.admany.lc2h.worldgen.async.generator.AsyncDebrisGenerator;
+import org.admany.lc2h.worldgen.async.generator.AsyncPaletteGenerator;
 import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
+import org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner;
+import org.admany.lc2h.worldgen.async.planner.AsyncTerrainCorrectionPlanner;
+import org.admany.lc2h.worldgen.async.planner.AsyncTerrainFeaturePlanner;
 import org.admany.lc2h.worldgen.async.planner.PlannerBatchQueue;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.tweaks.TweaksActorSystem;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
+import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
+import org.admany.lc2h.worldgen.lostcities.LostCityFeatureGuards;
+import org.admany.lc2h.worldgen.lostcities.LostCityTerrainFeatureGuards;
+import org.admany.quantified.api.QuantifiedAPI;
+import org.admany.quantified.api.interfaces.ModCacheManager;
 import org.admany.quantified.core.common.parallel.metrics.ParallelMetrics;
 import org.admany.quantified.core.common.parallel.throttle.ParallelBackpressure;
 
@@ -87,6 +98,9 @@ public final class DiagnosticsReporter {
                             scans, regions, inflight, planned, applyQueue, plannerStats.pendingTasks(), parallelActive, parallelQueued);
                     }
                 }
+
+                reportCacheUsage();
+                pruneInternalCaches();
             } catch (Throwable t) {
                 LC2H.LOGGER.error("[LC2H] DiagnosticsReporter error: {}", t.getMessage());
             }
@@ -107,7 +121,6 @@ public final class DiagnosticsReporter {
             return;
         }
 
-        // Only run during spawn prep / pre-join.
         if (server.getPlayerList() != null && server.getPlayerList().getPlayerCount() > 0) {
             startupWatchdogEnabled = false;
             return;
@@ -134,6 +147,84 @@ public final class DiagnosticsReporter {
         } else {
             LC2H.LOGGER.debug("[LC2H] startup-watchdog: t={}s planned={}, applyQueue={}, plannerPending={}, plannerBatches={}, warmupQueuedRegions={}, warmupActiveBatches={}, parallelActiveSlices={}, parallelQueuedSlices={}, plannerKinds={}",
                 elapsedSec, planned, applyQueue, planner.pendingTasks(), planner.batchCount(), regions, active, parallelActive, parallelQueued, planner.pendingByKind());
+        }
+    }
+
+    private static void reportCacheUsage() {
+        try {
+            long quantifiedEntries = 0L;
+            long quantifiedBytes = 0L;
+            try {
+                ModCacheManager cacheManager = QuantifiedAPI.getCacheManager(LC2H.MODID);
+                if (cacheManager != null) {
+                    quantifiedEntries = cacheManager.getTotalCacheEntryCount();
+                    quantifiedBytes = cacheManager.getTotalCacheSizeMB() * 1024L * 1024L;
+                }
+            } catch (Throwable ignored) {
+            }
+
+            long internalEntries = 0L;
+            long internalBytes = 0L;
+
+            internalEntries += GPUMemoryManager.getCachedEntryCount();
+            internalBytes += GPUMemoryManager.getCachedBytes();
+
+            internalEntries += GPUMemoryManager.getDiskCacheEntryCount();
+            internalBytes += GPUMemoryManager.getDiskCacheBytes();
+
+            long featureEntries = FeatureCache.getLocalEntryCount();
+            internalEntries += featureEntries;
+            internalBytes += FeatureCache.getLocalMemoryBytes();
+
+            long totalEntries = quantifiedEntries + internalEntries;
+            long totalBytes = quantifiedBytes + internalBytes;
+            QuantifiedAPI.reportCacheUsage(LC2H.MODID, totalEntries, totalBytes);
+        } catch (Throwable t) {
+            LC2H.LOGGER.debug("[LC2H] Failed to report cache usage: {}", t.getMessage());
+        }
+    }
+
+    private static void pruneInternalCaches() {
+        long now = System.currentTimeMillis();
+        try {
+            FeatureCache.pruneExpiredEntries();
+        } catch (Throwable ignored) {
+        }
+        try {
+            AsyncBuildingInfoPlanner.pruneExpiredEntries();
+        } catch (Throwable ignored) {
+        }
+        try {
+            AsyncTerrainFeaturePlanner.pruneExpiredEntries();
+        } catch (Throwable ignored) {
+        }
+        try {
+            AsyncTerrainCorrectionPlanner.pruneExpiredEntries();
+        } catch (Throwable ignored) {
+        }
+        try {
+            AsyncPaletteGenerator.pruneExpiredEntries();
+        } catch (Throwable ignored) {
+        }
+        try {
+            AsyncDebrisGenerator.pruneExpiredEntries();
+        } catch (Throwable ignored) {
+        }
+        try {
+            TweaksActorSystem.pruneExpiredEntries();
+        } catch (Throwable ignored) {
+        }
+        try {
+            LostCityFeatureGuards.pruneExpired(now);
+        } catch (Throwable ignored) {
+        }
+        try {
+            LostCityTerrainFeatureGuards.pruneExpired(now);
+        } catch (Throwable ignored) {
+        }
+        try {
+            AsyncChunkWarmup.pruneExpiredEntries();
+        } catch (Throwable ignored) {
         }
     }
 

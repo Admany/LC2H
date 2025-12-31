@@ -19,11 +19,27 @@ public class MixinMultiChunk {
             return;
         }
 
-        AsyncMultiChunkPlanner.ensureScheduled(provider, coord);
+        if (provider == null || coord == null) {
+            return;
+        }
 
-        MultiChunk prepared = AsyncMultiChunkPlanner.tryConsumePrepared(provider, coord);
-        if (prepared != null) {
-            cir.setReturnValue(prepared);
+        String threadName = Thread.currentThread().getName();
+        boolean isServerThread = "Server thread".equals(threadName);
+        boolean holdsMultiChunkLock = Thread.holdsLock(MultiChunk.class);
+
+        if (isServerThread || holdsMultiChunkLock) {
+            AsyncMultiChunkPlanner.ensureScheduled(provider, coord);
+            MultiChunk prepared = AsyncMultiChunkPlanner.tryConsumePrepared(provider, coord);
+            if (prepared != null) {
+                cir.setReturnValue(prepared);
+                cir.cancel();
+            }
+            return;
+        }
+
+        MultiChunk resolved = AsyncMultiChunkPlanner.resolve(provider, coord);
+        if (resolved != null) {
+            cir.setReturnValue(resolved);
             cir.cancel();
         }
     }

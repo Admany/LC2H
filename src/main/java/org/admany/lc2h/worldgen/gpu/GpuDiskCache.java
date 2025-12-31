@@ -18,6 +18,7 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 import net.minecraftforge.fml.loading.FMLPaths;
@@ -113,6 +114,30 @@ final class GpuDiskCache {
             LC2H.LOGGER.debug("Failed to clear disk GPU cache: {}", t.getMessage());
         }
         clearDiskDirectory();
+    }
+
+    static long getBackingCacheEntryCount() {
+        try {
+            return DISK_BACKING_CACHE.size();
+        } catch (Throwable t) {
+            return 0L;
+        }
+    }
+
+    static long estimateBackingCacheBytes() {
+        try {
+            Map<String, float[]> snapshot = DISK_BACKING_CACHE.snapshot();
+            long bytes = 0L;
+            for (float[] data : snapshot.values()) {
+                if (data != null) {
+                    bytes += (long) data.length * 4L;
+                }
+            }
+            return bytes;
+        } catch (Throwable t) {
+            long entries = getBackingCacheEntryCount();
+            return entries * 4096L;
+        }
     }
 
     private static void writeDiskFile(ChunkCoord coord, float[] data) {

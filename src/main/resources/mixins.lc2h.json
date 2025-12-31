@@ -16,6 +16,7 @@
     "MixinMultiChunk",
     "accessor.MultiChunkAccessor",
     "accessor.MultiChunkInvoker",
+    "accessor.BuildingInfoAccessor",
     "MixinToolsGrassFix",
     "MixinConfig",
     "MixinWorldGenRegion",
@@ -23,6 +24,7 @@
     "minecraft.MixinHangingEntityInvalidPos",
     "minecraft.MixinPoiManagerSuppressError",
     "minecraft.MixinChunkGeneratorSkipStructures",
+    "minecraft.MixinStructureStartCityUndergroundGuard",
     "minecraft.MixinTreeFeatureNearCityBorder",
     "lostcities.MixinCity",
     "lostcities.MixinDefaultDimensionInfoThreadLocal",
@@ -38,7 +40,6 @@
     "lostcities.MixinBuildingInfoSafeGetOrThrow",
     "lostcities.MixinForgeEventHandlersSpawnGuard",
     "lostcities.MixinBuildingPartSliceCompat",
-    "lostcities.MixinScatteredParts2OverlayFix",
     "lostcities.MixinRegistryAssetRegistryWorldStyleFallback",
     "accessor.StructureManagerAccessor",
     "accessor.BiomeInfoAccessor"

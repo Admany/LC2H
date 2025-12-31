@@ -11,7 +11,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(NoiseChunkOpt.class)
 public class MixinNoiseChunkOpt {
 
-    @Inject(method = "optimizeNoise", at = @At("HEAD"), remap = false)
+    @Inject(method = "optimizeNoise", at = @At("HEAD"), remap = false, require = 0)
     private void asyncOptimizeNoise(int chunkX, int chunkZ, CallbackInfo ci) {
         AsyncNoiseGenerator.generateNoiseAsync(chunkX, chunkZ);
     }
