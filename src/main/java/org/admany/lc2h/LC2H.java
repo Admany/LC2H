@@ -7,6 +7,7 @@ import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.minecraftforge.event.server.ServerStartingEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
+import net.minecraftforge.event.server.ServerStoppedEvent;
 import net.minecraftforge.fml.DistExecutor;
 import net.minecraftforge.registries.DeferredRegister;
 import net.minecraftforge.registries.ForgeRegistries;
@@ -24,6 +25,10 @@ import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.client.LC2HClient;
 import org.admany.lc2h.network.ConfigSyncNetwork;
+import org.admany.lc2h.debug.chunk.ChunkDebugNetwork;
+import org.admany.lc2h.debug.chunk.ChunkDebugManager;
+import org.admany.lc2h.debug.chunk.ChunkDebugExporter;
+import org.admany.lc2h.util.log.ChatMessenger;
 import org.admany.quantified.api.QuantifiedAPI;
 import org.admany.quantified.core.common.cache.CacheManager;
 import org.admany.quantified.core.common.async.task.ModPriorityManager;
@@ -32,9 +37,11 @@ import org.apache.logging.log4j.Logger;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraft.commands.Commands;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
 import mcjty.lostcities.varia.ChunkCoord;
+import java.nio.file.Path;
 
 @Mod(LC2H.MODID)
 public class LC2H {
@@ -46,6 +53,7 @@ public class LC2H {
         () -> net.minecraft.sounds.SoundEvent.createVariableRangeEvent(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MODID, "countdown")));
     public static final net.minecraftforge.registries.RegistryObject<net.minecraft.sounds.SoundEvent> BUTTON_CLICK_SOUND = SOUND_EVENTS.register("button_click",
         () -> net.minecraft.sounds.SoundEvent.createVariableRangeEvent(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MODID, "button_click")));
+    private static final java.util.concurrent.atomic.AtomicBoolean SHUTDOWN_FINALIZED = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     @SuppressWarnings("removal")
     public LC2H() {
@@ -53,6 +61,7 @@ public class LC2H {
 
         FMLJavaModLoadingContext.get().getModEventBus().addListener(this::onCommonSetup);
         ConfigSyncNetwork.register();
+        ChunkDebugNetwork.register();
         try {
             CacheManager.startMaintenance(java.time.Duration.ofMinutes(5), java.time.Duration.ofMinutes(10));
         } catch (Throwable ignored) {
@@ -144,6 +153,7 @@ public class LC2H {
 
     @SubscribeEvent
     public void onServerStarting(ServerStartingEvent event) {
+        SHUTDOWN_FINALIZED.set(false);
         registerWithQuantifiedApi();
         try {
             org.admany.lc2h.worldgen.lostcities.LostCityFeatureGuards.reset();
@@ -276,6 +286,34 @@ public class LC2H {
                             })
                         )
                     )
+                ).then(
+                    Commands.literal("chunkdebug")
+                        .executes(ctx -> {
+                            ServerPlayer player = ctx.getSource().getPlayerOrException();
+                            ChunkDebugManager.setEnabled(player, true);
+                            return 1;
+                        })
+                        .then(Commands.literal("enable").executes(ctx -> {
+                            ServerPlayer player = ctx.getSource().getPlayerOrException();
+                            ChunkDebugManager.setEnabled(player, true);
+                            return 1;
+                        }))
+                        .then(Commands.literal("disable").executes(ctx -> {
+                            ServerPlayer player = ctx.getSource().getPlayerOrException();
+                            ChunkDebugManager.setEnabled(player, false);
+                            return 1;
+                        }))
+                        .then(Commands.literal("clear").executes(ctx -> {
+                            ServerPlayer player = ctx.getSource().getPlayerOrException();
+                            ChunkDebugManager.clearSelection(player);
+                            return 1;
+                        }))
+                        .then(Commands.literal("export")
+                            .executes(ctx -> exportChunkDebug(ctx.getSource().getPlayerOrException(), null))
+                            .then(Commands.argument("label", StringArgumentType.greedyString())
+                                .executes(ctx -> exportChunkDebug(ctx.getSource().getPlayerOrException(), StringArgumentType.getString(ctx, "label")))
+                            )
+                        )
                 )
             );
         } catch (Throwable t) {
@@ -404,6 +442,18 @@ public class LC2H {
         }
 
         try {
+            // Heavy cleanup is deferred to ServerStoppedEvent so it doesn't block world saving.
+            SHUTDOWN_FINALIZED.set(false);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @SubscribeEvent
+    public void onServerStopped(ServerStoppedEvent event) {
+        if (!SHUTDOWN_FINALIZED.compareAndSet(false, true)) {
+            return;
+        }
+        try {
             org.admany.lc2h.worldgen.gpu.GPUMemoryManager.clearAllGPUCaches();
             LOGGER.info("[LC2H] GPU caches cleared");
         } catch (Throwable t) {
@@ -415,6 +465,23 @@ public class LC2H {
             LOGGER.info("[LC2H] Feature cache system force shut down");
         } catch (Throwable t) {
             LOGGER.warn("[LC2H] Error force shutting down feature cache: {}", t.getMessage());
+        }
+    }
+
+    private static int exportChunkDebug(ServerPlayer player, String label) {
+        if (player == null) {
+            return 0;
+        }
+        try {
+            ChunkDebugManager.ChunkSelection selection = ChunkDebugManager.snapshot(player);
+            Path outFile = ChunkDebugExporter.exportSelection(player, selection, label);
+            ChatMessenger.success(player.createCommandSourceStack(),
+                "Chunk debug export written to " + outFile.toAbsolutePath());
+            return 1;
+        } catch (Exception e) {
+            ChatMessenger.error(player.createCommandSourceStack(),
+                "Chunk debug export failed: " + e.getMessage());
+            return 0;
         }
     }
 }

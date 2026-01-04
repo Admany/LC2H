@@ -13,6 +13,7 @@ import org.admany.lc2h.parallel.ParallelWorkQueue;
 import org.admany.lc2h.worldgen.async.snapshot.MultiChunkSnapshot;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
+import org.admany.lc2h.diagnostics.ChunkGenTracker;
 
 import java.util.List;
 import java.util.Map;
@@ -34,6 +35,8 @@ public final class AsyncMultiChunkPlanner {
     private static final int MULTICHUNK_PARALLELISM_OVERRIDE = Integer.getInteger("lc2h.multichunk.parallelism", -1);
     private static final int MULTICHUNK_MAX = Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors()));
     private static final AdaptiveConcurrencyLimiter MULTICHUNK_LIMITER = new AdaptiveConcurrencyLimiter(2, 1, MULTICHUNK_MAX);
+    private static final long MULTICHUNK_SLOW_LOG_MS = Math.max(0L,
+        Long.getLong("lc2h.multichunk.slowLogMs", 1500L));
 
     public static final ConcurrentHashMap<ChunkCoord, float[]> GPU_DATA_CACHE = new ConcurrentHashMap<>();
 
@@ -104,6 +107,39 @@ public final class AsyncMultiChunkPlanner {
 
         MultiChunk computed = executeInternal(() -> computeMultiChunk(provider, areaSize, multiCoord));
         return integrateResult(provider, multiCoord, computed);
+    }
+
+    public static void ensureIntegrated(IDimensionInfo provider, ChunkCoord coord) {
+        if (provider == null || coord == null || isInternalComputation()) {
+            return;
+        }
+
+        int areaSize = provider.getWorldStyle().getMultiSettings().areasize();
+        ChunkCoord multiCoord = toMultiCoord(coord, areaSize);
+
+        Map<ChunkCoord, MultiChunk> cache = MultiChunkAccessor.lc2h$getCache();
+        synchronized (cache) {
+            if (cache.containsKey(multiCoord)) {
+                return;
+            }
+        }
+
+        MultiChunk prepared = null;
+        CompletableFuture<MultiChunk> future = PLANNED.get(multiCoord);
+        if (future != null) {
+            try {
+                if (!future.isCancelled() && !future.isCompletedExceptionally()) {
+                    prepared = future.isDone() ? future.getNow(null) : future.join();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (prepared == null) {
+            prepared = computeMultiChunkSync(provider, areaSize, multiCoord);
+        }
+        if (prepared != null) {
+            integrateResult(provider, multiCoord, prepared, Runnable::run);
+        }
     }
 
     public static void ensureScheduled(IDimensionInfo provider, ChunkCoord coord) {
@@ -266,7 +302,7 @@ public final class AsyncMultiChunkPlanner {
             MultiChunk result = ((MultiChunkInvoker) multiChunk).lc2h$calculateBuildings(provider);
 
             long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
-            if (elapsedMs >= 500L) {
+            if (elapsedMs >= MULTICHUNK_SLOW_LOG_MS) {
                 LC2H.LOGGER.info("[AsyncMultiChunkPlanner] computeMultiChunk({}) finished in {} ms", multiCoord, elapsedMs);
             } else if (trace || org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                 LC2H.LOGGER.debug("[AsyncMultiChunkPlanner] computeMultiChunk({}) finished in {} ms", multiCoord, elapsedMs);
@@ -297,6 +333,7 @@ public final class AsyncMultiChunkPlanner {
                 ChunkCoord topLeft = new ChunkCoord(multiCoord.dimension(), multiCoord.chunkX() * areaSize, multiCoord.chunkZ() * areaSize);
                 org.admany.lc2h.util.lostcities.BuildingInfoCacheInvalidator.invalidateArea(topLeft, areaSize);
                 org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner.invalidateArea(topLeft, areaSize);
+                ChunkGenTracker.recordMultiChunkIntegrated(topLeft, areaSize);
             } catch (Throwable ignored) {
             }
 

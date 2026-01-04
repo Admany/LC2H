@@ -19,6 +19,7 @@ import net.minecraft.world.level.CommonLevelAccessor;
 import net.minecraft.world.level.LevelReader;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.WorldGenLevel;
+import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
 import org.objectweb.asm.Opcodes;
 import org.admany.lc2h.diagnostics.ChunkGenTracker;
 import org.spongepowered.asm.mixin.Mixin;
@@ -147,7 +148,11 @@ public abstract class MixinBuildingInfo {
         } catch (Throwable ignored) {
             // Never break worldgen if a modded building behaves oddly.
         }
-        self.floors = clamped;
+        try {
+            ((org.admany.lc2h.mixin.accessor.BuildingInfoAccessor) self).lc2h$setFloors(clamped);
+        } catch (Throwable ignored) {
+            // Fallback: if accessor fails, leave floors as-is.
+        }
     }
 
     @Shadow public static boolean isCityRaw(ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile) { return false; }
@@ -300,6 +305,8 @@ public abstract class MixinBuildingInfo {
      */
     @Overwrite
     public static LostChunkCharacteristics getChunkCharacteristics(ChunkCoord coord, IDimensionInfo provider) {
+        AsyncMultiChunkPlanner.ensureIntegrated(provider, coord);
+
         LostChunkCharacteristics cached = LC2H_CITY_INFO_MAP.get(coord);
         if (cached != null) {
             return cached;
@@ -372,7 +379,11 @@ public abstract class MixinBuildingInfo {
         } else {
             PredefinedBuilding predefinedBuilding = City.getPredefinedBuildingAtTopLeft(world, coord);
             if (characteristics.multiPos.isTopLeft()) {
-                if (predefinedBuilding != null && predefinedBuilding.multi()) {
+                if (characteristics.multiBuilding != null) {
+                    // Respect the multichunk plan; don't re-roll a different multi building.
+                    String b = characteristics.multiBuilding.getBuilding(0, 0);
+                    characteristics.buildingType = resolveBuildingWithFallback(world, b);
+                } else if (predefinedBuilding != null && predefinedBuilding.multi()) {
                     characteristics.multiBuilding = AssetRegistries.MULTI_BUILDINGS.getOrWarn(world, predefinedBuilding.building());
                     if (characteristics.multiBuilding == null) {
                         // Multi-building definition is missing; fall back to single-building selection.
@@ -507,6 +518,8 @@ public abstract class MixinBuildingInfo {
      */
     @Overwrite
     public static BuildingInfo getBuildingInfo(ChunkCoord key, IDimensionInfo provider) {
+        AsyncMultiChunkPlanner.ensureIntegrated(provider, key);
+
         BuildingInfo cached = LC2H_BUILDING_INFO_MAP.get(key);
         if (cached != null) {
             return cached;

@@ -142,6 +142,42 @@ public final class MultiChunkSnapshot {
     private record Cell(int x, int z, String name, int offsetX, int offsetZ) {
     }
 
+    public record MultiChunkCell(int relX, int relZ, String name, int offsetX, int offsetZ) {
+    }
+
+    public static MultiChunkCell describeCell(MultiChunk multiChunk, ChunkCoord coord) {
+        if (multiChunk == null || coord == null || GRID_FIELD == null || !MultiChunkMBReflector.ready()) {
+            return null;
+        }
+        try {
+            MultiChunkAccessor accessor = (MultiChunkAccessor) multiChunk;
+            ChunkCoord topLeft = accessor.lc2h$getTopLeft();
+            int areaSize = accessor.lc2h$getAreaSize();
+            if (topLeft == null) {
+                return null;
+            }
+            int relX = coord.chunkX() - topLeft.chunkX();
+            int relZ = coord.chunkZ() - topLeft.chunkZ();
+            if (relX < 0 || relZ < 0 || relX >= areaSize || relZ >= areaSize) {
+                return null;
+            }
+            Object[][] grid = readGrid(multiChunk);
+            if (grid == null || relX >= grid.length || grid[relX] == null || relZ >= grid[relX].length) {
+                return null;
+            }
+            Object entry = grid[relX][relZ];
+            if (entry == null) {
+                return null;
+            }
+            String name = MultiChunkMBReflector.name(entry);
+            int offsetX = MultiChunkMBReflector.offsetX(entry);
+            int offsetZ = MultiChunkMBReflector.offsetZ(entry);
+            return new MultiChunkCell(relX, relZ, name, offsetX, offsetZ);
+        } catch (Throwable throwable) {
+            return null;
+        }
+    }
+
     private static Object[][] readGrid(MultiChunk chunk) {
         if (GRID_FIELD == null || chunk == null) {
             return null;

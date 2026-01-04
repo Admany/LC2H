@@ -46,7 +46,9 @@
   ],
   "client": [
     "MixinHideExperimentalWarning",
-    "minecraft.MixinAutoConfirmExperimentalWarningScreen"
+    "minecraft.MixinAutoConfirmExperimentalWarningScreen",
+    "minecraft.MixinConfirmExperimentalFeaturesScreen",
+    "forge.MixinForgeHooksClient"
   ],
   "server": [],
   "verbose": false,

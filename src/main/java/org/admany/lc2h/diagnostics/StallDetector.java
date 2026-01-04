@@ -119,9 +119,9 @@ public final class StallDetector {
             if (diff > thresholdMs) {
                 if (alreadyReported.compareAndSet(false, true)) {
                     if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
-                        LC2H.LOGGER.warn("[LC2H] Possible main-thread stall detected: last heartbeat {} ms ago — generating diagnostics dump", diff);
+                        LC2H.LOGGER.warn("[LC2H] Possible main-thread stall detected: last heartbeat {} ms ago - generating diagnostics dump", diff);
                     } else {
-                        LC2H.LOGGER.debug("[LC2H] Possible main-thread stall detected: last heartbeat {} ms ago — generating diagnostics dump", diff);
+                        LC2H.LOGGER.debug("[LC2H] Possible main-thread stall detected: last heartbeat {} ms ago - generating diagnostics dump", diff);
                     }
                     try {
                         writeStallDump(now, diff);

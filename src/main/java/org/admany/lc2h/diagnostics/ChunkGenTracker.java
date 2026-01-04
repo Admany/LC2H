@@ -4,6 +4,8 @@ import mcjty.lostcities.api.ILostCityBuilding;
 import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import org.admany.lc2h.mixin.accessor.BuildingInfoAccessor;
 
 import java.lang.reflect.Method;
@@ -66,6 +68,19 @@ public final class ChunkGenTracker {
         }
     }
 
+    public static void recordMultiChunkIntegrated(ChunkCoord topLeft, int areaSize) {
+        if (topLeft == null || areaSize <= 0) {
+            return;
+        }
+        String detail = "topLeft=" + topLeft + " areaSize=" + areaSize;
+        for (int dx = 0; dx < areaSize; dx++) {
+            for (int dz = 0; dz < areaSize; dz++) {
+                ChunkCoord coord = new ChunkCoord(topLeft.dimension(), topLeft.chunkX() + dx, topLeft.chunkZ() + dz);
+                record(coord, "multichunk-integrated", detail);
+            }
+        }
+    }
+
     public static String buildReport(ChunkCoord coord) {
         if (coord == null) {
             return "LC2H chunkinfo: invalid coord";
@@ -104,6 +119,51 @@ public final class ChunkGenTracker {
             }
         }
         return sb.toString();
+    }
+
+    public static JsonObject buildReportJson(ChunkCoord coord) {
+        JsonObject root = new JsonObject();
+        if (coord == null) {
+            root.addProperty("hasData", false);
+            root.addProperty("error", "invalid-coord");
+            return root;
+        }
+        root.addProperty("chunkX", coord.chunkX());
+        root.addProperty("chunkZ", coord.chunkZ());
+        if (coord.dimension() != null && coord.dimension().location() != null) {
+            root.addProperty("dimension", coord.dimension().location().toString());
+        }
+
+        ChunkGenSnapshot snapshot = snapshot(coord);
+        if (snapshot == null) {
+            root.addProperty("hasData", false);
+            return root;
+        }
+
+        root.addProperty("hasData", true);
+        root.addProperty("generateStartCount", snapshot.generateStartCount);
+        root.addProperty("generateEndCount", snapshot.generateEndCount);
+        root.addProperty("generateSkipCount", snapshot.generateSkipCount);
+        root.addProperty("buildingInfoCount", snapshot.buildingInfoCount);
+        if (snapshot.lastBuildingDetail != null) {
+            root.addProperty("lastBuildingDetail", snapshot.lastBuildingDetail);
+        }
+
+        JsonArray events = new JsonArray();
+        for (ChunkGenEvent event : snapshot.events) {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("timeMs", event.timeMs());
+            entry.addProperty("event", event.event());
+            if (event.thread() != null) {
+                entry.addProperty("thread", event.thread());
+            }
+            if (event.detail() != null) {
+                entry.addProperty("detail", event.detail());
+            }
+            events.add(entry);
+        }
+        root.add("events", events);
+        return root;
     }
 
     private static void record(ChunkCoord coord, String event, String detail) {

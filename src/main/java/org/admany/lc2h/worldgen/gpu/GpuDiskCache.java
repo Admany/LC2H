@@ -5,6 +5,7 @@ import org.admany.lc2h.LC2H;
 import org.admany.quantified.core.common.cache.CacheManager;
 import org.admany.quantified.core.common.cache.impl.CaffeineThreadSafeCache;
 import org.admany.quantified.core.common.cache.interfaces.ThreadSafeCache;
+import org.admany.quantified.core.common.util.QuantifiedPaths;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -14,14 +15,12 @@ import java.io.ObjectOutputStream;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
-import net.minecraftforge.fml.loading.FMLPaths;
 
 final class GpuDiskCache {
 
@@ -230,8 +229,8 @@ final class GpuDiskCache {
 
     private static Path initializeDiskCacheDirectory() {
         try {
-            Path gameDir = FMLPaths.GAMEDIR.get();
-            Path basePath = gameDir.resolve(Paths.get("QuantifiedAPI", "lc2h", DISK_CACHE_FOLDER));
+            QuantifiedPaths.ensureCacheLayout();
+            Path basePath = QuantifiedPaths.getCacheDir().resolve("lc2h").resolve(DISK_CACHE_FOLDER);
             Files.createDirectories(basePath);
             LC2H.LOGGER.info("GPU disk cache directory initialised at {}", basePath.toAbsolutePath());
             return basePath;

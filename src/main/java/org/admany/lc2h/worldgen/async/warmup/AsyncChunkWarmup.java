@@ -66,9 +66,6 @@ public final class AsyncChunkWarmup {
     private static final AtomicBoolean openClProbeStarted = new AtomicBoolean(false);
     private static volatile boolean gpuReadyOnce = false;
     private static final AtomicBoolean gpuAvailabilityListenerRegistered = new AtomicBoolean(false);
-    private static final AtomicBoolean warmupRetryScheduled = new AtomicBoolean(false);
-    private static volatile java.util.concurrent.ScheduledExecutorService warmupRetryExecutor;
-    private static final long WARMUP_RETRY_DELAY_MS = 3_000L;
     private static final boolean GPU_ENABLED = Boolean.parseBoolean(System.getProperty("lc2h.gpu.enable", "true"));
     private static final long PRE_SCHEDULE_TTL_MS = Math.max(0L, Long.getLong("lc2h.warmup.preScheduleTtlMs", TimeUnit.MINUTES.toMillis(10)));
     private static final int PRE_SCHEDULE_PRUNE_SCAN = Math.max(10, Integer.getInteger("lc2h.warmup.preSchedulePruneScan", 512));
@@ -533,36 +530,6 @@ public final class AsyncChunkWarmup {
         }
     }
 
-    private static void scheduleWarmupRetry() {
-        if (gpuReadyOnce) {
-            return;
-        }
-        if (!warmupRetryScheduled.compareAndSet(false, true)) {
-            return;
-        }
-        getWarmupRetryExecutor().schedule(() -> {
-            warmupRetryScheduled.set(false);
-            initializeGpuWarmup(true);
-        }, WARMUP_RETRY_DELAY_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
-    }
-
-    private static java.util.concurrent.ScheduledExecutorService getWarmupRetryExecutor() {
-        java.util.concurrent.ScheduledExecutorService executor = warmupRetryExecutor;
-        if (executor == null) {
-            synchronized (AsyncChunkWarmup.class) {
-                executor = warmupRetryExecutor;
-                if (executor == null) {
-                    executor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
-                        Thread t = new Thread(r, "lc2h-gpu-warmup-retry");
-                        t.setDaemon(true);
-                        return t;
-                    });
-                    warmupRetryExecutor = executor;
-                }
-            }
-        }
-        return executor;
-    }
 
     public static void startBackgroundPrefetch(IDimensionInfo provider, ChunkCoord playerChunk) {
         long now = System.currentTimeMillis();
@@ -672,11 +639,6 @@ public final class AsyncChunkWarmup {
         PRE_SCHEDULE_CACHE.clear();
         flushScheduled.set(false);
         activeBatches.set(0);
-        warmupRetryScheduled.set(false);
-        java.util.concurrent.ScheduledExecutorService executor = warmupRetryExecutor;
-        if (executor != null) {
-            executor.shutdownNow();
-        }
     }
 
     private static long encodeTimestamp(long nowMs, boolean gpuReady) {

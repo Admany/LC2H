@@ -22,6 +22,9 @@ public interface BuildingInfoAccessor {
     @Accessor("floors")
     int lc2h$getFloors();
 
+    @Accessor("floors")
+    void lc2h$setFloors(int floors);
+
     @Accessor("cellars")
     int lc2h$getCellars();
 

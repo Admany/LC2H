@@ -5,7 +5,6 @@ import com.google.gson.JsonParser;
 import net.minecraft.client.Minecraft;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraftforge.network.NetworkDirection;
 import net.minecraftforge.network.NetworkEvent;
 import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.PacketDistributor;
@@ -16,7 +15,6 @@ import org.admany.lc2h.logging.config.ConfigManager;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -37,10 +35,7 @@ public final class ConfigSyncNetwork {
     }
 
     public static void register() {
-        CHANNEL.registerMessage(0, Payload.class, Payload::encode, Payload::decode, ConfigSyncNetwork::handlePayload,
-            Optional.of(NetworkDirection.PLAY_TO_SERVER));
-        CHANNEL.registerMessage(1, Payload.class, Payload::encode, Payload::decode, ConfigSyncNetwork::handlePayload,
-            Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(0, Payload.class, Payload::encode, Payload::decode, ConfigSyncNetwork::handlePayload);
     }
 
     private static void handlePayload(Payload msg, Supplier<NetworkEvent.Context> ctxSup) {
@@ -69,6 +64,7 @@ public final class ConfigSyncNetwork {
             }
             ConfigManager.Config cfg = ConfigManager.GSON.fromJson(cfgString, ConfigManager.Config.class);
             if (cfg != null) {
+                logConfigDiffs(sender, cfg);
                 ConfigManager.writePrettyJsonConfig(cfg);
                 ConfigManager.CONFIG = cfg;
                 ConfigManager.initializeGlobals();
@@ -94,6 +90,41 @@ public final class ConfigSyncNetwork {
                 ConfigManager.initializeGlobals();
             }
         } catch (Exception ignored) {
+        }
+    }
+
+    private static void logConfigDiffs(ServerPlayer sender, ConfigManager.Config incoming) {
+        ConfigManager.Config current = ConfigManager.CONFIG;
+        String playerName = sender == null ? "unknown" : sender.getGameProfile().getName();
+        if (current == null || incoming == null) {
+            LOGGER.info("[LC2H] Config apply from {} (no diff available)", playerName);
+            return;
+        }
+        StringBuilder changes = new StringBuilder();
+        try {
+            for (java.lang.reflect.Field field : ConfigManager.Config.class.getFields()) {
+                Object oldVal = field.get(current);
+                Object newVal = field.get(incoming);
+                if (oldVal == null && newVal == null) {
+                    continue;
+                }
+                if (oldVal != null && oldVal.equals(newVal)) {
+                    continue;
+                }
+                if (changes.length() > 0) {
+                    changes.append(", ");
+                }
+                changes.append(field.getName())
+                    .append("=")
+                    .append(String.valueOf(newVal));
+            }
+        } catch (Exception e) {
+            LOGGER.warn("[LC2H] Failed to compute config diff: {}", e.getMessage());
+        }
+        if (changes.length() == 0) {
+            LOGGER.info("[LC2H] Config apply from {} (no changes detected)", playerName);
+        } else {
+            LOGGER.info("[LC2H] Config apply from {}: {}", playerName, changes);
         }
     }
 

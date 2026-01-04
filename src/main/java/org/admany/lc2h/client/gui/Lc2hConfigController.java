@@ -62,15 +62,17 @@ final class Lc2hConfigController {
         }
     }
 
-    void requestBenchmarkStart() {
-        if (!Minecraft.getInstance().hasSingleplayerServer()) {
-            statusMessage = Component.literal("Benchmark not available on dedicated servers.");
+    boolean requestBenchmarkStart() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.level == null || minecraft.player == null) {
+            statusMessage = Component.literal("You need to be in a world to run the benchmark.");
             statusColor = 0xFF5555;
-            return;
+            return false;
         }
         BenchmarkManager.BenchmarkStatus status = BenchmarkManager.requestStart();
         statusMessage = status.message();
         statusColor = status.color();
+        return status.stage() == BenchmarkManager.Stage.PREPARING || status.stage() == BenchmarkManager.Stage.RUNNING;
     }
 
     boolean isBenchmarkRunning() {
@@ -132,6 +134,10 @@ final class Lc2hConfigController {
         }
         tryParseInt(values.cityBlendWidth(), v -> uiState.cityBlendWidth = Math.max(4, v));
         tryParseDouble(values.cityBlendSoftness(), v -> uiState.cityBlendSoftness = Math.max(0.5, v));
+        String normalizedAccent = normalizeHexColor(values.uiAccentColor());
+        if (normalizedAccent != null) {
+            uiState.uiAccentColor = normalizedAccent;
+        }
 
         ConfigManager.Config baseConfig = ConfigManager.CONFIG != null ? ConfigManager.CONFIG : initialConfig;
         ConfigManager.Config updated = toConfig(uiState, baseConfig);
@@ -201,6 +207,41 @@ final class Lc2hConfigController {
         }
     }
 
+    private String normalizeHexColor(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        if (trimmed.startsWith("#")) {
+            trimmed = trimmed.substring(1);
+        }
+        if (trimmed.startsWith("0x") || trimmed.startsWith("0X")) {
+            trimmed = trimmed.substring(2);
+        }
+        if (trimmed.length() == 3) {
+            char r = trimmed.charAt(0);
+            char g = trimmed.charAt(1);
+            char b = trimmed.charAt(2);
+            trimmed = "" + r + r + g + g + b + b;
+        }
+        if (trimmed.length() != 6) {
+            return null;
+        }
+        for (int i = 0; i < trimmed.length(); i++) {
+            char c = trimmed.charAt(i);
+            boolean hex = (c >= '0' && c <= '9')
+                    || (c >= 'a' && c <= 'f')
+                    || (c >= 'A' && c <= 'F');
+            if (!hex) {
+                return null;
+            }
+        }
+        return trimmed.toUpperCase();
+    }
+
     private ConfigManager.Config copyConfig(ConfigManager.Config src) {
         if (src == null) {
             return new ConfigManager.Config();
@@ -214,6 +255,7 @@ final class Lc2hConfigController {
         c.enableExplosionDebris = src.enableExplosionDebris;
         c.hideExperimentalWarning = src.hideExperimentalWarning;
         c.enableDebugLogging = src.enableDebugLogging;
+        c.uiAccentColor = src.uiAccentColor;
         c.cityBlendEnabled = src.cityBlendEnabled;
         c.cityBlendWidth = src.cityBlendWidth;
         c.cityBlendSoftness = src.cityBlendSoftness;
@@ -234,6 +276,7 @@ final class Lc2hConfigController {
         state.enableExplosionDebris = config.enableExplosionDebris;
         state.hideExperimentalWarning = config.hideExperimentalWarning;
         state.enableDebugLogging = config.enableDebugLogging;
+        state.uiAccentColor = config.uiAccentColor;
         state.cityBlendEnabled = config.cityBlendEnabled;
         state.cityBlendWidth = config.cityBlendWidth;
         state.cityBlendSoftness = config.cityBlendSoftness;
@@ -251,6 +294,7 @@ final class Lc2hConfigController {
         config.enableExplosionDebris = state.enableExplosionDebris;
         config.hideExperimentalWarning = state.hideExperimentalWarning;
         config.enableDebugLogging = state.enableDebugLogging;
+        config.uiAccentColor = state.uiAccentColor;
         config.cityBlendEnabled = state.cityBlendEnabled;
         config.cityBlendWidth = state.cityBlendWidth;
         config.cityBlendSoftness = state.cityBlendSoftness;
@@ -260,7 +304,8 @@ final class Lc2hConfigController {
 
     record FormValues(
         String cityBlendWidth,
-        String cityBlendSoftness
+        String cityBlendSoftness,
+        String uiAccentColor
     ) {
     }
 
@@ -273,6 +318,7 @@ final class Lc2hConfigController {
         public boolean enableExplosionDebris;
         public boolean hideExperimentalWarning;
         public boolean enableDebugLogging;
+        public String uiAccentColor;
         public boolean cityBlendEnabled;
         public int cityBlendWidth;
         public double cityBlendSoftness;

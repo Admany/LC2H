@@ -183,7 +183,9 @@ final class BenchmarkEventHandler {
             if (event.getKey() == GLFW.GLFW_KEY_ESCAPE) {
                 BenchmarkManager.requestUserCancelFromClient("User pressed ESC");
             }
-            event.setCanceled(true);
+            if (event.isCancelable()) {
+                event.setCanceled(true);
+            }
             return;
         }
         if (countdownActive && event.getKey() == GLFW.GLFW_KEY_ESCAPE) {

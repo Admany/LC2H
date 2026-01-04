@@ -121,6 +121,11 @@ public class Lc2hConfigScreen extends Screen {
 
     private EditBox blendWidthBox;
     private EditBox blendSoftnessBox;
+    private EditBox accentColorBox;
+    private static final int DEFAULT_ACCENT_COLOR = 0x3A86FF;
+    private static final int QUANTIFIED_HIGHLIGHT_COLOR = 0xB36CFF;
+    private String cachedAccentInput = "";
+    private int cachedAccentColor = DEFAULT_ACCENT_COLOR;
     private final List<LabelEntry> labels = new ArrayList<>();
     private final Map<Button, Float> buttonScale = new IdentityHashMap<>();
     private final Map<Button, int[]> buttonRects = new IdentityHashMap<>();
@@ -135,7 +140,11 @@ public class Lc2hConfigScreen extends Screen {
     private final Map<Button, Float> buttonPulse = new IdentityHashMap<>();
     private boolean restartWarningVisible = false;
     private float restartWarningProgress = 0f;
-    private Component restartWarningDetail = Component.empty();
+    private Component restartWarningSummary = Component.empty();
+    private Component restartWarningWarning = Component.empty();
+    private Component restartWarningTitle = Component.empty();
+    private Component restartPrimaryLabel = Component.empty();
+    private boolean restartWarningServer = false;
     private float restartCloseHover = 0f;
     private float restartLaterHover = 0f;
     private final int[] restartCloseRect = new int[4];
@@ -143,6 +152,8 @@ public class Lc2hConfigScreen extends Screen {
     private static final Component RESTART_WARNING_TITLE = Component.literal("Restart Required");
     private static final Component RESTART_CLOSE_LABEL = Component.literal("Close Game");
     private static final Component RESTART_LATER_LABEL = Component.literal("Do It Later");
+    private static final Component SERVER_RESTART_TITLE = Component.literal("Server Restart Required");
+    private static final Component SERVER_RESTART_ACTION = Component.literal("Stop Server");
 
     private record LabelEntry(int x, int y, int descStartY, Component title,
                               List<FormattedCharSequence> lines, boolean requiresRestart) { }
@@ -227,7 +238,11 @@ public class Lc2hConfigScreen extends Screen {
         this.buttonPulse.clear();
         this.restartWarningVisible = false;
         this.restartWarningProgress = 0f;
-        this.restartWarningDetail = Component.empty();
+        this.restartWarningSummary = Component.empty();
+        this.restartWarningWarning = Component.empty();
+        this.restartWarningTitle = RESTART_WARNING_TITLE;
+        this.restartPrimaryLabel = RESTART_CLOSE_LABEL;
+        this.restartWarningServer = false;
         this.restartCloseHover = 0f;
         this.restartLaterHover = 0f;
 
@@ -284,9 +299,15 @@ public class Lc2hConfigScreen extends Screen {
                 "Hide the vanilla experimental warning screen for this mod.", false, val -> working.hideExperimentalWarning = val);
         addToggle(layout, "Debug Logging", working.enableDebugLogging,
                 "Enable verbose debug logging for warmup/memory operations.", false, val -> working.enableDebugLogging = val);
+        addSectionHeader(layout, Component.literal("INTERFACE"));
+        String accentValue = working.uiAccentColor == null ? "3A86FF" : working.uiAccentColor;
+        this.accentColorBox = addTextField(layout, "UI Accent Color (Hex)",
+                "Accent color for the LC2H config UI (hex, example: 3A86FF).", accentValue, false, 9);
+        this.accentColorBox.setFilter(this::isHexInput);
+        this.accentColorBox.setResponder(value -> working.uiAccentColor = value);
         addSectionHeader(layout, Component.literal("CITY EDGE"));
-        addToggle(layout, "Enable City Blend", working.cityBlendEnabled,
-                "Smoothly blend city edges into surrounding terrain. [EXPERIMENTAL]", Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendEnabled = val);
+        addToggle(layout, "Enable City Blend [EXPERIMENTAL]", working.cityBlendEnabled,
+                "Smoothly blend city edges into surrounding terrain.", Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendEnabled = val);
         addToggle(layout, "Clear Trees Near City Border", working.cityBlendClearTrees,
                 "Prevent trees from generating close to city borders.", Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendClearTrees = val);
         this.blendWidthBox = addNumberField(layout, "Blend Width (blocks)",
@@ -297,7 +318,11 @@ public class Lc2hConfigScreen extends Screen {
         addSectionHeader(layout, Component.literal("BENCHMARK - Performance Validation"));
         addActionButton(layout, "Automated Throughput Trial",
                 "Creates an automated Lost Cities stress run at 10k×10k to capture chunks/min, TPS range, and freeze counts. Keep hands off inputs during the minute-long sweep.",
-                Component.literal("Launch Benchmark"), btn -> controller.requestBenchmarkStart(), false);
+                Component.literal("Launch Benchmark"), btn -> {
+                    if (controller.requestBenchmarkStart()) {
+                        Minecraft.getInstance().setScreen(null);
+                    }
+                }, false);
 
         int layoutBottom = layout.maxHeight();
         int desiredFooterY = this.height - 48;
@@ -368,9 +393,16 @@ public class Lc2hConfigScreen extends Screen {
     }
 
     private EditBox addNumberField(LayoutHelper layout, String title, String description, String value, boolean requiresRestart) {
+        return addTextField(layout, title, description, value, requiresRestart, 12);
+    }
+
+    private EditBox addTextField(LayoutHelper layout, String title, String description, String value, boolean requiresRestart, int maxLength) {
         EntryPlacement placement = prepareEntry(layout, title, description, requiresRestart, 150, 18);
         EditBox box = new EditBox(this.font, placement.controlX(), placement.controlY(), placement.controlWidth(), placement.controlHeight(), Component.literal(title));
-        box.setValue(value);
+        box.setValue(value == null ? "" : value);
+        if (maxLength > 0) {
+            box.setMaxLength(maxLength);
+        }
         addRenderableWidget(box);
         textFieldOriginalY.put(box, placement.controlY());
         textFieldAlpha.put(box, 1f);
@@ -510,7 +542,6 @@ public class Lc2hConfigScreen extends Screen {
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         int screenW = this.width;
         int screenH = this.height;
-        boolean modalActive = isRestartWarningActive();
 
         renderUniverseBackground(graphics, screenW, screenH, partialTick);
 
@@ -520,32 +551,33 @@ public class Lc2hConfigScreen extends Screen {
         int outerRight = this.contentRight + 24;
 
         renderHeader(graphics, outerLeft, outerRight, headerTop, headerBottom);
-        renderContentArea(graphics, mouseX, mouseY, partialTick, !modalActive);
+        renderContentArea(graphics, mouseX, mouseY, partialTick, true);
         renderFooter(graphics);
-        if (!modalActive) {
-            renderTextContent(graphics);
-            renderScrollBar(graphics);
+        renderTextContent(graphics);
+        renderScrollBar(graphics);
 
-            int bodyTop = this.contentTop;
-            int bodyBottom = Math.max(bodyTop, (this.footerY - 12) - 8);
-            withBodyScissor(graphics, bodyTop, bodyBottom, () -> Lc2hConfigScreen.super.render(graphics, mouseX, mouseY, partialTick));
-            renderButtonHighlights(graphics);
-            renderButtonText(graphics);
-        }
+        int bodyTop = this.contentTop;
+        int bodyBottom = Math.max(bodyTop, (this.footerY - 12) - 8);
+        withBodyScissor(graphics, bodyTop, bodyBottom, () -> Lc2hConfigScreen.super.render(graphics, mouseX, mouseY, partialTick));
+        renderButtonHighlights(graphics);
+        renderButtonText(graphics);
         renderRestartWarning(graphics, mouseX, mouseY);
     }
 
     private void renderUniverseBackground(GuiGraphics graphics, int screenW, int screenH, float partialTick) {
         float time = this.time + partialTick;
+        int accent = getAccentColor();
+        int baseBg = tint(0x0A0A15, accent, 0.08f);
+        int waveColor = tint(0x1A1A2E, accent, 0.15f);
 
-        graphics.fill(0, 0, screenW, screenH, 0xFF0A0A15);
+        graphics.fill(0, 0, screenW, screenH, 0xFF000000 | baseBg);
 
         renderStars(graphics, screenW, screenH);
 
         for (int i = 0; i < screenW; i += 6) {
             float wave = (float) Math.sin(i * 0.015 + time * 0.08) * 1.5f;
             int alpha = (int) (4 + wave * 3);
-            graphics.fill(i, 0, i + 2, screenH, (alpha << 24) | 0x1A1A2E);
+            graphics.fill(i, 0, i + 2, screenH, (alpha << 24) | waveColor);
         }
 
         for (Particle p : particles) {
@@ -558,7 +590,8 @@ public class Lc2hConfigScreen extends Screen {
         for (int i = 0; i < 2; i++) {
             float x = (float) (Math.sin(time * 0.015 + i) * 80 + screenW/2);
             float y = (float) (Math.cos(time * 0.012 + i) * 60 + screenH/3);
-            renderNebula(graphics, x, y, 0x33333A5E, 60 + i * 15);
+            int nebulaColor = tint(0x333A5E, accent, 0.25f);
+            renderNebula(graphics, x, y, nebulaColor, 60 + i * 15);
         }
     }
 
@@ -612,18 +645,35 @@ public class Lc2hConfigScreen extends Screen {
     }
 
     private void renderHeader(GuiGraphics graphics, int outerLeft, int outerRight, int headerTop, int headerBottom) {
-        graphics.fillGradient(outerLeft, headerTop - 20, outerRight, headerBottom + 12,
-                0xCC1A1A2E, 0xCC0A0A15);
+        int accent = getAccentColor();
+        int headerTopColor = tintWithAlpha(0x1A1A2E, accent, 0.18f, 0xCC);
+        int headerBottomColor = tintWithAlpha(0x0A0A15, accent, 0.12f, 0xCC);
+        int headerInset = tintWithAlpha(0x1A1A2E, accent, 0.14f, 0x66);
 
-        graphics.fill(outerLeft + 2, headerTop - 18, outerRight - 2, headerBottom + 10, 0x661A1A2E);
+        graphics.fillGradient(outerLeft, headerTop - 20, outerRight, headerBottom + 12,
+                headerTopColor, headerBottomColor);
+
+        graphics.fill(outerLeft + 2, headerTop - 18, outerRight - 2, headerBottom + 10, headerInset);
 
         int centerX = this.width / 2;
 
-        renderCenteredTextWithGlow(graphics, this.font, this.title, centerX, 20, 0xFF3A86FF, 0x663A86FF);
+        renderCenteredTextWithGlow(graphics, this.font, this.title, centerX, 20,
+                (0xFF << 24) | (accent & 0xFFFFFF),
+                (0x66 << 24) | (accent & 0xFFFFFF));
 
-        renderCenteredTextWithGlow(graphics, this.font,
-                Component.literal("Multithreading Engine for The Lost Cities. Made to deliver best performance. Powered by Quantified API"),
-                centerX, 44, 0x88FFFFFF, 0x33333333);
+        String subline = "Multithreading Engine for The Lost Cities. Made to deliver best performance. Powered by Quantified API";
+        renderCenteredTextWithGlow(graphics, this.font, Component.literal(subline), centerX, 44, 0x88FFFFFF, 0x33333333);
+        String highlight = "Quantified API";
+        int highlightIndex = subline.indexOf(highlight);
+        if (highlightIndex >= 0) {
+            int fullWidth = this.font.width(subline);
+            int startX = centerX - fullWidth / 2;
+            int prefixWidth = this.font.width(subline.substring(0, highlightIndex));
+            int highlightX = startX + prefixWidth;
+            renderStringWithGlow(graphics, this.font, highlight, highlightX, 44,
+                    (0xFF << 24) | (QUANTIFIED_HIGHLIGHT_COLOR & 0xFFFFFF),
+                    (0x66 << 24) | (QUANTIFIED_HIGHLIGHT_COLOR & 0xFFFFFF));
+        }
 
         renderCenteredTextWithGlow(graphics, this.font,
                 Component.literal("Includes bug fixes, general improvements, and... DUCKS :DDD. Fields marked in red require a server restart."),
@@ -638,6 +688,16 @@ public class Lc2hConfigScreen extends Screen {
             }
         }
         graphics.drawString(font, text, x - font.width(text) / 2, y, color, false);
+    }
+
+    private void renderStringWithGlow(GuiGraphics graphics, net.minecraft.client.gui.Font font, String text, int x, int y, int color, int glowColor) {
+        for (int offsetX = -1; offsetX <= 1; offsetX++) {
+            for (int offsetY = -1; offsetY <= 1; offsetY++) {
+                if (offsetX == 0 && offsetY == 0) continue;
+                graphics.drawString(font, text, x + offsetX, y + offsetY, glowColor, false);
+            }
+        }
+        graphics.drawString(font, text, x, y, color, false);
     }
 
     private void withBodyScissor(GuiGraphics graphics, int bodyTop, int bodyBottom, Runnable draw) {
@@ -661,11 +721,15 @@ public class Lc2hConfigScreen extends Screen {
         int footerTop = this.footerY - 12;
         int bodyBottom = Math.max(bodyTop, footerTop - 8);
         int bodyBottomClipped = bodyBottom;
+        int accent = getAccentColor();
+        int panelTop = tintWithAlpha(0x1A1A2E, accent, 0.18f, 0xCC);
+        int panelBottom = tintWithAlpha(0x0A0A15, accent, 0.12f, 0xCC);
+        int panelFill = tintWithAlpha(0x1A1A2E, accent, 0.14f, 0x88);
 
         graphics.fillGradient(this.contentLeft - 18, bodyTop - 8, this.contentRight + 18, bodyBottomClipped + 18,
-                0xCC1A1A2E, 0xCC0A0A15);
+                panelTop, panelBottom);
 
-        graphics.fill(this.contentLeft - 12, bodyTop, this.contentRight + 12, bodyBottomClipped + 8, 0x881A1A2E);
+        graphics.fill(this.contentLeft - 12, bodyTop, this.contentRight + 12, bodyBottomClipped + 8, panelFill);
 
         int fadeZone = 24;
         int maxSlide = 8;
@@ -674,6 +738,7 @@ public class Lc2hConfigScreen extends Screen {
             withBodyScissor(graphics, bodyTop, bodyBottomClipped, () -> {
                 renderScrollableWidgets(graphics, mouseX, mouseY, bodyTop, bodyBottomClipped, fadeZone, maxSlide);
                 renderTextFields(graphics, bodyTop, bodyBottomClipped, fadeZone, maxSlide);
+                renderAccentPreview(graphics, bodyTop, bodyBottomClipped);
             });
             renderFixedButtons(graphics, mouseX, mouseY);
         }
@@ -737,9 +802,10 @@ public class Lc2hConfigScreen extends Screen {
         int bgAlpha = Math.max(0, Math.min(255, Math.round(alpha * 255)));
         float pulse = (float) Math.sin(buttonPulse.getOrDefault(button, 0f)) * 0.1f + 0.9f;
 
-        int baseColor = 0x1A1A2E;
-        int hoverColor = 0x3A3A5E;
-        int borderColor = 0x3A86FF;
+        int accent = getAccentColor();
+        int baseColor = tint(0x1A1A2E, accent, 0.08f);
+        int hoverColor = tint(0x3A3A5E, accent, 0.12f);
+        int borderColor = getAccentColor();
 
         int currentColor = blendColors(baseColor, hoverColor, hover * 0.3f);
         currentColor = adjustColorBrightness(currentColor, pulse);
@@ -751,7 +817,7 @@ public class Lc2hConfigScreen extends Screen {
         int innerPadX = 0;
         int innerPadY = 1;
 
-        graphics.fill(x - outerPadX, y - outerPadY, x + width + outerPadX, y + height + outerPadY, (bgAlpha << 24) | 0x0A0A15);
+        graphics.fill(x - outerPadX, y - outerPadY, x + width + outerPadX, y + height + outerPadY, (bgAlpha << 24) | tint(0x0A0A15, accent, 0.08f));
         graphics.fill(x - midPadX, y - midPadY, x + width + midPadX, y + height + midPadY, (bgAlpha << 24) | borderColor);
         graphics.fill(x - innerPadX, y - innerPadY, x + width + innerPadX, y + height + innerPadY, (bgAlpha << 24) | currentColor);
 
@@ -805,15 +871,38 @@ public class Lc2hConfigScreen extends Screen {
 
             if (currAlpha < 0.999f) {
                 int overlayAlpha = Math.max(0, Math.min(220, Math.round((1f - currAlpha) * 220)));
+                int accent = getAccentColor();
                 graphics.fill(field.getX() - 2, drawY - 2, field.getX() + field.getWidth() + 2, drawY + field.getHeight() + 2,
-                        (overlayAlpha << 24) | 0x0A0A15);
+                        (overlayAlpha << 24) | tint(0x0A0A15, accent, 0.08f));
             }
 
             graphics.fill(field.getX() - 1, drawY - 1, field.getX() + field.getWidth() + 1, drawY + field.getHeight() + 1,
-                    ((int)(currAlpha * 255) << 24) | 0x3A86FF);
+                    ((int)(currAlpha * 255) << 24) | getAccentColor());
             graphics.fill(field.getX(), drawY, field.getX() + field.getWidth(), field.getY() + field.getHeight(),
-                    ((int)(currAlpha * 200) << 24) | 0x1A1A2E);
+                    ((int)(currAlpha * 200) << 24) | tint(0x1A1A2E, getAccentColor(), 0.08f));
         }
+    }
+
+    private void renderAccentPreview(GuiGraphics graphics, int bodyTop, int bodyBottomClipped) {
+        if (accentColorBox == null || !accentColorBox.visible) {
+            return;
+        }
+        int fieldX = accentColorBox.getX();
+        int fieldY = accentColorBox.getY();
+        int fieldH = accentColorBox.getHeight();
+        int fieldW = accentColorBox.getWidth();
+        int swatchSize = Math.max(8, fieldH - 6);
+        int swatchX = fieldX + fieldW - swatchSize - 3;
+        int swatchY = fieldY + (fieldH - swatchSize) / 2;
+        if (swatchY + swatchSize < bodyTop || swatchY > bodyBottomClipped) {
+            return;
+        }
+        float alpha = textFieldAlpha.getOrDefault(accentColorBox, 1f);
+        int accent = getAccentColor();
+        graphics.fill(swatchX - 1, swatchY - 1, swatchX + swatchSize + 1, swatchY + swatchSize + 1,
+                applyAlpha(0x1A1A2E, alpha));
+        graphics.fill(swatchX, swatchY, swatchX + swatchSize, swatchY + swatchSize,
+                applyAlpha(accent, alpha));
     }
 
     private void renderFixedButtons(GuiGraphics graphics, int mouseX, int mouseY) {
@@ -836,9 +925,10 @@ public class Lc2hConfigScreen extends Screen {
     }
 
     private void renderModernButton(GuiGraphics graphics, int x, int y, int width, int height, float hover, float pulse, boolean isOver) {
-        int baseColor = 0x1A1A2E;
-        int hoverColor = 0x3A3A5E;
-        int accentColor = 0x3A86FF;
+        int accent = getAccentColor();
+        int baseColor = tint(0x1A1A2E, accent, 0.08f);
+        int hoverColor = tint(0x3A3A5E, accent, 0.12f);
+        int accentColor = getAccentColor();
 
         int currentColor = blendColors(baseColor, hoverColor, hover);
         currentColor = adjustColorBrightness(currentColor, pulse);
@@ -850,7 +940,8 @@ public class Lc2hConfigScreen extends Screen {
         int innerPadX = 0;
         int innerPadY = 1;
 
-        graphics.fill(x - outerPadX, y - outerPadY, x + width + outerPadX, y + height + outerPadY, 0xAA0A0A15);
+        graphics.fill(x - outerPadX, y - outerPadY, x + width + outerPadX, y + height + outerPadY,
+                (0xAA << 24) | tint(0x0A0A15, accent, 0.08f));
         graphics.fill(x - midPadX, y - midPadY, x + width + midPadX, y + height + midPadY, accentColor);
         graphics.fill(x - innerPadX, y - innerPadY, x + width + innerPadX, y + height + innerPadY, currentColor);
 
@@ -885,8 +976,11 @@ public class Lc2hConfigScreen extends Screen {
 
     private void renderFooter(GuiGraphics graphics) {
         int footerTop = this.footerY - 12;
+        int accent = getAccentColor();
+        int footerTopColor = tintWithAlpha(0x1A1A2E, accent, 0.16f, 0xCC);
+        int footerBottomColor = tintWithAlpha(0x0A0A15, accent, 0.12f, 0xCC);
         graphics.fillGradient(this.contentLeft - 18, footerTop, this.contentRight + 18, this.footerY + 32,
-                0xCC1A1A2E, 0xCC0A0A15);
+                footerTopColor, footerBottomColor);
     }
 
     private void renderTextContent(GuiGraphics graphics) {
@@ -895,6 +989,8 @@ public class Lc2hConfigScreen extends Screen {
         int bodyBottomClipped = Math.max(bodyTop, footerTop - 8);
         int fadeZone = 24;
         int centerX = this.contentLeft + this.contentWidth / 2;
+        int accent = getAccentColor();
+        int descBase = blendColors(accent, 0xFFFFFF, 0.55f);
 
         withBodyScissor(graphics, bodyTop, bodyBottomClipped, () -> {
             for (LabelEntry entry : labels) {
@@ -911,9 +1007,8 @@ public class Lc2hConfigScreen extends Screen {
                 int lineY = entry.descStartY() - (int)scrollOffset;
                 for (FormattedCharSequence line : entry.lines()) {
                     if (lineY + this.font.lineHeight >= bodyTop && lineY <= bodyBottomClipped) {
-                        int base = 0xA0C0FF;
                         int alpha = Math.max(0, Math.min(255, Math.round(titleAlpha * 255))) << 24;
-                        graphics.drawString(this.font, line, entry.x(), lineY, alpha | (base & 0xFFFFFF));
+                        graphics.drawString(this.font, line, entry.x(), lineY, alpha | (descBase & 0xFFFFFF));
                     }
                     lineY += this.font.lineHeight;
                 }
@@ -938,12 +1033,15 @@ public class Lc2hConfigScreen extends Screen {
             else thumbHeight = Math.max(20, (int)(barHeight * (float)this.viewportHeight / (float)Math.max(1, this.contentFullHeight)));
             int thumbY = maxScrollOffset > 0 ? barY + (int)((scrollOffset / (float)maxScrollOffset) * (barHeight - thumbHeight)) : barY;
 
-            graphics.fill(barX, barY, barX + barWidth, barY + barHeight, 0x661A1A2E);
-            graphics.fill(barX - 1, thumbY - 1, barX + barWidth + 1, thumbY + thumbHeight + 1, 0xFF3A86FF);
-            graphics.fill(barX, thumbY, barX + barWidth, thumbY + thumbHeight, 0xFF1A1A2E);
+            graphics.fill(barX, barY, barX + barWidth, barY + barHeight,
+                    (0x66 << 24) | tint(0x1A1A2E, getAccentColor(), 0.12f));
+            int accent = getAccentColor();
+            graphics.fill(barX - 1, thumbY - 1, barX + barWidth + 1, thumbY + thumbHeight + 1, (0xFF << 24) | (accent & 0xFFFFFF));
+            graphics.fill(barX, thumbY, barX + barWidth, thumbY + thumbHeight,
+                    (0xFF << 24) | tint(0x1A1A2E, accent, 0.12f));
 
             float pulse = (float) Math.sin(time * 0.1) * 0.2f + 0.8f;
-            int pulseColor = adjustColorBrightness(0xFF3A86FF, pulse);
+            int pulseColor = adjustColorBrightness(accent, pulse);
             graphics.fill(barX + 1, thumbY + 1, barX + barWidth - 1, thumbY + thumbHeight - 1, pulseColor);
         }
     }
@@ -967,7 +1065,7 @@ public class Lc2hConfigScreen extends Screen {
                 int by = originalY - (int)scrollOffset + Math.round(currOffset);
                 if (by + bh < bodyTop || by > bodyBottomClipped) continue;
                 int alpha = Math.min(200, Math.round(200 * v * fadeIn));
-                int color = (alpha << 24) | 0x3A86FF;
+                int color = (alpha << 24) | getAccentColor();
                 graphics.fill(bx, by, bx + bw, by + bh, color);
             }
         });
@@ -1031,6 +1129,15 @@ public class Lc2hConfigScreen extends Screen {
         return (r << 16) | (g << 8) | b;
     }
 
+    private int tint(int baseRgb, int accentRgb, float amount) {
+        return blendColors(baseRgb, accentRgb, clamp(0f, 1f, amount));
+    }
+
+    private int tintWithAlpha(int baseRgb, int accentRgb, float amount, int alpha) {
+        int rgb = tint(baseRgb, accentRgb, amount);
+        return ((alpha & 0xFF) << 24) | (rgb & 0xFFFFFF);
+    }
+
     private int adjustColorBrightness(int color, float factor) {
         int r = (int)(((color >> 16) & 0xFF) * factor);
         int g = (int)(((color >> 8) & 0xFF) * factor);
@@ -1041,6 +1148,79 @@ public class Lc2hConfigScreen extends Screen {
         b = Math.min(255, Math.max(0, b));
 
         return (r << 16) | (g << 8) | b;
+    }
+
+    private boolean isHexInput(String value) {
+        if (value == null || value.isEmpty()) {
+            return true;
+        }
+        String trimmed = value.trim();
+        if (trimmed.startsWith("#")) {
+            trimmed = trimmed.substring(1);
+        }
+        if (trimmed.startsWith("0x") || trimmed.startsWith("0X")) {
+            trimmed = trimmed.substring(2);
+        }
+        for (int i = 0; i < trimmed.length(); i++) {
+            char c = trimmed.charAt(i);
+            boolean hex = (c >= '0' && c <= '9')
+                    || (c >= 'a' && c <= 'f')
+                    || (c >= 'A' && c <= 'F');
+            if (!hex) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private String getAccentInput() {
+        if (accentColorBox != null) {
+            return accentColorBox.getValue();
+        }
+        return uiState.uiAccentColor;
+    }
+
+    private int getAccentColor() {
+        String input = getAccentInput();
+        if (input == null) {
+            input = "";
+        }
+        if (!input.equals(cachedAccentInput)) {
+            Integer parsed = parseHexColor(input);
+            cachedAccentColor = parsed == null ? DEFAULT_ACCENT_COLOR : parsed;
+            cachedAccentInput = input;
+        }
+        return cachedAccentColor;
+    }
+
+    private static Integer parseHexColor(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String value = raw.trim();
+        if (value.isEmpty()) {
+            return null;
+        }
+        if (value.startsWith("#")) {
+            value = value.substring(1);
+        }
+        if (value.startsWith("0x") || value.startsWith("0X")) {
+            value = value.substring(2);
+        }
+        if (value.length() == 3) {
+            char r = value.charAt(0);
+            char g = value.charAt(1);
+            char b = value.charAt(2);
+            value = "" + r + r + g + g + b + b;
+        }
+        if (value.length() != 6) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value, 16) & 0xFFFFFF;
+        } catch (NumberFormatException ex) {
+            return null;
+        }
     }
 
     @Override
@@ -1107,15 +1287,29 @@ public class Lc2hConfigScreen extends Screen {
     private Lc2hConfigController.FormValues buildFormValues() {
         return new Lc2hConfigController.FormValues(
                 blendWidthBox.getValue(),
-                blendSoftnessBox.getValue()
+                blendSoftnessBox.getValue(),
+                accentColorBox == null ? null : accentColorBox.getValue()
         );
     }
 
     private void showRestartWarning(String optionTitle) {
-        if (optionTitle == null || optionTitle.isBlank()) {
-            restartWarningDetail = Component.literal("One or more changes need a restart to fully apply.");
+        restartWarningServer = shouldWarnServerRestart();
+        restartWarningTitle = restartWarningServer ? SERVER_RESTART_TITLE : RESTART_WARNING_TITLE;
+        restartPrimaryLabel = restartWarningServer ? SERVER_RESTART_ACTION : RESTART_CLOSE_LABEL;
+        if (restartWarningServer) {
+            if (optionTitle == null || optionTitle.isBlank()) {
+                restartWarningSummary = Component.literal("Server restart required for these changes.");
+            } else {
+                restartWarningSummary = Component.literal(optionTitle + " needs a server restart to apply.");
+            }
+            restartWarningWarning = Component.literal(
+                    "Stopping the server will disconnect everyone. Save all progress and be ready to manually start the server again.");
+        } else if (optionTitle == null || optionTitle.isBlank()) {
+            restartWarningSummary = Component.literal("One or more changes need a restart to fully apply.");
+            restartWarningWarning = Component.empty();
         } else {
-            restartWarningDetail = Component.literal(optionTitle + " needs a restart to fully apply.");
+            restartWarningSummary = Component.literal(optionTitle + " needs a restart to fully apply.");
+            restartWarningWarning = Component.empty();
         }
         restartWarningVisible = true;
     }
@@ -1131,7 +1325,11 @@ public class Lc2hConfigScreen extends Screen {
     private boolean handleRestartWarningClick(double mouseX, double mouseY) {
         if (isInRect(mouseX, mouseY, restartCloseRect)) {
             controller.playClickSound();
-            Minecraft.getInstance().stop();
+            if (restartWarningServer) {
+                requestServerStop();
+            } else {
+                Minecraft.getInstance().stop();
+            }
             return true;
         }
         if (isInRect(mouseX, mouseY, restartLaterRect)) {
@@ -1142,10 +1340,31 @@ public class Lc2hConfigScreen extends Screen {
         return true;
     }
 
+    private boolean shouldWarnServerRestart() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.getSingleplayerServer() != null) {
+            return false;
+        }
+        return minecraft.player != null && minecraft.player.hasPermissions(2);
+    }
+
+    private void requestServerStop() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.player == null || minecraft.player.connection == null) {
+            closeRestartWarning();
+            return;
+        }
+        minecraft.player.connection.sendCommand("stop");
+        closeRestartWarning();
+    }
+
     private void renderRestartWarning(GuiGraphics graphics, int mouseX, int mouseY) {
         if (restartWarningProgress <= 0.01f) {
             return;
         }
+        graphics.flush();
+        graphics.pose().pushPose();
+        graphics.pose().translate(0.0f, 0.0f, 200.0f);
         float eased = 1f - (float) Math.pow(1f - restartWarningProgress, 3);
         renderBlurOverlay(graphics, eased);
 
@@ -1160,7 +1379,7 @@ public class Lc2hConfigScreen extends Screen {
         int drawX = baseX + (modalWidth - drawWidth) / 2;
         int drawY = baseY + (modalHeight - drawHeight) / 2;
 
-        int borderColor = applyAlpha(0x3A86FF, eased);
+        int borderColor = applyAlpha(getAccentColor(), eased);
         int frameColor = applyAlpha(0x1A1A2E, eased);
         int fillColor = applyAlpha(0x0A0A15, eased);
 
@@ -1171,15 +1390,27 @@ public class Lc2hConfigScreen extends Screen {
 
         int titleColor = applyAlpha(0xFF6B6B, eased);
         int glowColor = applyAlpha(0x552222, eased);
-        renderCenteredTextWithGlow(graphics, this.font, RESTART_WARNING_TITLE, drawX + drawWidth / 2, drawY + 16, titleColor, glowColor);
+        renderCenteredTextWithGlow(graphics, this.font, restartWarningTitle, drawX + drawWidth / 2, drawY + 16, titleColor, glowColor);
 
         int textAreaWidth = drawWidth - 40;
-        List<FormattedCharSequence> lines = this.font.split(restartWarningDetail, textAreaWidth);
+        List<FormattedCharSequence> lines = this.font.split(restartWarningSummary, textAreaWidth);
         int textY = drawY + 42;
         int textColor = applyAlpha(0xFFFFFF, eased);
         for (FormattedCharSequence line : lines) {
             graphics.drawString(this.font, line, drawX + 20, textY, textColor);
             textY += this.font.lineHeight + 2;
+        }
+        if (!restartWarningWarning.getString().isEmpty()) {
+            textY += 6;
+            int warningColor = applyAlpha(0xFF4B4B, eased);
+            graphics.drawString(this.font, Component.literal("WARNING:"), drawX + 20, textY, warningColor);
+            textY += this.font.lineHeight + 2;
+            List<FormattedCharSequence> warningLines = this.font.split(restartWarningWarning, textAreaWidth);
+            int warningTextColor = applyAlpha(0xFFD25A, eased);
+            for (FormattedCharSequence line : warningLines) {
+                graphics.drawString(this.font, line, drawX + 20, textY, warningTextColor);
+                textY += this.font.lineHeight + 2;
+            }
         }
 
         int buttonWidth = 140;
@@ -1208,7 +1439,7 @@ public class Lc2hConfigScreen extends Screen {
         renderModalButton(graphics, restartLaterRect[0], restartLaterRect[1], restartLaterRect[2], restartLaterRect[3], restartLaterHover, pulse, eased);
 
         int buttonTextColor = applyAlpha(0xFFFFFF, eased);
-        graphics.drawCenteredString(this.font, RESTART_CLOSE_LABEL,
+        graphics.drawCenteredString(this.font, restartPrimaryLabel,
                 restartCloseRect[0] + restartCloseRect[2] / 2,
                 restartCloseRect[1] + (restartCloseRect[3] - this.font.lineHeight) / 2 + 1,
                 buttonTextColor);
@@ -1216,6 +1447,7 @@ public class Lc2hConfigScreen extends Screen {
                 restartLaterRect[0] + restartLaterRect[2] / 2,
                 restartLaterRect[1] + (restartLaterRect[3] - this.font.lineHeight) / 2 + 1,
                 buttonTextColor);
+        graphics.pose().popPose();
     }
 
     private void renderBlurOverlay(GuiGraphics graphics, float alpha) {
@@ -1236,14 +1468,15 @@ public class Lc2hConfigScreen extends Screen {
     }
 
     private void renderModalButton(GuiGraphics graphics, int x, int y, int width, int height, float hover, float pulse, float alpha) {
-        int baseColor = adjustColorBrightness(0x1A1A2E, pulse);
-        int hoverColor = adjustColorBrightness(0x3A3A5E, pulse);
-        int accentColor = 0x3A86FF;
+        int accent = getAccentColor();
+        int baseColor = adjustColorBrightness(tint(0x1A1A2E, accent, 0.08f), pulse);
+        int hoverColor = adjustColorBrightness(tint(0x3A3A5E, accent, 0.12f), pulse);
+        int accentColor = getAccentColor();
 
         int currentColor = blendColors(baseColor, hoverColor, hover);
         int border = applyAlpha(accentColor, alpha);
         int fill = applyAlpha(currentColor, alpha);
-        int bg = applyAlpha(0x0A0A15, alpha * 0.8f);
+        int bg = applyAlpha(tint(0x0A0A15, accent, 0.08f), alpha * 0.8f);
 
         int outerPadX = 2;
         int outerPadY = 3;

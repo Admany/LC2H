@@ -11,6 +11,7 @@ import net.minecraft.world.level.levelgen.feature.FeaturePlaceContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.ServerLevelAccessor;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.worldgen.lostcities.LostCityFeatureGuards;
 import org.admany.lc2h.worldgen.lostcities.LostCitiesGenerationLocks;
@@ -123,7 +124,7 @@ public class MixinLostCityFeature {
         if (feature == null || region == null || chunk == null) {
             return;
         }
-        final ResourceKey<Level> dim = region.getLevel().dimension();
+        final ResourceKey<Level> dim = ((ServerLevelAccessor) region).getLevel().dimension();
         final int cx = chunk.getPos().x;
         final int cz = chunk.getPos().z;
 

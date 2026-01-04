@@ -6,8 +6,11 @@ import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.lost.City;
 import mcjty.lostcities.worldgen.lost.CityRarityMap;
 import mcjty.lostcities.worldgen.lost.cityassets.CityStyle;
+import mcjty.lostcities.worldgen.lost.regassets.data.PredefinedBuilding;
+import mcjty.lostcities.worldgen.lost.regassets.data.PredefinedStreet;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.CommonLevelAccessor;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
@@ -15,6 +18,8 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import org.spongepowered.asm.mixin.gen.Invoker;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -26,8 +31,24 @@ public abstract class MixinCity {
     private static final Object LC2H_NULL_LEVEL_KEY = new Object();
     @Unique
     private static final java.util.concurrent.ConcurrentHashMap<Object, CityRarityMap> LC2H_CITY_RARITY_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+    @Unique
+    private static final Object LC2H_OCCUPIED_LOCK = new Object();
+    @Unique
+    private static volatile boolean LC2H_OCCUPIED_READY = false;
+    @Unique
+    private static volatile boolean LC2H_PREDEFINED_READY = false;
 
     @Shadow private static CityStyle getCityStyleInt(ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile) { return null; }
+    @Shadow private static Map<ChunkCoord, PredefinedBuilding> predefinedBuildingMap;
+    @Shadow private static Map<ChunkCoord, PredefinedStreet> predefinedStreetMap;
+    @Shadow private static Map<ChunkCoord, ?> OCCUPIED_CHUNKS_BUILDING;
+    @Shadow private static Map<ChunkCoord, PredefinedStreet> OCCUPIED_CHUNKS_STREET;
+
+    @Invoker("calculateOccupied")
+    private static void lc2h$calculateOccupied(IDimensionInfo provider) { throw new AssertionError(); }
+
+    @Invoker("calculateMap")
+    private static void lc2h$calculateMap(CommonLevelAccessor level) { throw new AssertionError(); }
 
     /**
      * Remove synchronized computeIfAbsent and use a concurrent cache.
@@ -63,5 +84,59 @@ public abstract class MixinCity {
     private static void lc2h$clearLc2hCaches(CallbackInfo ci) {
         LC2H_CITY_STYLE_CACHE.clear();
         LC2H_CITY_RARITY_CACHE.clear();
+        LC2H_OCCUPIED_READY = false;
+        LC2H_PREDEFINED_READY = false;
+    }
+
+    @Inject(method = "isChunkOccupied", at = @At("HEAD"))
+    private static void lc2h$ensureOccupied(IDimensionInfo provider, ChunkCoord coord, CallbackInfoReturnable<Boolean> cir) {
+        ensureOccupiedReady(provider);
+    }
+
+    @Inject(method = "getPredefinedBuilding", at = @At("HEAD"))
+    private static void lc2h$ensureOccupiedForBuilding(IDimensionInfo provider, ChunkCoord coord, CallbackInfoReturnable<Object> cir) {
+        ensureOccupiedReady(provider);
+    }
+
+    @Inject(method = "getPredefinedStreet", at = @At("HEAD"))
+    private static void lc2h$ensureOccupiedForStreet(IDimensionInfo provider, ChunkCoord coord, CallbackInfoReturnable<PredefinedStreet> cir) {
+        ensureOccupiedReady(provider);
+    }
+
+    @Inject(method = "getPredefinedBuildingAtTopLeft", at = @At("HEAD"))
+    private static void lc2h$ensurePredefinedMap(CommonLevelAccessor level, ChunkCoord coord, CallbackInfoReturnable<PredefinedBuilding> cir) {
+        ensurePredefinedReady(level);
+    }
+
+    private static void ensureOccupiedReady(IDimensionInfo provider) {
+        if (LC2H_OCCUPIED_READY) {
+            return;
+        }
+        if (provider == null || provider.getWorld() == null) {
+            return;
+        }
+        synchronized (LC2H_OCCUPIED_LOCK) {
+            if (LC2H_OCCUPIED_READY) {
+                return;
+            }
+            lc2h$calculateOccupied(provider);
+            LC2H_OCCUPIED_READY = OCCUPIED_CHUNKS_BUILDING != null && OCCUPIED_CHUNKS_STREET != null;
+        }
+    }
+
+    private static void ensurePredefinedReady(CommonLevelAccessor level) {
+        if (LC2H_PREDEFINED_READY) {
+            return;
+        }
+        if (level == null) {
+            return;
+        }
+        synchronized (LC2H_OCCUPIED_LOCK) {
+            if (LC2H_PREDEFINED_READY) {
+                return;
+            }
+            lc2h$calculateMap(level);
+            LC2H_PREDEFINED_READY = predefinedBuildingMap != null && predefinedStreetMap != null;
+        }
     }
 }

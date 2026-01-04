@@ -25,6 +25,8 @@ public class ConfigManager {
     public static boolean ENABLE_EXPLOSION_DEBRIS = false;
     public static boolean HIDE_EXPERIMENTAL_WARNING = true;
     public static boolean ENABLE_DEBUG_LOGGING = false;
+    public static String UI_ACCENT_COLOR = "3A86FF";
+    public static int UI_ACCENT_COLOR_RGB = 0x3A86FF;
 
     // City edge tree handling
     public static boolean CITY_BLEND_CLEAR_TREES = true;
@@ -50,6 +52,7 @@ public class ConfigManager {
         public boolean enableExplosionDebris = false;
         public boolean hideExperimentalWarning = true;
         public boolean enableDebugLogging = false;
+        public String uiAccentColor = "3A86FF";
 
         // City edge blending
         public boolean cityBlendEnabled = false;
@@ -135,6 +138,7 @@ public class ConfigManager {
         comments.put("enableExplosionDebris", "Enable Lost Cities explosion debris spill into adjacent chunks (can add rubble around streets)");
         comments.put("hideExperimentalWarning", "Hide the experimental features warning screen");
         comments.put("enableDebugLogging", "Enable debug logging for memory management and warmup operations");
+        comments.put("uiAccentColor", "UI accent color in hex (example: 3A86FF)");
 
         // City edge blending
         comments.put("cityBlendEnabled", "Enable smooth blending of city edges into surrounding terrain");
@@ -168,6 +172,9 @@ public class ConfigManager {
                 "enableExplosionDebris",
                 "hideExperimentalWarning",
                 "enableDebugLogging",
+            });
+            groups.put("Interface", new String[]{
+                "uiAccentColor"
             });
             groups.put("City Edge", new String[]{
                 "cityBlendEnabled",
@@ -256,9 +263,41 @@ public class ConfigManager {
         ENABLE_EXPLOSION_DEBRIS = CONFIG.enableExplosionDebris;
         HIDE_EXPERIMENTAL_WARNING = CONFIG.hideExperimentalWarning;
         ENABLE_DEBUG_LOGGING = CONFIG.enableDebugLogging;
+        UI_ACCENT_COLOR = CONFIG.uiAccentColor != null ? CONFIG.uiAccentColor : UI_ACCENT_COLOR;
+        UI_ACCENT_COLOR_RGB = parseHexColor(UI_ACCENT_COLOR, 0x3A86FF);
         CITY_BLEND_ENABLED = CONFIG.cityBlendEnabled;
         CITY_BLEND_WIDTH = CONFIG.cityBlendWidth;
         CITY_BLEND_SOFTNESS = CONFIG.cityBlendSoftness;
         CITY_BLEND_CLEAR_TREES = CONFIG.cityBlendClearTrees;
+    }
+
+    private static int parseHexColor(String raw, int fallback) {
+        if (raw == null) {
+            return fallback;
+        }
+        String value = raw.trim();
+        if (value.isEmpty()) {
+            return fallback;
+        }
+        if (value.startsWith("#")) {
+            value = value.substring(1);
+        }
+        if (value.startsWith("0x") || value.startsWith("0X")) {
+            value = value.substring(2);
+        }
+        if (value.length() == 3) {
+            char r = value.charAt(0);
+            char g = value.charAt(1);
+            char b = value.charAt(2);
+            value = "" + r + r + g + g + b + b;
+        }
+        if (value.length() != 6) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(value, 16) & 0xFFFFFF;
+        } catch (NumberFormatException ex) {
+            return fallback;
+        }
     }
 }

@@ -163,6 +163,7 @@ public final class AsyncBuildingInfoPlanner {
             return;
         }
 
+        ensureMultiChunkReady(provider, coord);
         tuneIfNeeded();
 
         AdaptiveConcurrencyLimiter.Token token = LIMITER.tryEnter();
@@ -238,6 +239,7 @@ public final class AsyncBuildingInfoPlanner {
     }
 
     private static void runBuildingInfo(IDimensionInfo provider, ChunkCoord coord, boolean debugLogging, long startTime) {
+        ensureMultiChunkReady(provider, coord);
         tuneIfNeeded();
         AdaptiveConcurrencyLimiter.Token token = LIMITER.enter();
         long startNs = System.nanoTime();
@@ -257,6 +259,19 @@ public final class AsyncBuildingInfoPlanner {
             INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() - 1);
             recordTiming(System.nanoTime() - startNs);
             token.close();
+        }
+    }
+
+    private static void ensureMultiChunkReady(IDimensionInfo provider, ChunkCoord coord) {
+        if (provider == null || coord == null) {
+            return;
+        }
+        if (AsyncMultiChunkPlanner.isInternalComputation()) {
+            return;
+        }
+        try {
+            AsyncMultiChunkPlanner.syncWarmup(provider, coord);
+        } catch (Throwable ignored) {
         }
     }
 

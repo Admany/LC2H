@@ -9,11 +9,13 @@ import com.mojang.datafixers.util.Pair;
 import net.minecraft.core.BlockPos;
 import net.minecraft.tags.BiomeTags;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.util.Mth;
+import org.admany.lc2h.mixin.accessor.WorldGenRegionAccessor;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
@@ -243,7 +245,21 @@ public class MixinCityEdgeBlendSurfaceFix {
 
     private static boolean lc2h$hasChunkForBlock(WorldGenLevel world, int blockX, int blockZ) {
         try {
-            return world.hasChunk(blockX >> 4, blockZ >> 4);
+            int chunkX = blockX >> 4;
+            int chunkZ = blockZ >> 4;
+            if (world instanceof WorldGenRegion region) {
+                WorldGenRegionAccessor accessor = (WorldGenRegionAccessor) region;
+                var firstPos = accessor.lc2h$getFirstPos();
+                var lastPos = accessor.lc2h$getLastPos();
+                if (firstPos == null || lastPos == null) {
+                    return false;
+                }
+                if (chunkX < firstPos.x || chunkX > lastPos.x || chunkZ < firstPos.z || chunkZ > lastPos.z) {
+                    return false;
+                }
+                return true;
+            }
+            return world.hasChunk(chunkX, chunkZ);
         } catch (Throwable t) {
             return false;
         }
