@@ -29,7 +29,7 @@ public abstract class MixinLostCityTerrainFeatureThreadSafeRandoms {
     private BlockState getRandomLeaf(BuildingInfo info, CompiledPalette compiledPalette) { return null; }
 
     /**
-     * Thread-safe drop-in replacement for Lost Cities' static Random-based offset.
+     * Thread-safe drop-in replacement for Lost Citiess static Random-based offset.
      * Preserves vanilla output while avoiding shared mutable Random state.
      *
      * @author LC2H
@@ -43,7 +43,7 @@ public abstract class MixinLostCityTerrainFeatureThreadSafeRandoms {
     }
 
     /**
-     * Thread-safe drop-in replacement for Lost Cities' static Random-based offset.
+     * Thread-safe drop-in replacement for Lost Citiess static Random-based offset.
      *
      * @author LC2H
      * @reason Prevent nondeterminism and corruption under parallel worldgen
@@ -56,7 +56,7 @@ public abstract class MixinLostCityTerrainFeatureThreadSafeRandoms {
     }
 
     /**
-     * Thread-safe drop-in replacement for Lost Cities' static Random-based offset.
+     * Thread-safe drop-in replacement for Lost Cities static Random-based offset.
      *
      * @author LC2H
      * @reason Prevent nondeterminism and corruption under parallel worldgen
@@ -69,7 +69,7 @@ public abstract class MixinLostCityTerrainFeatureThreadSafeRandoms {
     }
 
     /**
-     * Thread-safe replacement for Lost Cities' static VEGETATION_RAND usage.
+     * Thread-safe replacement for Lost Cities static VEGETATION_RAND usage.
      *
      * @author LC2H
      * @reason Prevent nondeterministic vegetation placement under parallel worldgen

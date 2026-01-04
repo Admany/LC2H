@@ -13,7 +13,7 @@ import java.util.Optional;
 import java.util.function.Supplier;
 
 public final class ChunkDebugNetwork {
-    private static final String PROTOCOL = "1";
+    private static final String PROTOCOL = "2";
     private static final SimpleChannel CHANNEL = NetworkRegistry.ChannelBuilder
         .named(ResourceLocation.fromNamespaceAndPath(LC2H.MODID, "chunk_debug"))
         .networkProtocolVersion(() -> PROTOCOL)

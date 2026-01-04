@@ -2,12 +2,14 @@ package org.admany.lc2h.debug.chunk;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
@@ -19,14 +21,14 @@ import org.admany.lc2h.LC2H;
 @Mod.EventBusSubscriber(modid = LC2H.MODID, value = Dist.CLIENT)
 public final class ChunkDebugOverlay {
 
-    private static volatile ChunkDebugSelection SELECTION = new ChunkDebugSelection(false, null, null, null);
+    private static volatile ChunkDebugSelection SELECTION = new ChunkDebugSelection(false, null, null, null, null, null);
 
     private ChunkDebugOverlay() {
     }
 
     public static void applyServerUpdate(ChunkDebugSelection selection) {
         if (selection == null) {
-            SELECTION = new ChunkDebugSelection(false, null, null, null);
+            SELECTION = new ChunkDebugSelection(false, null, null, null, null, null);
         } else {
             SELECTION = selection;
         }
@@ -64,24 +66,34 @@ public final class ChunkDebugOverlay {
         poseStack.pushPose();
         poseStack.translate(-cameraPos.x, -cameraPos.y, -cameraPos.z);
 
+        RenderSystem.disableDepthTest();
+        RenderSystem.depthMask(false);
         MultiBufferSource.BufferSource buffer = mc.renderBuffers().bufferSource();
         VertexConsumer builder = buffer.getBuffer(RenderType.lines());
 
-        double baseY = Math.floor(mc.player.getY()) + 0.05;
-        double yMin = baseY;
-        double yMax = baseY + 2.0;
+        double primaryY = primary != null ? resolveSelectionY(mc, primary, selection.primaryY()) : 0.0;
+        double secondaryY = secondary != null ? resolveSelectionY(mc, secondary, selection.secondaryY()) : primaryY;
+        double selectionY = primary != null ? primaryY : secondaryY;
+        double yMinPrimary = primaryY;
+        double yMaxPrimary = primaryY + 2.0;
+        double yMinSecondary = secondaryY;
+        double yMaxSecondary = secondaryY + 2.0;
+        double yMinSelection = selectionY;
+        double yMaxSelection = selectionY + 2.0;
 
         if (primary != null) {
-            renderChunkBox(poseStack, builder, primary, yMin, yMax, 0.2f, 0.9f, 0.3f, 1.0f);
+            renderChunkBox(poseStack, builder, primary, yMinPrimary, yMaxPrimary, 0.2f, 0.9f, 0.3f, 1.0f);
         }
         if (secondary != null) {
-            renderChunkBox(poseStack, builder, secondary, yMin, yMax, 0.95f, 0.25f, 0.25f, 1.0f);
+            renderChunkBox(poseStack, builder, secondary, yMinSecondary, yMaxSecondary, 0.95f, 0.25f, 0.25f, 1.0f);
         }
         if (primary != null && secondary != null) {
-            renderSelectionBox(poseStack, builder, primary, secondary, yMin, yMax, 0.25f, 0.6f, 1.0f, 1.0f);
+            renderSelectionBox(poseStack, builder, primary, secondary, yMinSelection, yMaxSelection, 0.25f, 0.6f, 1.0f, 1.0f);
         }
 
         buffer.endBatch(RenderType.lines());
+        RenderSystem.depthMask(true);
+        RenderSystem.enableDepthTest();
         poseStack.popPose();
     }
 
@@ -107,5 +119,22 @@ public final class ChunkDebugOverlay {
         int maxX = (maxChunkX + 1) * 16;
         int maxZ = (maxChunkZ + 1) * 16;
         LevelRenderer.renderLineBox(poseStack, builder, minX, yMin, minZ, maxX, yMax, maxZ, r, g, bCol, aCol);
+    }
+
+    private static double resolveSelectionY(Minecraft mc, ChunkPos pos, Integer anchorY) {
+        if (anchorY != null) {
+            return anchorY + 0.05;
+        }
+        if (mc == null || mc.level == null || pos == null) {
+            return 0.0;
+        }
+        int blockX = pos.getMiddleBlockX();
+        int blockZ = pos.getMiddleBlockZ();
+        int surfaceY = mc.level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, blockX, blockZ);
+        int min = mc.level.getMinBuildHeight();
+        if (surfaceY <= min) {
+            surfaceY = min;
+        }
+        return surfaceY + 0.05;
     }
 }

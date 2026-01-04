@@ -47,6 +47,32 @@ public class FeatureCache {
         }
     }
 
+    private static boolean ensureQuantifiedReady() {
+        if (!quantifiedAvailable) {
+            return false;
+        }
+        try {
+            Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
+            try {
+                // Bind the Quantified handle to this thread if needed.
+                quantifiedApiClass.getMethod("register", String.class).invoke(null, LC2H.MODID);
+            } catch (NoSuchMethodException ignored) {
+                // Older/newer API variants: fall back to the extended signature if available.
+                quantifiedApiClass.getMethod("register", String.class, String.class, String.class)
+                    .invoke(null, LC2H.MODID, LC2H.MODID, null);
+            }
+            if (cacheManager == null) {
+                cacheManager = quantifiedApiClass.getMethod("getCacheManager").invoke(null);
+            }
+            return true;
+        } catch (Throwable t) {
+            quantifiedAvailable = false;
+            cacheManager = null;
+            LC2H.LOGGER.debug("[LC2H] FeatureCache: Quantified API unavailable for this thread", t);
+            return false;
+        }
+    }
+
     public static void put(String key, Object value) {
         put(key, value, false);
     }
@@ -58,7 +84,7 @@ public class FeatureCache {
             String cacheName = useDiskCache ? DISK_CACHE : MEMORY_CACHE;
             long now = System.currentTimeMillis();
 
-            if (quantifiedAvailable && cacheManager != null) {
+            if (ensureQuantifiedReady()) {
                 Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
                 if (useDiskCache) {
                     try {
@@ -106,7 +132,7 @@ public class FeatureCache {
             }
 
             Object value = null;
-            if (quantifiedAvailable && cacheManager != null) {
+            if (ensureQuantifiedReady()) {
                 Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
                 String cacheName = checkDiskCache ? DISK_CACHE : MEMORY_CACHE;
                 try {
@@ -144,7 +170,7 @@ public class FeatureCache {
         try {
             memoryCache.clear();
 
-            if (quantifiedAvailable && cacheManager != null) {
+            if (ensureQuantifiedReady()) {
                 if (clearDiskCache) {
                     cacheManager.getClass().getMethod("clearAllCaches").invoke(cacheManager);
                     quantifiedEntries = (Long) cacheManager.getClass().getMethod("getTotalCacheEntryCount").invoke(cacheManager);
@@ -171,7 +197,7 @@ public class FeatureCache {
         try {
             localEntries = pruneLocalEntriesByAge(maxAgeMs);
 
-            if (quantifiedAvailable && cacheManager != null) {
+            if (ensureQuantifiedReady()) {
                 quantifiedEntries = (Long) cacheManager.getClass().getMethod("clearOldCaches", long.class).invoke(cacheManager, maxAgeMs);
             }
 
@@ -206,7 +232,7 @@ public class FeatureCache {
     }
 
     public static long getMemoryUsageMB() {
-        if (quantifiedAvailable && cacheManager != null) {
+        if (ensureQuantifiedReady()) {
             try {
                 return (Long) cacheManager.getClass().getMethod("getTotalCacheSizeMB").invoke(cacheManager);
             } catch (Exception e) {
@@ -218,7 +244,7 @@ public class FeatureCache {
     }
 
     public static boolean isMemoryPressureHigh() {
-        if (quantifiedAvailable && cacheManager != null) {
+        if (ensureQuantifiedReady()) {
             try {
                 return (Boolean) cacheManager.getClass().getMethod("isMemoryPressureHigh").invoke(cacheManager);
             } catch (Exception e) {
@@ -230,7 +256,7 @@ public class FeatureCache {
     }
 
     public static void triggerMemoryPressureCleanup() {
-        if (quantifiedAvailable && cacheManager != null) {
+        if (ensureQuantifiedReady()) {
             try {
                 cacheManager.getClass().getMethod("triggerMemoryPressureCleanup").invoke(cacheManager);
             } catch (Exception e) {
@@ -255,7 +281,7 @@ public class FeatureCache {
         sb.append(", memoryMB=").append(getMemoryUsageMB());
         sb.append(", pressure=").append(isMemoryPressureHigh() ? "HIGH" : "NORMAL");
 
-        if (quantifiedAvailable && cacheManager != null) {
+        if (ensureQuantifiedReady()) {
             try {
                 @SuppressWarnings("unchecked")
                 Set<String> cacheNames = (Set<String>) cacheManager.getClass().getMethod("getCacheNames").invoke(cacheManager);
@@ -285,7 +311,7 @@ public class FeatureCache {
         long local = memoryCache.size();
         Long quantified = null;
 
-        if (quantifiedAvailable && cacheManager != null) {
+        if (ensureQuantifiedReady()) {
             try {
                 quantified = (Long) cacheManager.getClass().getMethod("getTotalCacheEntryCount").invoke(cacheManager);
             } catch (Exception e) {

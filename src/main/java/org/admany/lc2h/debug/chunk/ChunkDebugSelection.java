@@ -7,7 +7,9 @@ public record ChunkDebugSelection(
     boolean enabled,
     ResourceLocation dimension,
     ChunkPos primary,
-    ChunkPos secondary
+    ChunkPos secondary,
+    Integer primaryY,
+    Integer secondaryY
 ) {
     public void encode(net.minecraft.network.FriendlyByteBuf buf) {
         buf.writeBoolean(enabled);
@@ -21,6 +23,14 @@ public record ChunkDebugSelection(
         if (secondary != null) {
             buf.writeInt(secondary.x);
             buf.writeInt(secondary.z);
+        }
+        buf.writeBoolean(primaryY != null);
+        if (primaryY != null) {
+            buf.writeInt(primaryY);
+        }
+        buf.writeBoolean(secondaryY != null);
+        if (secondaryY != null) {
+            buf.writeInt(secondaryY);
         }
     }
 
@@ -39,6 +49,14 @@ public record ChunkDebugSelection(
             int z = buf.readInt();
             secondary = new ChunkPos(x, z);
         }
-        return new ChunkDebugSelection(enabled, dimension, primary, secondary);
+        Integer primaryY = null;
+        if (buf.readBoolean()) {
+            primaryY = buf.readInt();
+        }
+        Integer secondaryY = null;
+        if (buf.readBoolean()) {
+            secondaryY = buf.readInt();
+        }
+        return new ChunkDebugSelection(enabled, dimension, primary, secondary, primaryY, secondaryY);
     }
 }

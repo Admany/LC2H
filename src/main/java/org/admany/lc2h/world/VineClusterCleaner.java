@@ -27,6 +27,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Mod.EventBusSubscriber(modid = LC2H.MODID)
 public final class VineClusterCleaner {
@@ -44,6 +45,8 @@ public final class VineClusterCleaner {
 
     private static final long SCAN_PERIOD_SECONDS = Long.getLong("lc2h.vine.scan_period_seconds", 2L);
     private static final long SNAPSHOT_TTL_NS = TimeUnit.SECONDS.toNanos(Long.getLong("lc2h.vine.snapshot_ttl_seconds", 5L));
+    private static final int MAX_IN_FLIGHT = Math.max(1, Integer.getInteger("lc2h.vine.max_in_flight", 16));
+    private static final AtomicInteger IN_FLIGHT = new AtomicInteger(0);
 
     private static final class LevelChunkIndex {
         final ConcurrentHashMap<Long, Boolean> loaded = new ConcurrentHashMap<>();
@@ -128,8 +131,12 @@ public final class VineClusterCleaner {
             return;
         }
 
+        MinecraftServer server = level.getServer();
+        if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+            return;
+        }
+
         if (!initialized) {
-            MinecraftServer server = level.getServer();
             if (server != null) {
                 initialize(server);
             }
@@ -150,10 +157,16 @@ public final class VineClusterCleaner {
             return;
         }
 
+        long now = System.currentTimeMillis();
         Map<Long, Long> lastScanForLevel = LAST_SCAN.computeIfAbsent(level.dimension(), key -> new ConcurrentHashMap<>());
-        lastScanForLevel.put(chunkPos.toLong(), System.currentTimeMillis());
+        Long prevScan = lastScanForLevel.get(chunkPos.toLong());
+        if (prevScan != null && (now - prevScan) < MIN_RESCAN_INTERVAL_MS) {
+            return;
+        }
 
-        scanChunkForVinesAsync(level, chunk);
+        if (scanChunkForVinesAsync(level, chunk)) {
+            lastScanForLevel.put(chunkPos.toLong(), now);
+        }
     }
 
     private static void runTurboScan(MinecraftServer server) {
@@ -256,12 +269,12 @@ public final class VineClusterCleaner {
                     }
 
                     try {
-                        scanChunkForVinesAsync(level, chunk);
-                        processed++;
+                        if (scanChunkForVinesAsync(level, chunk)) {
+                            processed++;
+                            lastScanForLevel.put(chunkKey, now);
+                        }
                     } catch (Throwable t) {
                         LC2H.LOGGER.debug("[LC2H] VineClusterCleaner chunk scan failed for " + cx + "," + cz + ": " + t.getMessage());
-                    } finally {
-                        lastScanForLevel.put(chunkKey, System.currentTimeMillis());
                     }
                 }
 
@@ -294,37 +307,52 @@ public final class VineClusterCleaner {
         }
     }
 
-    private static void scanChunkForVinesAsync(ServerLevel level, LevelChunk chunk) {
+    private static boolean scanChunkForVinesAsync(ServerLevel level, LevelChunk chunk) {
+        if (!tryEnterScan()) {
+            return false;
+        }
         QuantifiedTask.Builder<Void> builder = QuantifiedTask.<Void>builder(LC2H.MODID, "vine_cleanup", () -> {
             try {
                 performVineScan(level, chunk);
             } catch (Exception e) {
                 LC2H.LOGGER.error("[LC2H] Error in async vine cleanup: " + e.getMessage(), e);
+            } finally {
+                exitScan();
             }
             return null;
         });
 
         try {
             QuantifiedAPI.submit(builder);
-            return;
+            return true;
         } catch (IllegalStateException notRegistered) {
             try {
                 QuantifiedAPI.register(LC2H.MODID);
                 QuantifiedAPI.submit(builder);
-                return;
+                return true;
             } catch (Throwable ignored) {
             }
         } catch (Throwable ignored) {
         }
 
-        AsyncManager.submitSupplier(
-            "vine_cleanup_fallback",
-            () -> {
-                performVineScan(level, chunk);
-                return null;
-            },
-            org.admany.lc2h.async.Priority.LOW
-        );
+        try {
+            AsyncManager.submitSupplier(
+                "vine_cleanup_fallback",
+                () -> {
+                    try {
+                        performVineScan(level, chunk);
+                    } finally {
+                        exitScan();
+                    }
+                    return null;
+                },
+                org.admany.lc2h.async.Priority.LOW
+            );
+            return true;
+        } catch (Throwable t) {
+            exitScan();
+            return false;
+        }
     }
 
     private static void performVineScan(ServerLevel level, LevelChunk chunk) {
@@ -354,6 +382,19 @@ public final class VineClusterCleaner {
         } catch (Throwable t) {
             LC2H.LOGGER.error("[LC2H] VineClusterCleaner scanChunk failed", t);
         }
+    }
+
+    private static boolean tryEnterScan() {
+        int inFlight = IN_FLIGHT.incrementAndGet();
+        if (inFlight > MAX_IN_FLIGHT) {
+            IN_FLIGHT.decrementAndGet();
+            return false;
+        }
+        return true;
+    }
+
+    private static void exitScan() {
+        IN_FLIGHT.decrementAndGet();
     }
 
     private static Set<BlockPos> collectVineStarts(LevelChunk chunk, int baseX, int baseZ, int minY, int maxY) {

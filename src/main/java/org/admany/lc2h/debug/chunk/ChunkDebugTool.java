@@ -5,6 +5,7 @@ import net.minecraft.world.InteractionResult;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.phys.HitResult;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -32,7 +33,7 @@ public final class ChunkDebugTool {
         }
 
         ChunkPos pos = new ChunkPos(event.getPos());
-        ChunkDebugManager.setPrimary(player, pos);
+        ChunkDebugManager.setPrimary(player, pos, event.getPos().getY());
         event.setCancellationResult(InteractionResult.SUCCESS);
         event.setCanceled(true);
     }
@@ -52,8 +53,13 @@ public final class ChunkDebugTool {
             return;
         }
 
+        HitResult hit = player.pick(5.0D, 1.0F, false);
+        if (hit != null && hit.getType() == HitResult.Type.BLOCK) {
+            return;
+        }
+
         ChunkPos pos = player.chunkPosition();
-        ChunkDebugManager.setPrimary(player, pos);
+        ChunkDebugManager.setPrimary(player, pos, player.blockPosition().getY());
         event.setCancellationResult(InteractionResult.SUCCESS);
         event.setCanceled(true);
     }
@@ -74,7 +80,7 @@ public final class ChunkDebugTool {
         }
 
         ChunkPos pos = new ChunkPos(event.getPos());
-        ChunkDebugManager.setSecondary(player, pos);
+        ChunkDebugManager.setSecondary(player, pos, event.getPos().getY());
         event.setCanceled(true);
     }
 

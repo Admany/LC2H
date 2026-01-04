@@ -12,7 +12,7 @@ public interface MultiChunkAccessor {
 
     @Accessor("MULTICHUNKS")
     static Map<ChunkCoord, MultiChunk> lc2h$getCache() {
-        throw new UnsupportedOperationException();
+        throw new IllegalStateException("Mixin not applied");
     }
 
     @Accessor("areasize")

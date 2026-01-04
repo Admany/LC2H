@@ -3,6 +3,7 @@ package org.admany.lc2h.debug.chunk;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -55,18 +56,25 @@ public final class ChunkDebugManager {
         session.enabled = true;
         session.primary = null;
         session.secondary = null;
+        session.primaryY = null;
+        session.secondaryY = null;
         session.dimension = player.level().dimension().location();
         sendUpdate(player, session);
         ChatMessenger.info(player.createCommandSourceStack(), "Chunk debug selection cleared.");
     }
 
     public static void setPrimary(ServerPlayer player, ChunkPos pos) {
+        setPrimary(player, pos, null);
+    }
+
+    public static void setPrimary(ServerPlayer player, ChunkPos pos, Integer anchorY) {
         if (player == null || pos == null) {
             return;
         }
         Session session = SESSIONS.computeIfAbsent(player.getUUID(), id -> new Session());
         session.enabled = true;
         session.primary = pos;
+        session.primaryY = anchorY != null ? anchorY : resolveAnchorY(player, pos);
         session.dimension = player.level().dimension().location();
         sendUpdate(player, session);
         ChatMessenger.info(player.createCommandSourceStack(),
@@ -74,12 +82,17 @@ public final class ChunkDebugManager {
     }
 
     public static void setSecondary(ServerPlayer player, ChunkPos pos) {
+        setSecondary(player, pos, null);
+    }
+
+    public static void setSecondary(ServerPlayer player, ChunkPos pos, Integer anchorY) {
         if (player == null || pos == null) {
             return;
         }
         Session session = SESSIONS.computeIfAbsent(player.getUUID(), id -> new Session());
         session.enabled = true;
         session.secondary = pos;
+        session.secondaryY = anchorY != null ? anchorY : resolveAnchorY(player, pos);
         session.dimension = player.level().dimension().location();
         sendUpdate(player, session);
         ChatMessenger.info(player.createCommandSourceStack(),
@@ -92,7 +105,7 @@ public final class ChunkDebugManager {
         }
         Session session = SESSIONS.get(player.getUUID());
         if (session == null) {
-            return new ChunkSelection(false, null, null, player.level().dimension().location());
+            return new ChunkSelection(false, null, null, null, null, player.level().dimension().location());
         }
         return session.toSelection();
     }
@@ -112,27 +125,45 @@ public final class ChunkDebugManager {
         ChunkDebugNetwork.sendSelection(player, session.toSelection().toNetwork());
     }
 
+    private static int resolveAnchorY(ServerPlayer player, ChunkPos pos) {
+        if (player == null || pos == null || player.level() == null) {
+            return 0;
+        }
+        int blockX = pos.getMiddleBlockX();
+        int blockZ = pos.getMiddleBlockZ();
+        int height = player.level().getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, blockX, blockZ);
+        int min = player.level().getMinBuildHeight();
+        if (height <= min) {
+            return player.blockPosition().getY();
+        }
+        return height;
+    }
+
     private static final class Session {
         private boolean enabled;
         private ResourceLocation dimension;
         private ChunkPos primary;
         private ChunkPos secondary;
+        private Integer primaryY;
+        private Integer secondaryY;
 
         private ChunkSelection toSelection() {
-            return new ChunkSelection(enabled, primary, secondary, dimension);
+            return new ChunkSelection(enabled, primary, secondary, primaryY, secondaryY, dimension);
         }
 
         private Session disabled() {
             this.enabled = false;
             this.primary = null;
             this.secondary = null;
+            this.primaryY = null;
+            this.secondaryY = null;
             return this;
         }
     }
 
-    public record ChunkSelection(boolean enabled, ChunkPos primary, ChunkPos secondary, ResourceLocation dimension) {
+    public record ChunkSelection(boolean enabled, ChunkPos primary, ChunkPos secondary, Integer primaryY, Integer secondaryY, ResourceLocation dimension) {
         private ChunkDebugSelection toNetwork() {
-            return new ChunkDebugSelection(enabled, dimension, primary, secondary);
+            return new ChunkDebugSelection(enabled, dimension, primary, secondary, primaryY, secondaryY);
         }
     }
 }
