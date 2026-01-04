@@ -93,6 +93,64 @@ public abstract class MixinBuildingInfo {
         return maxcellars;
     }
 
+    /**
+     * Lost Cities bugfix.
+     * Ensure building floor constraints are always respected, even when the pack does not
+     * set overrideFloors=true. This prevents short buildings (and their parts2 decorations)
+     * from being forced up to the profile minimum floors.
+     *
+     * @author LC2H
+     * @reason Respect building min floors regardless of overrideFloors to avoid mis-sized builds.
+     */
+    @Overwrite
+    private int getMinfloors(CityStyle cs) {
+        int minfloors = profile.BUILDING_MINFLOORS + 1;
+        if (cs.getMinFloorCount() != null) {
+            minfloors = Math.max(minfloors, cs.getMinFloorCount());
+        }
+
+        if (buildingType != null) {
+            int buildingMin = buildingType.getMinFloors();
+            if (buildingMin >= 0) {
+                minfloors = buildingMin;
+            }
+            int buildingMax = buildingType.getMaxFloors();
+            if (buildingMax >= 0) {
+                minfloors = Math.min(minfloors, buildingMax);
+            }
+        }
+
+        return minfloors;
+    }
+
+    /**
+     * Lost Cities bugfix.
+     * Ensure building floor constraints are always respected, even when overrideFloors is false.
+     *
+     * @author LC2H
+     * @reason Respect building max floors regardless of overrideFloors to avoid mis-sized builds.
+     */
+    @Overwrite
+    private int getMaxfloors(CityStyle cs) {
+        int maxfloors = profile.BUILDING_MAXFLOORS;
+        if (cs.getMaxFloorCount() != null) {
+            maxfloors = Math.min(maxfloors, cs.getMaxFloorCount());
+        }
+
+        if (buildingType != null) {
+            int buildingMax = buildingType.getMaxFloors();
+            if (buildingMax >= 0) {
+                maxfloors = buildingMax;
+            }
+            int buildingMin = buildingType.getMinFloors();
+            if (buildingMin >= 0) {
+                maxfloors = Math.max(maxfloors, buildingMin);
+            }
+        }
+
+        return maxfloors;
+    }
+
     @Redirect(
         method = "<init>",
         at = @At(

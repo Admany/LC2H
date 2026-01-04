@@ -1,12 +1,8 @@
 package org.admany.lc2h.mixin;
 
 import mcjty.lostcities.varia.Tools;
-import net.minecraft.resources.ResourceLocation;
-import net.minecraft.util.datafix.fixes.BlockStateData;
-import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraftforge.registries.ForgeRegistries;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -35,23 +31,8 @@ public class MixinToolsGrassFix {
             return;
         }
 
-        // Only fix the legacy "grass" ID.
-        if (!"grass".equals(s)) {
-            return;
-        }
-
-        try {
-            String converted = BlockStateData.upgradeBlock("grass_block");
-            ResourceLocation id = ResourceLocation.tryParse(converted);
-            if (id == null) {
-                return;
-            }
-
-            Block value = ForgeRegistries.BLOCKS.getValue(id);
-            if (value != null) {
-                cir.setReturnValue(value.defaultBlockState());
-            }
-        } catch (Throwable ignored) {
+        if ("grass".equals(s) || "minecraft:grass".equals(s)) {
+            cir.setReturnValue(Blocks.GRASS.defaultBlockState());
         }
     }
 }
