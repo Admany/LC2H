@@ -17,7 +17,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(value = LostCitySphereFeature.class, remap = false)
 public class MixinLostCitySphereFeature {
 
-    @Inject(method = "place", at = @At("HEAD"), remap = true)
+    @Inject(method = "m_142674_(Lnet/minecraft/world/level/levelgen/feature/FeaturePlaceContext;)Z", at = @At("HEAD"), remap = false)
     private void lc2h$warmupSphere(FeaturePlaceContext<?> context, CallbackInfoReturnable<Boolean> cir) {
         WorldGenLevel level = context.level();
         if (!(level instanceof WorldGenRegion)) {

@@ -18,6 +18,7 @@ import net.minecraft.world.level.WorldGenLevel;
 import net.minecraftforge.fml.loading.FMLPaths;
 import org.admany.lc2h.diagnostics.ChunkGenTracker;
 import org.admany.lc2h.mixin.accessor.MultiChunkAccessor;
+import org.admany.lc2h.util.lostcities.MultiChunkCacheAccess;
 import org.admany.lc2h.worldgen.async.snapshot.MultiChunkSnapshot;
 
 import java.nio.charset.StandardCharsets;
@@ -27,7 +28,6 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.lang.reflect.Method;
-import java.util.Map;
 
 public final class ChunkDebugExporter {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -150,8 +150,7 @@ public final class ChunkDebugExporter {
             obj.addProperty("multiCoordZ", multiCoord.chunkZ());
             obj.addProperty("areaSize", areaSize);
 
-            Map<ChunkCoord, MultiChunk> cache = MultiChunkAccessor.lc2h$getCache();
-            MultiChunk multiChunk = cache != null ? cache.get(multiCoord) : null;
+            MultiChunk multiChunk = MultiChunkCacheAccess.get(multiCoord);
             obj.addProperty("cached", multiChunk != null);
             if (multiChunk == null) {
                 return obj;

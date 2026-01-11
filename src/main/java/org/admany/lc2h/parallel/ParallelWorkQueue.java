@@ -104,27 +104,70 @@ public final class ParallelWorkQueue {
                 return keyFunction.apply(index);
             };
             if (effective.cachePersistent()) {
-                builder.persistentSliceCache(
+                configurePersistentCache(
+                    builder,
                     effective.cacheName() == null ? name : effective.cacheName(),
                     cacheKeySupplier,
                     effective.cacheSerializer(),
                     effective.cacheDeserializer(),
                     ttl,
                     maxEntries,
-                    effective.cacheCompression()
+                    effective.cacheCompression(),
+                    effective.cacheCopyOnWrite()
                 );
             } else {
-                builder.memorySliceCache(
+                configureMemoryCache(
+                    builder,
                     effective.cacheName() == null ? name : effective.cacheName(),
                     cacheKeySupplier,
                     effective.cacheSerializer(),
                     effective.cacheDeserializer(),
                     ttl,
-                    maxEntries
+                    maxEntries,
+                    effective.cacheCopyOnWrite()
                 );
             }
         }
         return submitWithQueueFullHandling(name, sliceCount, startNanos, suppliers, sliceListener, options, builder, attempt);
+    }
+
+    private static <T> void configurePersistentCache(ParallelCompute.Builder<Integer, T, List<T>> builder,
+                                                     String cacheName,
+                                                     Function<Integer, String> keyFunction,
+                                                     Function<T, byte[]> serializer,
+                                                     Function<byte[], T> deserializer,
+                                                     Duration ttl,
+                                                     long maxEntries,
+                                                     boolean compression,
+                                                     boolean copyOnWrite) {
+        try {
+            builder.getClass()
+                .getMethod("persistentSliceCache", String.class, Function.class, Function.class, Function.class,
+                    Duration.class, long.class, boolean.class, boolean.class)
+                .invoke(builder, cacheName, keyFunction, serializer, deserializer, ttl, maxEntries, compression, copyOnWrite);
+            return;
+        } catch (ReflectiveOperationException ignored) {
+        }
+        builder.persistentSliceCache(cacheName, keyFunction, serializer, deserializer, ttl, maxEntries, compression);
+    }
+
+    private static <T> void configureMemoryCache(ParallelCompute.Builder<Integer, T, List<T>> builder,
+                                                 String cacheName,
+                                                 Function<Integer, String> keyFunction,
+                                                 Function<T, byte[]> serializer,
+                                                 Function<byte[], T> deserializer,
+                                                 Duration ttl,
+                                                 long maxEntries,
+                                                 boolean copyOnWrite) {
+        try {
+            builder.getClass()
+                .getMethod("memorySliceCache", String.class, Function.class, Function.class, Function.class,
+                    Duration.class, long.class, boolean.class)
+                .invoke(builder, cacheName, keyFunction, serializer, deserializer, ttl, maxEntries, copyOnWrite);
+            return;
+        } catch (ReflectiveOperationException ignored) {
+        }
+        builder.memorySliceCache(cacheName, keyFunction, serializer, deserializer, ttl, maxEntries);
     }
 
     private static <T> CompletableFuture<List<T>> submitWithQueueFullHandling(String name,

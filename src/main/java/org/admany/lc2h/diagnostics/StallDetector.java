@@ -171,7 +171,10 @@ public final class StallDetector {
         } catch (Throwable ignored) {}
 
         try {
-            sb.append("PlannerBatchQueue.stats = ").append(org.admany.lc2h.worldgen.async.planner.PlannerBatchQueue.snapshotStats()).append('\n');
+            org.admany.lc2h.worldgen.async.planner.PlannerBatchQueue.PlannerBatchStats stats =
+                org.admany.lc2h.worldgen.async.planner.PlannerBatchQueue.snapshotStats();
+            sb.append("PlannerBatchQueue.stats = ").append(stats).append('\n');
+            appendStallAnalysis(sb, server, stats);
         } catch (Throwable ignored) {}
 
         try {
@@ -184,6 +187,10 @@ public final class StallDetector {
 
         try {
             sb.append("FloatingVegetationRemover.pendingScans = ").append(org.admany.lc2h.util.chunk.ChunkPostProcessor.getPendingScanCount()).append('\n');
+        } catch (Throwable ignored) {}
+
+        try {
+            org.admany.lc2h.util.spawn.SpawnSearchScheduler.appendDiagnostics(sb, server);
         } catch (Throwable ignored) {}
 
         sb.append('\n');
@@ -207,5 +214,53 @@ public final class StallDetector {
         // Safe write
         Files.writeString(out, sb.toString(), StandardCharsets.UTF_8);
         LC2H.LOGGER.warn("[LC2H] Wrote LC2H stall diagnostics to {}", out.toAbsolutePath());
+    }
+
+    private static void appendStallAnalysis(StringBuilder sb,
+                                            MinecraftServer server,
+                                            org.admany.lc2h.worldgen.async.planner.PlannerBatchQueue.PlannerBatchStats stats) {
+        if (sb == null || stats == null) {
+            return;
+        }
+        sb.append("== LC2H STALL ANALYSIS ==\n");
+        int buildingInfoPending = 0;
+        try {
+            Integer pending = stats.pendingByKind().get(org.admany.lc2h.worldgen.async.planner.PlannerTaskKind.BUILDING_INFO);
+            buildingInfoPending = pending != null ? pending : 0;
+        } catch (Throwable ignored) {
+        }
+        org.admany.lc2h.util.spawn.SpawnSearchScheduler.SpawnSearchSnapshot spawnSnap =
+            org.admany.lc2h.util.spawn.SpawnSearchScheduler.snapshot(server);
+        int flingRisk = org.admany.lc2h.util.spawn.SpawnSearchScheduler.countFlingBackRisk(server);
+
+        sb.append("spawnSearchActive=").append(spawnSnap.active())
+            .append(" activeDimensions=").append(spawnSnap.activeDimensions())
+            .append(" resolved=").append(spawnSnap.resolved())
+            .append(" pendingTeleports=").append(spawnSnap.pendingTeleports())
+            .append('\n');
+        sb.append("spawnSearchPending=").append(spawnSnap.pendingCandidates())
+            .append(" pendingChunks=").append(spawnSnap.pendingChunks())
+            .append(" needsBuildingInfo=").append(spawnSnap.needsBuildingInfo())
+            .append(" reqBuildings=").append(spawnSnap.requiredBuildings())
+            .append(" reqParts=").append(spawnSnap.requiredParts())
+            .append('\n');
+        sb.append("plannerPending=").append(stats.pendingTasks())
+            .append(" buildingInfoPending=").append(buildingInfoPending)
+            .append(" flingBackRiskPlayers=").append(flingRisk)
+            .append('\n');
+
+        if (spawnSnap.active() && spawnSnap.needsBuildingInfo() && buildingInfoPending > 0) {
+            sb.append("possibleCause=spawn-search waiting on building info backlog\n");
+        } else if (spawnSnap.active() && spawnSnap.pendingCandidates() > 0) {
+            sb.append("possibleCause=spawn-search scan still in progress\n");
+        } else if (buildingInfoPending > 0) {
+            sb.append("possibleCause=building info queue backlog\n");
+        }
+        if (flingRisk > 0) {
+            sb.append("flingBackCause=players near old spawn without pending teleport entry\n");
+        } else if (spawnSnap.active() && spawnSnap.pendingTeleports() == 0) {
+            sb.append("flingBackCause=spawn-search unresolved; fallback spawn still active\n");
+        }
+        sb.append('\n');
     }
 }

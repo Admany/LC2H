@@ -38,17 +38,20 @@ public class MixinChunkGeneratorSkipStructures {
         try {
             var info = LostCities.lostCitiesImp.getLostInfo(level);
             ILostChunkInfo chunkInfo = info.getChunkInfo(chunk.getPos().x, chunk.getPos().z);
-            if (chunkInfo != null && chunkInfo.isCity()) {
-                int cx = chunk.getPos().x;
-                int cz = chunk.getPos().z;
-                boolean neighborCity =
-                        isCity(info.getChunkInfo(cx + 1, cz)) ||
-                        isCity(info.getChunkInfo(cx - 1, cz)) ||
-                        isCity(info.getChunkInfo(cx, cz + 1)) ||
-                        isCity(info.getChunkInfo(cx, cz - 1));
-                if (neighborCity) {
-                    ci.cancel();
-                }
+            boolean isCity = chunkInfo != null && chunkInfo.isCity();
+            int cx = chunk.getPos().x;
+            int cz = chunk.getPos().z;
+            boolean neighborCity =
+                isCity(info.getChunkInfo(cx + 1, cz)) ||
+                isCity(info.getChunkInfo(cx - 1, cz)) ||
+                isCity(info.getChunkInfo(cx, cz + 1)) ||
+                isCity(info.getChunkInfo(cx, cz - 1)) ||
+                isCity(info.getChunkInfo(cx + 1, cz + 1)) ||
+                isCity(info.getChunkInfo(cx + 1, cz - 1)) ||
+                isCity(info.getChunkInfo(cx - 1, cz + 1)) ||
+                isCity(info.getChunkInfo(cx - 1, cz - 1));
+            if (isCity || neighborCity) {
+                ci.cancel();
             }
         } catch (Throwable ignored) {
         }

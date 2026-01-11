@@ -19,6 +19,11 @@ import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
@@ -30,6 +35,12 @@ final class GpuDiskCache {
         true,
         true
     );
+
+    private static final ExecutorService DISK_IO = Executors.newFixedThreadPool(
+        Math.max(1, Integer.getInteger("lc2h.gpu.diskThreads", 1)),
+        newNamedDaemonFactory("LC2H-GpuDisk")
+    );
+    private static final ConcurrentHashMap<String, CompletableFuture<float[]>> IN_FLIGHT_READS = new ConcurrentHashMap<>();
 
     private static final String DISK_CACHE_FOLDER = "gpuData";
     private static volatile Path diskCacheDirectory;
@@ -51,7 +62,7 @@ final class GpuDiskCache {
             LC2H.LOGGER.debug("Failed to persist GPU data for {} to persistent cache: {}", coord, t.getMessage());
         }
 
-        writeDiskFile(coord, snapshot);
+        scheduleWrite(coord, snapshot);
     }
 
     static float[] load(ChunkCoord coord) {
@@ -69,14 +80,8 @@ final class GpuDiskCache {
             LC2H.LOGGER.debug("Failed to access persistent cache for {}: {}", coord, t.getMessage());
         }
 
-        float[] diskCopy = readDiskFile(coord);
-        if (diskCopy != null) {
-            try {
-                DISK_BACKING_CACHE.put(diskKey, Arrays.copyOf(diskCopy, diskCopy.length));
-            } catch (Throwable ignored) {
-            }
-        }
-        return diskCopy;
+        scheduleRead(coord, diskKey);
+        return null;
     }
 
     static void delete(ChunkCoord coord) {
@@ -91,19 +96,7 @@ final class GpuDiskCache {
             LC2H.LOGGER.debug("Failed to invalidate persistent cache entry for {}: {}", coord, t.getMessage());
         }
 
-        Path directory = diskCacheDirectory != null ? diskCacheDirectory : getDiskCacheDirectory();
-        if (directory == null) {
-            return;
-        }
-
-        Path file = directory.resolve(fileNameFor(coord));
-        try {
-            Files.deleteIfExists(file);
-        } catch (IOException e) {
-            LC2H.LOGGER.debug("Failed to delete GPU disk cache entry for {}: {}", coord, e.getMessage());
-        } catch (Throwable t) {
-            LC2H.LOGGER.debug("Unexpected error deleting GPU disk cache entry for {}: {}", coord, t.getMessage());
-        }
+        scheduleDelete(coord);
     }
 
     static void clearAll() {
@@ -112,7 +105,7 @@ final class GpuDiskCache {
         } catch (Throwable t) {
             LC2H.LOGGER.debug("Failed to clear disk GPU cache: {}", t.getMessage());
         }
-        clearDiskDirectory();
+        scheduleClear();
     }
 
     static long getBackingCacheEntryCount() {
@@ -186,6 +179,45 @@ final class GpuDiskCache {
             LC2H.LOGGER.debug("Unexpected error reading GPU disk cache for {}: {}", coord, t.getMessage());
         }
         return null;
+    }
+
+    private static void scheduleRead(ChunkCoord coord, String diskKey) {
+        IN_FLIGHT_READS.computeIfAbsent(diskKey, key -> CompletableFuture.supplyAsync(() -> readDiskFile(coord), DISK_IO)
+            .whenComplete((data, throwable) -> {
+                try {
+                    if (data != null) {
+                        DISK_BACKING_CACHE.put(key, Arrays.copyOf(data, data.length));
+                    }
+                } catch (Throwable ignored) {
+                } finally {
+                    IN_FLIGHT_READS.remove(key);
+                }
+            }));
+    }
+
+    private static void scheduleWrite(ChunkCoord coord, float[] data) {
+        CompletableFuture.runAsync(() -> writeDiskFile(coord, data), DISK_IO);
+    }
+
+    private static void scheduleDelete(ChunkCoord coord) {
+        CompletableFuture.runAsync(() -> {
+            Path directory = diskCacheDirectory != null ? diskCacheDirectory : getDiskCacheDirectory();
+            if (directory == null) {
+                return;
+            }
+            Path file = directory.resolve(fileNameFor(coord));
+            try {
+                Files.deleteIfExists(file);
+            } catch (IOException e) {
+                LC2H.LOGGER.debug("Failed to delete GPU disk cache entry for {}: {}", coord, e.getMessage());
+            } catch (Throwable t) {
+                LC2H.LOGGER.debug("Unexpected error deleting GPU disk cache entry for {}: {}", coord, t.getMessage());
+            }
+        }, DISK_IO);
+    }
+
+    private static void scheduleClear() {
+        CompletableFuture.runAsync(GpuDiskCache::clearDiskDirectory, DISK_IO);
     }
 
     private static void clearDiskDirectory() {
@@ -278,5 +310,15 @@ final class GpuDiskCache {
             }
         }
         return builder.toString();
+    }
+
+    private static ThreadFactory newNamedDaemonFactory(String prefix) {
+        java.util.concurrent.atomic.AtomicInteger idx = new java.util.concurrent.atomic.AtomicInteger(1);
+        return runnable -> {
+            Thread thread = new Thread(runnable);
+            thread.setName(prefix + "-" + idx.getAndIncrement());
+            thread.setDaemon(true);
+            return thread;
+        };
     }
 }

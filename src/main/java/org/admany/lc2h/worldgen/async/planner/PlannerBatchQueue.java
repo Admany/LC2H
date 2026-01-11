@@ -2,14 +2,19 @@ package org.admany.lc2h.worldgen.async.planner;
 
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
+import net.minecraft.server.MinecraftServer;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.async.AsyncManager;
 import org.admany.lc2h.async.Priority;
+import org.admany.lc2h.frustum.ChunkPriorityManager;
 import org.admany.lc2h.parallel.AdaptiveBatchController;
 import org.admany.lc2h.parallel.ParallelWorkQueue;
+import org.admany.lc2h.util.server.ServerRescheduler;
+import org.admany.lc2h.util.log.RateLimitedLogger;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
+import org.admany.lc2h.util.spawn.SpawnSearchScheduler;
+import org.admany.lc2h.diagnostics.ViewCullingStats;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.Iterator;
@@ -17,13 +22,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 
 public final class PlannerBatchQueue {
 
     private static final long DEFERRED_FLUSH_DELAY_MS = Math.max(15L, Long.getLong("lc2h.plannerBatch.flushDelayMs", 40L));
+    private static final int MAX_PENDING_TASKS = Math.max(256, Integer.getInteger("lc2h.planner.max_pending", 2048));
     private static final ConcurrentHashMap<PlannerBatchKey, PendingBatch> BATCHES = new ConcurrentHashMap<>();
     private static final AtomicBoolean DEFERRED_FLUSH_SCHEDULED = new AtomicBoolean(false);
+    private static final AtomicInteger PENDING_TASKS = new AtomicInteger();
+    private static final AtomicIntegerArray PENDING_BY_KIND = new AtomicIntegerArray(PlannerTaskKind.values().length);
 
     private PlannerBatchQueue() {
     }
@@ -35,26 +46,40 @@ public final class PlannerBatchQueue {
     }
 
     public static PlannerBatchStats snapshotStats() {
-        if (BATCHES.isEmpty()) {
-            return PlannerBatchStats.empty();
-        }
         EnumMap<PlannerTaskKind, Integer> byKind = new EnumMap<>(PlannerTaskKind.class);
-        int total = 0;
-        int batches = 0;
-        for (PendingBatch batch : BATCHES.values()) {
-            if (batch == null) {
-                continue;
+        for (PlannerTaskKind kind : PlannerTaskKind.values()) {
+            int count = PENDING_BY_KIND.get(kind.ordinal());
+            if (count > 0) {
+                byKind.put(kind, count);
             }
-            batches++;
-            total += batch.snapshotInto(byKind);
         }
-        return new PlannerBatchStats(batches, total, byKind);
+        return new PlannerBatchStats(BATCHES.size(), Math.max(0, PENDING_TASKS.get()), byKind);
     }
 
     public static void enqueue(IDimensionInfo provider, ChunkCoord coord, PlannerTaskKind kind, Runnable action) {
         if (provider == null || kind == null || action == null) {
             return;
         }
+        if (shouldCullQueue() && coord != null && coord.dimension() != null) {
+            if (!ChunkPriorityManager.isChunkWithinViewDistance(coord.dimension().location(), coord.chunkX(), coord.chunkZ())) {
+                ViewCullingStats.recordPlannerQueue(1);
+                return;
+            }
+        }
+        int pending = PENDING_TASKS.incrementAndGet();
+        if (pending > MAX_PENDING_TASKS) {
+            PENDING_TASKS.decrementAndGet();
+            RateLimitedLogger.warn(
+                "lc2h-planner-queue-full",
+                "LC2H planner queue full ({} >= {}). Dropping {} at {}",
+                pending,
+                MAX_PENDING_TASKS,
+                kind.displayName(),
+                describe(coord)
+            );
+            return;
+        }
+        PENDING_BY_KIND.incrementAndGet(kind.ordinal());
         PlannerBatchKey key = new PlannerBatchKey(provider);
         PendingBatch batch = BATCHES.computeIfAbsent(key, PlannerBatchQueue::createBatch);
         List<PlannerExecutable> ready = batch.add(new PlannerExecutable(kind, coord, action));
@@ -101,6 +126,10 @@ public final class PlannerBatchQueue {
     public static void shutdown() {
         flushAll();
         BATCHES.clear();
+        PENDING_TASKS.set(0);
+        for (PlannerTaskKind kind : PlannerTaskKind.values()) {
+            PENDING_BY_KIND.set(kind.ordinal(), 0);
+        }
     }
 
     private static PendingBatch createBatch(PlannerBatchKey key) {
@@ -125,9 +154,14 @@ public final class PlannerBatchQueue {
             return;
         }
 
+        List<PlannerExecutable> filtered = filterBatchForView(batch);
+        if (filtered.isEmpty()) {
+            return;
+        }
+
         if (LC2H.LOGGER.isDebugEnabled()) {
             EnumMap<PlannerTaskKind, Integer> kindCounts = new EnumMap<>(PlannerTaskKind.class);
-            for (PlannerExecutable exec : batch) {
+            for (PlannerExecutable exec : filtered) {
                 kindCounts.merge(exec.kind, 1, Integer::sum);
             }
             StringBuilder log = new StringBuilder("planner batch dispatch [");
@@ -141,8 +175,8 @@ public final class PlannerBatchQueue {
         } catch (Throwable t) {
             LC2H.LOGGER.debug("Deferred cleanup skipped before planner batch: {}", t.toString());
         }
-        List<Runnable> runners = new ArrayList<>(batch.size());
-        for (PlannerExecutable exec : batch) {
+        List<Runnable> runners = new ArrayList<>(filtered.size());
+        for (PlannerExecutable exec : filtered) {
             runners.add(() -> runExecutable(exec.kind, exec));
         }
 
@@ -222,71 +256,105 @@ public final class PlannerBatchQueue {
     }
 
     private static final class PendingBatch {
-        private final Object lock = new Object();
-        private final ArrayDeque<PlannerExecutable> tasks = new ArrayDeque<>();
+        private final ConcurrentLinkedQueue<PlannerExecutable> tasks = new ConcurrentLinkedQueue<>();
+        private final AtomicInteger size = new AtomicInteger();
+        private final AtomicBoolean draining = new AtomicBoolean(false);
 
         List<PlannerExecutable> add(PlannerExecutable exec) {
             Objects.requireNonNull(exec, "exec");
-            List<PlannerExecutable> ready = null;
-            synchronized (lock) {
-                tasks.add(exec);
-                int threshold = AdaptiveBatchController.plannerFlushThreshold();
-                if (tasks.size() >= threshold) {
-                    ready = new ArrayList<>(tasks);
-                    tasks.clear();
-                }
+            tasks.add(exec);
+            int threshold = AdaptiveBatchController.plannerFlushThreshold();
+            int current = size.incrementAndGet();
+            if (current >= threshold && draining.compareAndSet(false, true)) {
+                return drainAllLocked();
             }
-            return ready;
+            return List.of();
         }
 
         List<PlannerExecutable> drainAll() {
-            synchronized (lock) {
-                if (tasks.isEmpty()) {
-                    return List.of();
-                }
-                List<PlannerExecutable> drained = new ArrayList<>(tasks);
-                tasks.clear();
-                return drained;
+            if (!draining.compareAndSet(false, true)) {
+                return List.of();
             }
+            return drainAllLocked();
         }
 
         List<PlannerExecutable> drainKind(PlannerTaskKind kind) {
-            synchronized (lock) {
-                if (tasks.isEmpty()) {
-                    return List.of();
-                }
-                List<PlannerExecutable> drained = new ArrayList<>();
-                Iterator<PlannerExecutable> it = tasks.iterator();
-                while (it.hasNext()) {
-                    PlannerExecutable next = it.next();
-                    if (next.kind == kind) {
-                        drained.add(next);
-                        it.remove();
-                    }
-                }
-                return drained;
+            if (!draining.compareAndSet(false, true)) {
+                return List.of();
             }
+            List<PlannerExecutable> drained = new ArrayList<>();
+            List<PlannerExecutable> keep = new ArrayList<>();
+            PlannerExecutable next;
+            int removed = 0;
+            while ((next = tasks.poll()) != null) {
+                removed++;
+                if (next.kind == kind) {
+                    drained.add(next);
+                } else {
+                    keep.add(next);
+                }
+            }
+            if (removed > 0) {
+                size.addAndGet(-removed);
+                adjustPending(-removed);
+            }
+            if (!drained.isEmpty()) {
+                adjustPendingByKind(kind, -drained.size());
+            }
+            for (PlannerExecutable exec : keep) {
+                tasks.add(exec);
+                size.incrementAndGet();
+            }
+            if (!keep.isEmpty()) {
+                adjustPending(keep.size());
+            }
+            draining.set(false);
+            return drained;
         }
 
         boolean isEmpty() {
-            synchronized (lock) {
-                return tasks.isEmpty();
-            }
+            return size.get() == 0;
         }
 
         int snapshotInto(EnumMap<PlannerTaskKind, Integer> into) {
-            synchronized (lock) {
-                if (tasks.isEmpty()) {
-                    return 0;
+            int count = 0;
+            for (PlannerExecutable exec : tasks) {
+                if (exec == null || exec.kind == null) {
+                    continue;
                 }
-                for (PlannerExecutable exec : tasks) {
-                    if (exec == null || exec.kind == null) {
-                        continue;
-                    }
-                    into.merge(exec.kind, 1, Integer::sum);
-                }
-                return tasks.size();
+                into.merge(exec.kind, 1, Integer::sum);
+                count++;
             }
+            return count;
+        }
+
+        private List<PlannerExecutable> drainAllLocked() {
+            List<PlannerExecutable> drained = new ArrayList<>();
+            PlannerExecutable next;
+            int removed = 0;
+            int[] kindCounts = new int[PlannerTaskKind.values().length];
+            while ((next = tasks.poll()) != null) {
+                drained.add(next);
+                removed++;
+                if (next.kind != null) {
+                    kindCounts[next.kind.ordinal()]++;
+                }
+            }
+            if (removed > 0) {
+                size.addAndGet(-removed);
+                adjustPending(-removed);
+            }
+            if (removed > 0) {
+                PlannerTaskKind[] kinds = PlannerTaskKind.values();
+                for (int i = 0; i < kindCounts.length; i++) {
+                    int count = kindCounts[i];
+                    if (count > 0) {
+                        adjustPendingByKind(kinds[i], -count);
+                    }
+                }
+            }
+            draining.set(false);
+            return drained;
         }
     }
 
@@ -300,5 +368,60 @@ public final class PlannerBatchQueue {
             this.coord = coord;
             this.action = action;
         }
+    }
+
+    private static void adjustPending(int delta) {
+        int updated = PENDING_TASKS.addAndGet(delta);
+        if (updated < 0) {
+            PENDING_TASKS.set(0);
+        }
+    }
+
+    private static void adjustPendingByKind(PlannerTaskKind kind, int delta) {
+        if (kind == null) {
+            return;
+        }
+        int idx = kind.ordinal();
+        int updated = PENDING_BY_KIND.addAndGet(idx, delta);
+        if (updated < 0) {
+            PENDING_BY_KIND.set(idx, 0);
+        }
+    }
+
+    private static boolean shouldCullQueue() {
+        MinecraftServer server = ServerRescheduler.getServer();
+        if (server == null) {
+            return false;
+        }
+        try {
+            if (server.getPlayerList() == null || server.getPlayerList().getPlayerCount() == 0) {
+                return false;
+            }
+        } catch (Throwable ignored) {
+            return false;
+        }
+        if (SpawnSearchScheduler.isSearchActive(server)) {
+            return false;
+        }
+        return true;
+    }
+
+    private static List<PlannerExecutable> filterBatchForView(List<PlannerExecutable> batch) {
+        if (!shouldCullQueue() || batch.isEmpty()) {
+            return batch;
+        }
+        List<PlannerExecutable> kept = new ArrayList<>(batch.size());
+        for (PlannerExecutable exec : batch) {
+            if (exec == null || exec.coord == null || exec.coord.dimension() == null) {
+                kept.add(exec);
+                continue;
+            }
+            if (ChunkPriorityManager.isChunkWithinViewDistance(exec.coord.dimension().location(), exec.coord.chunkX(), exec.coord.chunkZ())) {
+                kept.add(exec);
+            } else {
+                ViewCullingStats.recordPlannerBatch(1);
+            }
+        }
+        return kept;
     }
 }

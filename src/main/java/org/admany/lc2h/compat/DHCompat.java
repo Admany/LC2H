@@ -362,12 +362,23 @@ public class DHCompat {
                                         BlockState[] blockSamples, Holder<Biome>[] biomeSamples, int[] heights) throws Exception {
             int minY = level.getMinBuildHeight();
             int maxY = level.getMaxBuildHeight();
+            int offset = minY < 0 ? -minY : 0;
+            int dataMinY = minY + offset;
+            int dataMaxY = maxY + offset;
+            int safeMinBase = clampY(dataMinY);
+            int safeMaxBase = Math.max(safeMinBase, clampY(dataMaxY));
 
-            List<Object> working = reusableColumn;
             for (int x = 0; x < width; x++) {
                 for (int z = 0; z < width; z++) {
+                    List<Object> working = new ArrayList<>(2);
                     int index = x * width + z;
-                    int topY = Math.max(minY, Math.min(heights[index], maxY));
+                    int topY = Math.max(minY, Math.min(heights[index], maxY)) + offset;
+                    int safeTop = clampY(topY);
+                    if (safeTop < safeMinBase) {
+                        safeTop = safeMinBase;
+                    } else if (safeTop > safeMaxBase) {
+                        safeTop = safeMaxBase;
+                    }
 
                     BlockState state = blockSamples[index];
                     Holder<Biome> biomeHolder = biomeSamples[index];
@@ -384,22 +395,31 @@ public class DHCompat {
 
                     working.clear();
 
-                    if (blockWrapper != null && topY > minY) {
-                        working.add(terrainDataPointCreate.invoke(null, detailLevel, 0, 0, minY, topY, blockWrapper, biomeWrapper));
+                    int solidBottom = safeMinBase;
+                    int solidTop = safeTop;
+                    if (solidTop < solidBottom) {
+                        int swap = solidTop;
+                        solidTop = solidBottom;
+                        solidBottom = swap;
                     }
 
-                    if (topY < maxY) {
-                        working.add(terrainDataPointCreate.invoke(null, detailLevel, 0, 15, topY, maxY, airWrapper, biomeWrapper));
+                    if (blockWrapper != null && solidTop > solidBottom) {
+                        working.add(terrainDataPointCreate.invoke(null, detailLevel, 0, 0, solidBottom, solidTop, blockWrapper, biomeWrapper));
                     }
 
-                    Object result = fullDataSourceSetColumn.invoke(dataSource, x, z, working);
-                    if (result instanceof List<?> listResult) {
-                        @SuppressWarnings("unchecked")
-                        List<Object> cast = (List<Object>) listResult;
-                        working = cast;
-                    } else {
-                        working = reusableColumn;
+                    int airBottom = safeTop;
+                    int airTop = safeMaxBase;
+                    if (airTop < airBottom) {
+                        int swap = airTop;
+                        airTop = airBottom;
+                        airBottom = swap;
                     }
+
+                    if (airTop > airBottom) {
+                        working.add(terrainDataPointCreate.invoke(null, detailLevel, 0, 15, airBottom, airTop, airWrapper, biomeWrapper));
+                    }
+
+                    fullDataSourceSetColumn.invoke(dataSource, x, z, working);
                 }
             }
         }
@@ -430,6 +450,16 @@ public class DHCompat {
             } catch (Throwable ignored) {
                 return null;
             }
+        }
+
+        private int clampY(int value) {
+            if (value < 0) {
+                return 0;
+            }
+            if (value > 4095) {
+                return 4095;
+            }
+            return value;
         }
 
         private Object resolveBlockWrapper(BlockState state) {
@@ -492,6 +522,7 @@ public class DHCompat {
 
     private static final class GeneratorInvocationHandler implements InvocationHandler {
         private final LevelIntegration integration;
+        private final Object identity = new Object();
 
         private GeneratorInvocationHandler(LevelIntegration integration) {
             this.integration = integration;
@@ -506,6 +537,8 @@ public class DHCompat {
                     return apiDataSourceReturnType;
                 case "runApiValidation":
                     return Boolean.FALSE;
+                case "getPriority":
+                    return 0;
                 case "getSmallestDataDetailLevel":
                     return (byte) 0;
                 case "getLargestDataDetailLevel":
@@ -527,8 +560,51 @@ public class DHCompat {
                     if (name.equals("toString")) {
                         return "LC2H-DH-WorldGenerator";
                     }
-                    throw new UnsupportedOperationException("Unsupported IDhApiWorldGenerator method: " + name);
+                    if (name.equals("hashCode")) {
+                        return System.identityHashCode(identity);
+                    }
+                    if (name.equals("equals")) {
+                        return args != null && args.length == 1 && args[0] == proxy;
+                    }
+                    Object fallback = defaultValueFor(method);
+                    LC2H.LOGGER.debug("Unhandled DH generator method {}; returning {}", name, fallback);
+                    return fallback;
             }
+        }
+
+        private Object defaultValueFor(Method method) {
+            Class<?> type = method.getReturnType();
+            if (type == Void.TYPE) {
+                return null;
+            }
+            if (!type.isPrimitive()) {
+                return null;
+            }
+            if (type == Boolean.TYPE) {
+                return false;
+            }
+            if (type == Byte.TYPE) {
+                return (byte) 0;
+            }
+            if (type == Short.TYPE) {
+                return (short) 0;
+            }
+            if (type == Integer.TYPE) {
+                return 0;
+            }
+            if (type == Long.TYPE) {
+                return 0L;
+            }
+            if (type == Float.TYPE) {
+                return 0.0f;
+            }
+            if (type == Double.TYPE) {
+                return 0.0d;
+            }
+            if (type == Character.TYPE) {
+                return '\0';
+            }
+            return null;
         }
     }
 }

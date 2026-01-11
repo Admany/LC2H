@@ -10,10 +10,14 @@ import org.admany.lc2h.LC2H;
 public final class ServerTickLoad {
 
     private static final double EWMA_ALPHA = 0.15D;
+    private static final long CONFIG_REFRESH_NS = java.util.concurrent.TimeUnit.SECONDS.toNanos(1);
 
     private static volatile long tickStartNs = 0L;
     private static volatile double lastTickMs = 0.0D;
     private static volatile double smoothedTickMs = 0.0D;
+    private static volatile double elapsedLimitMs = readDouble("lc2h.lag_guard.elapsed_ms", 18.0D);
+    private static volatile double avgLimitMs = readDouble("lc2h.lag_guard.avg_ms", 40.0D);
+    private static volatile long lastConfigRefreshNs = 0L;
 
     private ServerTickLoad() {
     }
@@ -67,8 +71,7 @@ public final class ServerTickLoad {
     }
 
     public static boolean shouldPauseNonCritical(MinecraftServer server) {
-        double elapsedLimitMs = Double.parseDouble(System.getProperty("lc2h.lag_guard.elapsed_ms", "18"));
-        double avgLimitMs = Double.parseDouble(System.getProperty("lc2h.lag_guard.avg_ms", "40"));
+        refreshConfigIfNeeded();
 
         double elapsed = getElapsedMsInCurrentTick();
         if (elapsedLimitMs > 0.0D && elapsed >= elapsedLimitMs) {
@@ -77,5 +80,28 @@ public final class ServerTickLoad {
 
         double avg = getAverageTickMs(server, 50.0D);
         return avgLimitMs > 0.0D && avg >= avgLimitMs;
+    }
+
+    private static void refreshConfigIfNeeded() {
+        long now = System.nanoTime();
+        long lastRefresh = lastConfigRefreshNs;
+        if (now - lastRefresh < CONFIG_REFRESH_NS) {
+            return;
+        }
+        lastConfigRefreshNs = now;
+        elapsedLimitMs = readDouble("lc2h.lag_guard.elapsed_ms", elapsedLimitMs);
+        avgLimitMs = readDouble("lc2h.lag_guard.avg_ms", avgLimitMs);
+    }
+
+    private static double readDouble(String key, double fallback) {
+        String value = System.getProperty(key);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Double.parseDouble(value.trim());
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
     }
 }

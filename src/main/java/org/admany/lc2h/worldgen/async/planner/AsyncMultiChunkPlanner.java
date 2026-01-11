@@ -1,28 +1,42 @@
 package org.admany.lc2h.worldgen.async.planner;
 
+import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
+import mcjty.lostcities.worldgen.lost.BuildingInfo;
+import mcjty.lostcities.worldgen.lost.City;
 import mcjty.lostcities.worldgen.lost.MultiChunk;
+import mcjty.lostcities.worldgen.lost.Railway;
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
+import org.admany.lc2h.frustum.ChunkPriorityManager;
 import org.admany.lc2h.mixin.accessor.MultiChunkAccessor;
 import org.admany.lc2h.mixin.accessor.MultiChunkInvoker;
 import org.admany.lc2h.parallel.AdaptiveBatchController;
 import org.admany.lc2h.parallel.AdaptiveConcurrencyLimiter;
 import org.admany.lc2h.parallel.ParallelWorkOptions;
 import org.admany.lc2h.parallel.ParallelWorkQueue;
+import org.admany.lc2h.util.lostcities.MultiChunkCacheAccess;
+import org.admany.lc2h.util.spawn.SpawnSearchGuard;
+import org.admany.lc2h.util.spawn.SpawnSearchScheduler;
+import org.admany.lc2h.util.server.ServerRescheduler;
+import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.lc2h.worldgen.async.snapshot.MultiChunkSnapshot;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.diagnostics.ChunkGenTracker;
+import org.admany.lc2h.diagnostics.ViewCullingStats;
 
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.time.Duration;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import net.minecraft.resources.ResourceKey;
 
 public final class AsyncMultiChunkPlanner {
@@ -35,15 +49,21 @@ public final class AsyncMultiChunkPlanner {
     private static final int MULTICHUNK_PARALLELISM_OVERRIDE = Integer.getInteger("lc2h.multichunk.parallelism", -1);
     private static final int MULTICHUNK_MAX = Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors()));
     private static final AdaptiveConcurrencyLimiter MULTICHUNK_LIMITER = new AdaptiveConcurrencyLimiter(2, 1, MULTICHUNK_MAX);
+    private static final int MULTICHUNK_PRECOMPUTE_PARALLELISM = Math.max(1,
+        Math.min(Integer.getInteger("lc2h.multichunk.precomputeParallelism", Math.max(2, MULTICHUNK_MAX)), MULTICHUNK_MAX));
+    private static final java.util.concurrent.ExecutorService MULTICHUNK_PRECOMPUTE_POOL =
+        MULTICHUNK_PRECOMPUTE_PARALLELISM > 1 ? new java.util.concurrent.ForkJoinPool(MULTICHUNK_PRECOMPUTE_PARALLELISM) : null;
     private static final long MULTICHUNK_SLOW_LOG_MS = Math.max(0L,
         Long.getLong("lc2h.multichunk.slowLogMs", 1500L));
 
+    private static final LostCitiesCacheBudgetManager.CacheGroup MULTICHUNK_BUDGET =
+        LostCitiesCacheBudgetManager.register("lc_multichunk", 4096, 256, MultiChunkCacheAccess::remove);
+
     public static final ConcurrentHashMap<ChunkCoord, float[]> GPU_DATA_CACHE = new ConcurrentHashMap<>();
 
-    private static final java.util.List<java.util.function.Supplier<MultiChunk>> PENDING_SUPPLIERS = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
-    private static final java.util.List<CompletableFuture<MultiChunk>> PENDING_FUTURES = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
-    private static final java.util.List<ChunkCoord> PENDING_KEYS = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
-    private static final java.util.List<IDimensionInfo> PENDING_PROVIDERS = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+    private static final ConcurrentLinkedQueue<PendingEntry> PENDING = new ConcurrentLinkedQueue<>();
+    private static final AtomicInteger PENDING_SIZE = new AtomicInteger();
+    private static final AtomicBoolean PENDING_DRAINING = new AtomicBoolean(false);
     private static final int MAX_PENDING = 128;
     private static final AtomicBoolean PENDING_FLUSH_SCHEDULED = new AtomicBoolean(false);
     private static final long PENDING_FLUSH_DELAY_MS = 15;
@@ -57,10 +77,11 @@ public final class AsyncMultiChunkPlanner {
         Objects.requireNonNull(coord, "coord");
 
         ChunkCoord multiCoord = toMultiCoord(provider, coord);
-        Map<ChunkCoord, MultiChunk> cache = MultiChunkAccessor.lc2h$getCache();
-        synchronized (cache) {
-            MultiChunk existing = cache.get(multiCoord);
+        Object cacheLock = MultiChunkCacheAccess.lock();
+        synchronized (cacheLock) {
+            MultiChunk existing = MultiChunkCacheAccess.get(multiCoord);
             if (existing != null) {
+                LostCitiesCacheBudgetManager.recordAccess(MULTICHUNK_BUDGET, multiCoord);
                 return existing;
             }
         }
@@ -82,10 +103,11 @@ public final class AsyncMultiChunkPlanner {
         int areaSize = provider.getWorldStyle().getMultiSettings().areasize();
         ChunkCoord multiCoord = toMultiCoord(coord, areaSize);
 
-        Map<ChunkCoord, MultiChunk> cache = MultiChunkAccessor.lc2h$getCache();
-        synchronized (cache) {
-            MultiChunk existing = cache.get(multiCoord);
+        Object cacheLock = MultiChunkCacheAccess.lock();
+        synchronized (cacheLock) {
+            MultiChunk existing = MultiChunkCacheAccess.get(multiCoord);
             if (existing != null) {
+                LostCitiesCacheBudgetManager.recordAccess(MULTICHUNK_BUDGET, multiCoord);
                 return existing;
             }
         }
@@ -117,9 +139,9 @@ public final class AsyncMultiChunkPlanner {
         int areaSize = provider.getWorldStyle().getMultiSettings().areasize();
         ChunkCoord multiCoord = toMultiCoord(coord, areaSize);
 
-        Map<ChunkCoord, MultiChunk> cache = MultiChunkAccessor.lc2h$getCache();
-        synchronized (cache) {
-            if (cache.containsKey(multiCoord)) {
+        Object cacheLock = MultiChunkCacheAccess.lock();
+        synchronized (cacheLock) {
+            if (MultiChunkCacheAccess.contains(multiCoord)) {
                 return;
             }
         }
@@ -129,7 +151,14 @@ public final class AsyncMultiChunkPlanner {
         if (future != null) {
             try {
                 if (!future.isCancelled() && !future.isCompletedExceptionally()) {
-                    prepared = future.isDone() ? future.getNow(null) : future.join();
+                    if (future.isDone()) {
+                        prepared = future.getNow(null);
+                    } else if (SpawnSearchGuard.isActive()) {
+                        prepared = computeMultiChunkSync(provider, areaSize, multiCoord);
+                        future.cancel(false);
+                    } else {
+                        prepared = future.join();
+                    }
                 }
             } catch (Throwable ignored) {
             }
@@ -153,9 +182,9 @@ public final class AsyncMultiChunkPlanner {
         int areaSize = provider.getWorldStyle().getMultiSettings().areasize();
         ChunkCoord multiCoord = toMultiCoord(coord, areaSize);
 
-        Map<ChunkCoord, MultiChunk> cache = MultiChunkAccessor.lc2h$getCache();
-        synchronized (cache) {
-            if (cache.containsKey(multiCoord)) {
+        Object cacheLock = MultiChunkCacheAccess.lock();
+        synchronized (cacheLock) {
+            if (MultiChunkCacheAccess.contains(multiCoord)) {
                 return;
             }
         }
@@ -177,10 +206,13 @@ public final class AsyncMultiChunkPlanner {
         int areaSize = provider.getWorldStyle().getMultiSettings().areasize();
         ChunkCoord multiCoord = toMultiCoord(coord, areaSize);
 
-        Map<ChunkCoord, MultiChunk> cache = MultiChunkAccessor.lc2h$getCache();
-        synchronized (cache) {
-            if (!cache.containsKey(multiCoord)) {
-                cache.put(multiCoord, multiChunk);
+        Object cacheLock = MultiChunkCacheAccess.lock();
+        synchronized (cacheLock) {
+            if (!MultiChunkCacheAccess.contains(multiCoord)) {
+                MultiChunkCacheAccess.put(multiCoord, multiChunk);
+                LostCitiesCacheBudgetManager.recordPut(MULTICHUNK_BUDGET, multiCoord, MULTICHUNK_BUDGET.defaultEntryBytes(), true);
+            } else {
+                LostCitiesCacheBudgetManager.recordAccess(MULTICHUNK_BUDGET, multiCoord);
             }
         }
         PLANNED.remove(multiCoord);
@@ -235,30 +267,24 @@ public final class AsyncMultiChunkPlanner {
     }
 
     public static void flushPendingBatches() {
-        synchronized (PENDING_SUPPLIERS) {
-            if (!PENDING_SUPPLIERS.isEmpty()) {
-                submitBatch();
-            }
+        if (PENDING_SIZE.get() > 0) {
+            submitBatch();
         }
     }
 
     public static void shutdown() {
         try {
             LC2H.LOGGER.info("AsyncMultiChunkPlanner: Shutting down warmup executor");
-
-            synchronized (PENDING_SUPPLIERS) {
-                for (CompletableFuture<MultiChunk> future : PENDING_FUTURES) {
-                    future.cancel(true);
-                }
-                PENDING_SUPPLIERS.clear();
-                PENDING_FUTURES.clear();
-                PENDING_KEYS.clear();
-                PENDING_PROVIDERS.clear();
+            for (PendingEntry entry : drainPending()) {
+                entry.future().cancel(true);
             }
 
             PLANNED.clear();
             WARM_BUILDING_INFO_SUBMITTED.clear();
             GPU_DATA_CACHE.clear();
+            if (MULTICHUNK_PRECOMPUTE_POOL != null) {
+                MULTICHUNK_PRECOMPUTE_POOL.shutdown();
+            }
 
             LC2H.LOGGER.info("AsyncMultiChunkPlanner: Shutdown complete");
         } catch (Exception e) {
@@ -280,11 +306,6 @@ public final class AsyncMultiChunkPlanner {
     }
 
     private static MultiChunk computeMultiChunk(IDimensionInfo provider, int areaSize, ChunkCoord multiCoord) {
-        if (MULTICHUNK_PARALLELISM_OVERRIDE > 0) {
-            MULTICHUNK_LIMITER.setLimit(MULTICHUNK_PARALLELISM_OVERRIDE);
-        }
-
-        AdaptiveConcurrencyLimiter.Token token = MULTICHUNK_LIMITER.enter();
         long start = System.nanoTime();
         try {
             boolean trace = Boolean.parseBoolean(System.getProperty("lc2h.multichunkTrace", "false"));
@@ -298,19 +319,125 @@ public final class AsyncMultiChunkPlanner {
                 }
             }
 
+            precomputeMultiChunkLookups(provider, multiCoord, areaSize);
             MultiChunk multiChunk = new MultiChunk(multiCoord, areaSize);
             MultiChunk result = ((MultiChunkInvoker) multiChunk).lc2h$calculateBuildings(provider);
 
             long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
-            if (elapsedMs >= MULTICHUNK_SLOW_LOG_MS) {
-                LC2H.LOGGER.info("[AsyncMultiChunkPlanner] computeMultiChunk({}) finished in {} ms", multiCoord, elapsedMs);
-            } else if (trace || org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+            if (trace || org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                 LC2H.LOGGER.debug("[AsyncMultiChunkPlanner] computeMultiChunk({}) finished in {} ms", multiCoord, elapsedMs);
             }
             return result;
         } finally {
-            token.close();
         }
+    }
+
+    private static void precomputeMultiChunkLookups(IDimensionInfo provider, ChunkCoord multiCoord, int areaSize) {
+        if (provider == null || multiCoord == null || areaSize <= 0) {
+            return;
+        }
+        if (SpawnSearchGuard.isActive()) {
+            return;
+        }
+
+        ChunkCoord topLeft = new ChunkCoord(multiCoord.dimension(), multiCoord.chunkX() * areaSize, multiCoord.chunkZ() * areaSize);
+        LostCityProfile profile;
+        try {
+            profile = provider.getProfile();
+        } catch (Throwable t) {
+            return;
+        }
+
+        try {
+            City.isChunkOccupied(provider, topLeft);
+        } catch (Throwable ignored) {
+        }
+
+        int baseX = topLeft.chunkX();
+        int baseZ = topLeft.chunkZ();
+        int parallelism = computePrecomputeParallelism(areaSize);
+        java.util.concurrent.ExecutorService precomputePool = MULTICHUNK_PRECOMPUTE_POOL;
+        if (parallelism <= 1 || precomputePool == null || precomputePool.isShutdown() || precomputePool.isTerminated() || areaSize <= 1) {
+            for (int x = 0; x < areaSize; x++) {
+                for (int z = 0; z < areaSize; z++) {
+                    ChunkCoord coord = new ChunkCoord(topLeft.dimension(), baseX + x, baseZ + z);
+                    warmChunkLookups(provider, profile, coord);
+                }
+            }
+            return;
+        }
+
+        int stride = Math.max(1, (int) Math.ceil(areaSize / (double) parallelism));
+        java.util.List<java.util.concurrent.Callable<Void>> tasks = new java.util.ArrayList<>(Math.max(1, (int) Math.ceil(areaSize / (double) stride)));
+        for (int x = 0; x < areaSize; x += stride) {
+            final int startX = x;
+            final int endX = Math.min(areaSize, x + stride);
+            tasks.add(() -> {
+                for (int localX = startX; localX < endX; localX++) {
+                    for (int z = 0; z < areaSize; z++) {
+                        ChunkCoord coord = new ChunkCoord(topLeft.dimension(), baseX + localX, baseZ + z);
+                        warmChunkLookups(provider, profile, coord);
+                    }
+                }
+                return null;
+            });
+        }
+
+        try {
+            java.util.List<java.util.concurrent.Future<Void>> futures = precomputePool.invokeAll(tasks);
+            for (java.util.concurrent.Future<Void> future : futures) {
+                try {
+                    future.get();
+                } catch (Throwable ignored) {
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            for (int x = 0; x < areaSize; x++) {
+                for (int z = 0; z < areaSize; z++) {
+                    ChunkCoord coord = new ChunkCoord(topLeft.dimension(), baseX + x, baseZ + z);
+                    warmChunkLookups(provider, profile, coord);
+                }
+            }
+        }
+    }
+
+    private static void warmChunkLookups(IDimensionInfo provider, LostCityProfile profile, ChunkCoord coord) {
+        boolean cityRaw = false;
+        try {
+            cityRaw = BuildingInfo.isCityRaw(coord, provider, profile);
+        } catch (Throwable ignored) {
+        }
+        if (!cityRaw) {
+            return;
+        }
+        try {
+            City.getCityStyle(coord, provider, profile);
+        } catch (Throwable ignored) {
+        }
+        try {
+            Railway.getRailChunkType(coord, provider, profile);
+        } catch (Throwable ignored) {
+        }
+        try {
+            BuildingInfo.hasHighway(coord, provider, profile);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static int computePrecomputeParallelism(int areaSize) {
+        if (areaSize <= 1) {
+            return 1;
+        }
+        int base = MULTICHUNK_PRECOMPUTE_PARALLELISM;
+        double tickMs = ServerTickLoad.getSmoothedTickMs();
+        if (tickMs >= 40.0D) {
+            base = 1;
+        } else if (tickMs >= 30.0D) {
+            base = Math.max(1, base / 2);
+        }
+        return Math.max(1, Math.min(base, areaSize));
     }
 
     private static MultiChunk integrateResult(IDimensionInfo provider, ChunkCoord multiCoord, MultiChunk prepared) {
@@ -318,40 +445,92 @@ public final class AsyncMultiChunkPlanner {
     }
 
     private static MultiChunk integrateResult(IDimensionInfo provider, ChunkCoord multiCoord, MultiChunk prepared, java.util.function.Consumer<Runnable> runnableCollector) {
-        MultiChunk gameCompatible = translateToGameCompatible(prepared, provider);
-
-        Runnable applicator = () -> {
-            Map<ChunkCoord, MultiChunk> cache = MultiChunkAccessor.lc2h$getCache();
-            synchronized (cache) {
-                if (!cache.containsKey(multiCoord)) {
-                    cache.put(multiCoord, gameCompatible);
-                }
-            }
-
-            try {
-                int areaSize = provider.getWorldStyle().getMultiSettings().areasize();
-                ChunkCoord topLeft = new ChunkCoord(multiCoord.dimension(), multiCoord.chunkX() * areaSize, multiCoord.chunkZ() * areaSize);
-                org.admany.lc2h.util.lostcities.BuildingInfoCacheInvalidator.invalidateArea(topLeft, areaSize);
-                org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner.invalidateArea(topLeft, areaSize);
-                ChunkGenTracker.recordMultiChunkIntegrated(topLeft, areaSize);
-            } catch (Throwable ignored) {
-            }
-
-            PLANNED.remove(multiCoord);
-            scheduleWarmBuildingInfo(provider, gameCompatible, multiCoord);
-        };
+        String threadName = Thread.currentThread().getName();
+        boolean onServerThread = "Server thread".equals(threadName);
 
         if (runnableCollector != null) {
-            runnableCollector.accept(applicator);
-        } else {
-            String threadName = Thread.currentThread().getName();
-            if ("Server thread".equals(threadName)) {
-                applicator.run();
-            } else {
-                org.admany.lc2h.core.MainThreadChunkApplier.enqueueChunkApplication(multiCoord, applicator);
+            if (onServerThread) {
+                MultiChunk gameCompatible = translateToGameCompatible(prepared, provider);
+                runnableCollector.accept(() -> applyIntegrated(provider, multiCoord, gameCompatible));
+                return gameCompatible;
+            }
+
+            byte[] snapshot = null;
+            try {
+                snapshot = MultiChunkSnapshot.encode(prepared);
+            } catch (Throwable ignored) {
+            }
+            final byte[] finalSnapshot = snapshot;
+            runnableCollector.accept(() -> {
+                MultiChunk gameCompatible = prepared;
+                if (finalSnapshot != null) {
+                    try {
+                        MultiChunk decoded = MultiChunkSnapshot.decode(finalSnapshot);
+                        if (decoded != null) {
+                            gameCompatible = decoded;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+                applyIntegrated(provider, multiCoord, gameCompatible);
+            });
+            return prepared;
+        }
+
+        if (onServerThread) {
+            MultiChunk gameCompatible = translateToGameCompatible(prepared, provider);
+            applyIntegrated(provider, multiCoord, gameCompatible);
+            return gameCompatible;
+        }
+
+        byte[] snapshot = null;
+        try {
+            snapshot = MultiChunkSnapshot.encode(prepared);
+        } catch (Throwable ignored) {
+        }
+        final byte[] finalSnapshot = snapshot;
+        org.admany.lc2h.core.MainThreadChunkApplier.enqueueChunkApplication(multiCoord, () -> {
+            MultiChunk gameCompatible = prepared;
+            if (finalSnapshot != null) {
+                try {
+                    MultiChunk decoded = MultiChunkSnapshot.decode(finalSnapshot);
+                    if (decoded != null) {
+                        gameCompatible = decoded;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            applyIntegrated(provider, multiCoord, gameCompatible);
+        });
+        return prepared;
+    }
+
+    private static void applyIntegrated(IDimensionInfo provider, ChunkCoord multiCoord, MultiChunk gameCompatible) {
+        Object cacheLock = MultiChunkCacheAccess.lock();
+        boolean inserted = false;
+        synchronized (cacheLock) {
+            if (!MultiChunkCacheAccess.contains(multiCoord)) {
+                MultiChunkCacheAccess.put(multiCoord, gameCompatible);
+                inserted = true;
             }
         }
-        return gameCompatible;
+        if (inserted) {
+            LostCitiesCacheBudgetManager.recordPut(MULTICHUNK_BUDGET, multiCoord, MULTICHUNK_BUDGET.defaultEntryBytes(), true);
+        } else {
+            LostCitiesCacheBudgetManager.recordAccess(MULTICHUNK_BUDGET, multiCoord);
+        }
+
+        try {
+            int areaSize = provider.getWorldStyle().getMultiSettings().areasize();
+            ChunkCoord topLeft = new ChunkCoord(multiCoord.dimension(), multiCoord.chunkX() * areaSize, multiCoord.chunkZ() * areaSize);
+            org.admany.lc2h.util.lostcities.BuildingInfoCacheInvalidator.invalidateArea(topLeft, areaSize);
+            org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner.invalidateArea(topLeft, areaSize);
+            ChunkGenTracker.recordMultiChunkIntegrated(topLeft, areaSize);
+        } catch (Throwable ignored) {
+        }
+
+        PLANNED.remove(multiCoord);
+        scheduleWarmBuildingInfo(provider, gameCompatible, multiCoord);
     }
 
     private static MultiChunk translateToGameCompatible(MultiChunk asyncResult, IDimensionInfo provider) {
@@ -411,9 +590,9 @@ public final class AsyncMultiChunkPlanner {
         int areaSize = provider.getWorldStyle().getMultiSettings().areasize();
         ChunkCoord multiCoord = toMultiCoord(coord, areaSize);
 
-        Map<ChunkCoord, MultiChunk> cache = MultiChunkAccessor.lc2h$getCache();
-        synchronized (cache) {
-            if (cache.containsKey(multiCoord)) {
+        Object cacheLock = MultiChunkCacheAccess.lock();
+        synchronized (cacheLock) {
+            if (MultiChunkCacheAccess.contains(multiCoord)) {
                 return;
             }
         }
@@ -422,7 +601,11 @@ public final class AsyncMultiChunkPlanner {
             MultiChunk computed = computeMultiChunkSync(provider, areaSize, multiCoord);
             integrateResult(provider, multiCoord, computed);
         } catch (Throwable t) {
-            LC2H.LOGGER.error("Sync warmup failed for {}: {}", coord, t.getMessage());
+            boolean debugLogging = AsyncChunkWarmup.isWarmupDebugLoggingEnabled()
+                || org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING;
+            if (debugLogging) {
+                LC2H.LOGGER.debug("Sync warmup failed for {}", coord, t);
+            }
         }
     }
 
@@ -433,39 +616,51 @@ public final class AsyncMultiChunkPlanner {
     private static CompletableFuture<MultiChunk> submitMultiChunkCompute(IDimensionInfo provider, int areaSize, ChunkCoord key) {
         java.util.function.Supplier<MultiChunk> supplier = () -> computeMultiChunk(provider, areaSize, key);
         CompletableFuture<MultiChunk> future = new CompletableFuture<>();
+        int pending = PENDING_SIZE.incrementAndGet();
+        if (pending >= MAX_PENDING) {
+            LC2H.LOGGER.debug("Pending suppliers at limit (" + MAX_PENDING + "), forcing flush before enqueue for " + key);
+        }
+        PENDING.add(new PendingEntry(supplier, future, key, provider, null));
 
-        synchronized (PENDING_SUPPLIERS) {
-            if (PENDING_SUPPLIERS.size() >= MAX_PENDING) {
-                LC2H.LOGGER.debug("Pending suppliers at limit (" + MAX_PENDING + "), forcing flush before enqueue for " + key);
-                submitBatch();
-            }
-            PENDING_SUPPLIERS.add(supplier);
-            PENDING_FUTURES.add(future);
-            PENDING_KEYS.add(key);
-            PENDING_PROVIDERS.add(provider);
-
-            int dynamicBatchSize = Math.max(8, AdaptiveBatchController.multiChunkBatchSize());
-            if (PENDING_SUPPLIERS.size() >= dynamicBatchSize) {
-                submitBatch();
-            } else {
-                long delay = isLatencySensitiveThread() ? PENDING_FLUSH_DELAY_LATENCY_SENSITIVE_MS : PENDING_FLUSH_DELAY_MS;
-                schedulePendingFlush(delay);
-            }
+        int dynamicBatchSize = Math.max(8, AdaptiveBatchController.multiChunkBatchSize());
+        if (pending >= MAX_PENDING || pending >= dynamicBatchSize) {
+            submitBatch();
+        } else {
+            long delay = isLatencySensitiveThread() ? PENDING_FLUSH_DELAY_LATENCY_SENSITIVE_MS : PENDING_FLUSH_DELAY_MS;
+            schedulePendingFlush(delay);
         }
 
         return future;
     }
 
     private static void submitBatch() {
-        java.util.List<java.util.function.Supplier<MultiChunk>> suppliers = new java.util.ArrayList<>(PENDING_SUPPLIERS);
-        java.util.List<CompletableFuture<MultiChunk>> futures = new java.util.ArrayList<>(PENDING_FUTURES);
-        java.util.List<ChunkCoord> keys = new java.util.ArrayList<>(PENDING_KEYS);
-        java.util.List<IDimensionInfo> providers = new java.util.ArrayList<>(PENDING_PROVIDERS);
+        List<PendingEntry> drained = drainPending();
+        if (drained.isEmpty()) {
+            if (PENDING_SIZE.get() > 0) {
+                schedulePendingFlush(0L);
+            }
+            return;
+        }
 
-        PENDING_SUPPLIERS.clear();
-        PENDING_FUTURES.clear();
-        PENDING_KEYS.clear();
-        PENDING_PROVIDERS.clear();
+        java.util.List<java.util.function.Supplier<MultiChunk>> suppliers = new java.util.ArrayList<>(drained.size());
+        java.util.List<CompletableFuture<MultiChunk>> futures = new java.util.ArrayList<>(drained.size());
+        java.util.List<ChunkCoord> keys = new java.util.ArrayList<>(drained.size());
+        java.util.List<IDimensionInfo> providers = new java.util.ArrayList<>(drained.size());
+        for (PendingEntry entry : drained) {
+            AdaptiveConcurrencyLimiter.Token token = entry.token();
+            suppliers.add(() -> {
+                try {
+                    return entry.supplier().get();
+                } finally {
+                    if (token != null) {
+                        token.close();
+                    }
+                }
+            });
+            futures.add(entry.future());
+            keys.add(entry.key());
+            providers.add(entry.provider());
+        }
 
         LC2H.LOGGER.debug("Submitting batched multi-chunk compute with " + suppliers.size() + " tasks");
 
@@ -496,11 +691,108 @@ public final class AsyncMultiChunkPlanner {
                     root = root.getCause();
                 }
                 LC2H.LOGGER.error("Batched multi-chunk compute failed (tasks={}, firstKey={})", keys.size(), keys.isEmpty() ? "<none>" : keys.get(0), root);
+                for (PendingEntry entry : drained) {
+                    AdaptiveConcurrencyLimiter.Token token = entry.token();
+                    if (token != null) {
+                        token.close();
+                    }
+                }
                 for (CompletableFuture<MultiChunk> f : futures) {
                     f.completeExceptionally(t);
                 }
                 return null;
             });
+    }
+
+    private static List<PendingEntry> drainPending() {
+        if (!PENDING_DRAINING.compareAndSet(false, true)) {
+            return List.of();
+        }
+        if (MULTICHUNK_PARALLELISM_OVERRIDE > 0) {
+            MULTICHUNK_LIMITER.setLimit(MULTICHUNK_PARALLELISM_OVERRIDE);
+        }
+        int batchTarget = Math.max(1, AdaptiveBatchController.multiChunkBatchSize());
+        int availableSlots = MULTICHUNK_LIMITER.availableSlots();
+        int maxDrain = Math.min(batchTarget, availableSlots);
+        if (maxDrain <= 0) {
+            PENDING_DRAINING.set(false);
+            return List.of();
+        }
+
+        List<PendingEntry> drained = new ArrayList<>(maxDrain);
+        List<PendingEntry> keep = new ArrayList<>();
+        int dropped = 0;
+        PendingEntry entry;
+        while ((entry = PENDING.poll()) != null) {
+            if (shouldCullQueue() && !isChunkInView(entry.key())) {
+                dropped++;
+                try {
+                    CompletableFuture<MultiChunk> future = entry.future();
+                    if (future != null) {
+                        future.cancel(false);
+                    }
+                } catch (Throwable ignored) {
+                }
+                try {
+                    PLANNED.remove(entry.key(), entry.future());
+                } catch (Throwable ignored) {
+                }
+                continue;
+            }
+            if (drained.size() >= maxDrain) {
+                keep.add(entry);
+                continue;
+            }
+            AdaptiveConcurrencyLimiter.Token token = MULTICHUNK_LIMITER.tryEnter();
+            if (token == null) {
+                keep.add(entry);
+                continue;
+            }
+            drained.add(new PendingEntry(entry.supplier(), entry.future(), entry.key(), entry.provider(), token));
+        }
+
+        if (!keep.isEmpty()) {
+            for (PendingEntry pending : keep) {
+                PENDING.add(pending);
+            }
+        }
+        if (!drained.isEmpty() || dropped > 0) {
+            PENDING_SIZE.addAndGet(-(drained.size() + dropped));
+        }
+        if (dropped > 0) {
+            ViewCullingStats.recordMultiChunkPending(dropped);
+        }
+        PENDING_DRAINING.set(false);
+        return drained;
+    }
+
+    private static boolean shouldCullQueue() {
+        var server = ServerRescheduler.getServer();
+        if (server == null) {
+            return false;
+        }
+        try {
+            if (server.getPlayerList() == null || server.getPlayerList().getPlayerCount() == 0) {
+                return false;
+            }
+        } catch (Throwable ignored) {
+            return false;
+        }
+        if (SpawnSearchScheduler.isSearchActive(server)) {
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean isChunkInView(ChunkCoord coord) {
+        if (coord == null || coord.dimension() == null) {
+            return true;
+        }
+        return ChunkPriorityManager.isChunkWithinViewDistance(
+            coord.dimension().location(),
+            coord.chunkX(),
+            coord.chunkZ()
+        );
     }
 
     private static void scheduleBatchIntegration(java.util.List<IDimensionInfo> providers,
@@ -558,10 +850,8 @@ public final class AsyncMultiChunkPlanner {
         long effectiveDelay = Math.max(0L, delayMs);
         org.admany.lc2h.async.AsyncManager.runLater("multichunk-pending-flush", () -> {
             try {
-                synchronized (PENDING_SUPPLIERS) {
-                    if (!PENDING_SUPPLIERS.isEmpty()) {
-                        submitBatch();
-                    }
+                if (PENDING_SIZE.get() > 0) {
+                    submitBatch();
                 }
             } finally {
                 PENDING_FLUSH_SCHEDULED.set(false);
@@ -598,6 +888,7 @@ public final class AsyncMultiChunkPlanner {
             MultiChunkSnapshot::decode,
             Duration.ofMinutes(20),
             4096,
+            true,
             true
         );
     }
@@ -660,6 +951,13 @@ public final class AsyncMultiChunkPlanner {
 
     private record SeedDescriptor(String dimension, long seed, String profile, String worldStyle, String multiSettings) {
         private static final SeedDescriptor UNKNOWN = new SeedDescriptor("unknown", 0L, "unknown", "unknown", "unknown");
+    }
+
+    private record PendingEntry(java.util.function.Supplier<MultiChunk> supplier,
+                                CompletableFuture<MultiChunk> future,
+                                ChunkCoord key,
+                                IDimensionInfo provider,
+                                AdaptiveConcurrencyLimiter.Token token) {
     }
 
     private static String sanitize(String value) {

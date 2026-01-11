@@ -4,11 +4,14 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.fml.loading.FMLEnvironment;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.quantified.api.QuantifiedAPI;
 import org.admany.quantified.api.model.QuantifiedTask;
 import org.admany.quantified.core.common.async.task.ModPriorityManager;
+import net.minecraftforge.server.ServerLifecycleHooks;
 
 import java.util.List;
 import java.util.Queue;
@@ -227,13 +230,17 @@ public class AsyncManager {
         if (action == null) {
             return;
         }
+        MinecraftServer server = serverRef;
+        if (server == null && shouldRunInlineClient()) {
+            action.run();
+            return;
+        }
         mainThreadQueue.add(action);
 
         // Fast path: ask the server's own main-thread executor to run a budgeted drain ASAP.
         // This reduces reliance on tick END draining (which can become a throughput ceiling
         // when async producers outpace the per-tick budget), while still keeping all work on
         // the main thread and respecting the same lag guard and budgets.
-        MinecraftServer server = serverRef;
         if (server != null) {
             scheduleBudgetedDrain(server);
         }
@@ -300,4 +307,15 @@ public class AsyncManager {
     }
 
     // Intentionally no reflection: Quantified is a hard dependency for LC2H.
+
+    private static boolean shouldRunInlineClient() {
+        if (FMLEnvironment.dist != Dist.CLIENT) {
+            return false;
+        }
+        try {
+            return ServerLifecycleHooks.getCurrentServer() == null;
+        } catch (Throwable ignored) {
+            return true;
+        }
+    }
 }

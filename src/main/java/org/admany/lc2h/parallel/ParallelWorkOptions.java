@@ -13,6 +13,7 @@ public final class ParallelWorkOptions<T> {
     private final long cacheMaxEntries;
     private final boolean cachePersistent;
     private final boolean cacheCompression;
+    private final boolean cacheCopyOnWrite;
 
     private ParallelWorkOptions(String cacheName,
                                 Function<Integer, String> cacheKeyFunction,
@@ -21,7 +22,8 @@ public final class ParallelWorkOptions<T> {
                                 Duration cacheTtl,
                                 long cacheMaxEntries,
                                 boolean cachePersistent,
-                                boolean cacheCompression) {
+                                boolean cacheCompression,
+                                boolean cacheCopyOnWrite) {
         this.cacheName = cacheName;
         this.cacheKeyFunction = cacheKeyFunction;
         this.cacheSerializer = cacheSerializer;
@@ -30,10 +32,11 @@ public final class ParallelWorkOptions<T> {
         this.cacheMaxEntries = cacheMaxEntries;
         this.cachePersistent = cachePersistent;
         this.cacheCompression = cacheCompression;
+        this.cacheCopyOnWrite = cacheCopyOnWrite;
     }
 
     public static <T> ParallelWorkOptions<T> none() {
-        return new ParallelWorkOptions<>(null, null, null, null, null, 0L, false, false);
+        return new ParallelWorkOptions<>(null, null, null, null, null, 0L, false, false, false);
     }
 
     public static <T> ParallelWorkOptions<T> persistentCache(String cacheName,
@@ -47,7 +50,22 @@ public final class ParallelWorkOptions<T> {
         Objects.requireNonNull(cacheKeyFunction, "cacheKeyFunction");
         Objects.requireNonNull(serializer, "serializer");
         Objects.requireNonNull(deserializer, "deserializer");
-        return new ParallelWorkOptions<>(cacheName, cacheKeyFunction, serializer, deserializer, ttl, maxEntries, true, compression);
+        return new ParallelWorkOptions<>(cacheName, cacheKeyFunction, serializer, deserializer, ttl, maxEntries, true, compression, false);
+    }
+
+    public static <T> ParallelWorkOptions<T> persistentCache(String cacheName,
+                                                             Function<Integer, String> cacheKeyFunction,
+                                                             Function<T, byte[]> serializer,
+                                                             Function<byte[], T> deserializer,
+                                                             Duration ttl,
+                                                             long maxEntries,
+                                                             boolean compression,
+                                                             boolean copyOnWrite) {
+        Objects.requireNonNull(cacheName, "cacheName");
+        Objects.requireNonNull(cacheKeyFunction, "cacheKeyFunction");
+        Objects.requireNonNull(serializer, "serializer");
+        Objects.requireNonNull(deserializer, "deserializer");
+        return new ParallelWorkOptions<>(cacheName, cacheKeyFunction, serializer, deserializer, ttl, maxEntries, true, compression, copyOnWrite);
     }
 
     public boolean cacheEnabled() {
@@ -84,5 +102,9 @@ public final class ParallelWorkOptions<T> {
 
     public boolean cacheCompression() {
         return cacheCompression;
+    }
+
+    public boolean cacheCopyOnWrite() {
+        return cacheCopyOnWrite;
     }
 }

@@ -1,10 +1,11 @@
 package org.admany.lc2h.util.chunk;
 
-import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
-import it.unimi.dsi.fastutil.longs.LongSet;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -19,19 +20,27 @@ import net.minecraft.server.level.ChunkMap;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.level.ChunkEvent;
 import net.minecraftforge.event.level.ChunkDataEvent;
+import net.minecraftforge.event.level.BlockEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.async.AsyncManager;
+import org.admany.lc2h.async.Priority;
 import org.admany.lc2h.logging.LCLogger;
 import org.admany.lc2h.logging.config.ConfigManager;
 import org.admany.lc2h.util.batch.CpuBatchScheduler;
+import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.util.server.ServerTickLoad;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Mod.EventBusSubscriber(modid = LC2H.MODID)
 public class ChunkPostProcessor {
@@ -66,15 +75,17 @@ public class ChunkPostProcessor {
             Blocks.KELP_PLANT
     );
 
-    private static final ThreadLocal<LongSet> PENDING_REMOVALS = ThreadLocal.withInitial(LongOpenHashSet::new);
-
     private static final int MAX_CHUNKS_PER_TICK = Math.max(1, Integer.getInteger("lc.floating.max_chunks_per_tick", 1));
+    private static final int MAX_ASYNC_CHUNKS_PER_TICK = Math.max(1, Integer.getInteger("lc.floating.async_chunks_per_tick", MAX_CHUNKS_PER_TICK));
+    private static final boolean ENABLE_THREADED_SCAN = Boolean.parseBoolean(System.getProperty("lc.floating.threaded_scan", "true"));
     private static final int SAMPLES_PER_CHUNK = Math.max(16, Integer.getInteger("lc.floating.samples_per_chunk", 96));
     private static final int MAX_QUEUE = Math.max(256, Integer.getInteger("lc.floating.max_queue", 4096));
     private static final int QUEUE_ALERT_THRESHOLD = Math.max(
         128,
         Integer.getInteger("lc.floating.queue_alert_threshold", Math.min(MAX_QUEUE, 1024))
     );
+    private static final int MAX_PENDING_FLOATING_CHECKS = Math.max(256, Integer.getInteger("lc.floating.max_pending_checks", 8192));
+    private static final int MAX_FLOATING_CHECKS_PER_TICK = Math.max(8, Integer.getInteger("lc.floating.max_checks_per_tick", 128));
     private static final double TICK_TIME_BUDGET_MS = Math.max(5D, Double.parseDouble(System.getProperty("lc.floating.tick_budget_ms", "35")));
     // If set (>0), forces a fixed work budget. Otherwise, the post processor auto-tunes.
     private static final double OVERRIDE_MAX_WORK_TIME_PER_TICK_MS = Double.parseDouble(System.getProperty("lc.floating.max_work_ms_per_tick", "-1"));
@@ -84,15 +95,24 @@ public class ChunkPostProcessor {
     private static final double TARGET_TICK_MS = 20.0D;
     private static final boolean ENABLE_BATCH_DRAIN = Boolean.getBoolean("lc.floating.enable_batch_drain");
     private static final boolean AUTO_RESCAN_STARTUP = Boolean.getBoolean("lc.floating.auto_rescan_startup");
+    private static final boolean ENABLE_FLOATING_SCAN = Boolean.getBoolean("lc.floating.enable_scan");
+    private static final int SAFE_SET_FLAGS = 2;
+    private static final ThreadLocal<BlockPos.MutableBlockPos> LOCAL_SCAN_POS =
+        ThreadLocal.withInitial(BlockPos.MutableBlockPos::new);
+    private static final ThreadLocal<BlockPos.MutableBlockPos> LOCAL_BELOW_POS =
+        ThreadLocal.withInitial(BlockPos.MutableBlockPos::new);
 
     private static final String DATA_ROOT = "lc2h";
     private static final String DATA_FLAG = "doubleblock_repaired";
 
-    private static final Map<Long, ScanCursor> CHUNK_SCAN_PROGRESS = new ConcurrentHashMap<>();
-    private static final LongSet COMPLETED_CHUNKS = new LongOpenHashSet();
+    private static final Map<ChunkScanKey, ScanCursor> CHUNK_SCAN_PROGRESS = new ConcurrentHashMap<>();
+    private static final Set<ChunkScanKey> INFLIGHT_CHUNK_SCANS = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private static final Set<ChunkScanKey> COMPLETED_CHUNKS = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private static final AtomicBoolean LOGGED_QUEUE_ALERT = new AtomicBoolean(false);
     private static final AtomicBoolean LOGGED_QUEUE_HARD_LIMIT = new AtomicBoolean(false);
+    private static final AtomicBoolean LOGGED_FLOATING_QUEUE_HARD_LIMIT = new AtomicBoolean(false);
     private static final AtomicBoolean BATCH_IN_FLIGHT = new AtomicBoolean(false);
+    private static final AtomicBoolean FLOATING_DRAIN_SCHEDULED = new AtomicBoolean(false);
     private static volatile boolean RESCAN_TRIGGERED = false;
     private static volatile boolean RESCAN_IN_PROGRESS = false;
     private static volatile long RESCAN_START_TICK = 0;
@@ -100,6 +120,15 @@ public class ChunkPostProcessor {
     private static int FIXED_FLOATING = 0;
 
     private static volatile double ADAPTIVE_WORK_BUDGET_MS = 1.5D;
+
+    private static final ConcurrentHashMap<ResourceKey<Level>, PendingCheckQueue> PENDING_FLOATING = new ConcurrentHashMap<>();
+
+    private static final class PendingCheckQueue {
+        private final ConcurrentLinkedQueue<Long> queue = new ConcurrentLinkedQueue<>();
+        private final AtomicInteger size = new AtomicInteger();
+        private volatile ResourceKey<Level> dimensionKey;
+        private volatile ServerLevel level;
+    }
 
     private record ScanCursor(int x, int y, int z) {
         ScanCursor advance(int maxY) {
@@ -121,8 +150,14 @@ public class ChunkPostProcessor {
         }
     }
 
+    private record ChunkScanResult(ChunkScanKey key, ScanCursor next, List<Long> floating, List<Long> doubleBlocks) {
+    }
+
     public static boolean isTracked(Block block) {
         return TRACKED_BLOCKS.contains(block);
+    }
+
+    private record ChunkScanKey(ResourceLocation dimension, int chunkX, int chunkZ) {
     }
 
     public static void markForRemovalIfFloating(net.minecraft.server.level.WorldGenRegion region, BlockPos pos) {
@@ -133,33 +168,78 @@ public class ChunkPostProcessor {
 
         BlockPos below = pos.below();
         if (region.isEmptyBlock(below) || !region.getBlockState(below).isCollisionShapeFullBlock(region, below)) {
-            PENDING_REMOVALS.get().add(pos.asLong());
+            try {
+                ServerLevel level = region.getLevel();
+                if (level != null) {
+                    enqueueFloatingCheck(level, pos);
+                }
+            } catch (Throwable ignored) {
+            }
         }
     }
 
-
-    public static void processPendingRemovals(ServerLevel level) {
+    @SubscribeEvent
+    public static void onBlockPlaced(BlockEvent.EntityPlaceEvent event) {
         if (!ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL) return;
+        if (event instanceof BlockEvent.EntityMultiPlaceEvent) {
+            return;
+        }
+        if (!(event.getLevel() instanceof ServerLevel level)) {
+            return;
+        }
+        BlockState placed = event.getBlockSnapshot().getCurrentBlock();
+        if (placed != null && isTracked(placed.getBlock())) {
+            enqueueFloatingCheck(level, event.getPos());
+        }
+    }
 
-        LongSet removals = PENDING_REMOVALS.get();
-        if (removals.isEmpty()) return;
-
-        BlockState air = Blocks.AIR.defaultBlockState();
-        for (long posLong : removals) {
-            BlockPos pos = BlockPos.of(posLong);
-            if (level.isLoaded(pos) && isTracked(level.getBlockState(pos).getBlock())) {
-                // Defensive: if a modded plant ever ends up with a BE, ensure it is removed.
-                level.removeBlockEntity(pos);
-                level.setBlock(pos, air, 3);
-                LCLogger.info("Removed floating vegetation at {}", pos);
+    @SubscribeEvent
+    public static void onBlockMultiPlaced(BlockEvent.EntityMultiPlaceEvent event) {
+        if (!ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL) return;
+        if (!(event.getLevel() instanceof ServerLevel level)) {
+            return;
+        }
+        for (net.minecraftforge.common.util.BlockSnapshot snapshot : event.getReplacedBlockSnapshots()) {
+            BlockState placed = snapshot.getCurrentBlock();
+            if (placed != null && isTracked(placed.getBlock())) {
+                enqueueFloatingCheck(level, snapshot.getPos());
             }
         }
-        removals.clear();
+    }
+
+    @SubscribeEvent
+    public static void onBlockBroken(BlockEvent.BreakEvent event) {
+        if (!ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL) return;
+        if (!(event.getLevel() instanceof ServerLevel level)) {
+            return;
+        }
+        BlockPos above = event.getPos().above();
+        BlockState state = level.getBlockState(above);
+        if (isTracked(state.getBlock())) {
+            enqueueFloatingCheck(level, above);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onNeighborNotify(BlockEvent.NeighborNotifyEvent event) {
+        if (!ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL) return;
+        if (!(event.getLevel() instanceof ServerLevel level)) {
+            return;
+        }
+        if (!event.getNotifiedSides().contains(net.minecraft.core.Direction.DOWN)) {
+            return;
+        }
+        BlockState state = event.getState();
+        if (isTracked(state.getBlock())) {
+            enqueueFloatingCheck(level, event.getPos());
+        }
     }
 
     @SubscribeEvent
     public static void onChunkLoad(ChunkEvent.Load event) {
-        if (!ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL && !ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER) return;
+        boolean floatingScanEnabled = ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL && ENABLE_FLOATING_SCAN;
+        boolean doubleBlockEnabled = ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER;
+        if (!floatingScanEnabled && !doubleBlockEnabled) return;
         if (!(event.getChunk() instanceof LevelChunk chunk)) return;
 
         // IMPORTANT: only track on the server. Client chunk loads can flood the queue on integrated servers.
@@ -167,10 +247,14 @@ public class ChunkPostProcessor {
             return;
         }
 
-        long key = chunkKey(chunk.getPos().x, chunk.getPos().z);
+        ChunkScanKey key = chunkKey(level.dimension().location(), chunk.getPos().x, chunk.getPos().z);
 
         // If we already marked this chunk complete, don't enqueue it again.
         if (COMPLETED_CHUNKS.contains(key)) {
+            return;
+        }
+        if (!chunkHasInterestingBlocks(chunk, floatingScanEnabled, doubleBlockEnabled)) {
+            COMPLETED_CHUNKS.add(key);
             return;
         }
 
@@ -202,7 +286,10 @@ public class ChunkPostProcessor {
             } catch (Throwable ignored) {
             }
 
-            long gate = key;
+            long gate = ((long) key.chunkX() << 32) ^ (key.chunkZ() & 0xffffffffL);
+            if (key.dimension() != null) {
+                gate ^= key.dimension().hashCode();
+            }
             if ((gate & 7L) != 0L) {
                 return;
             }
@@ -229,7 +316,7 @@ public class ChunkPostProcessor {
         if (!(chunk.getLevel() instanceof ServerLevel)) {
             return;
         }
-        long key = chunkKey(chunk.getPos().x, chunk.getPos().z);
+        ChunkScanKey key = chunkKey(chunk.getLevel().dimension().location(), chunk.getPos().x, chunk.getPos().z);
         CHUNK_SCAN_PROGRESS.remove(key);
         COMPLETED_CHUNKS.remove(key);
     }
@@ -242,7 +329,7 @@ public class ChunkPostProcessor {
         }
         CompoundTag root = event.getData().getCompound(DATA_ROOT);
         if (root.getBoolean(DATA_FLAG)) {
-            COMPLETED_CHUNKS.add(chunkKey(chunk.getPos().x, chunk.getPos().z));
+            COMPLETED_CHUNKS.add(chunkKey(chunk.getLevel().dimension().location(), chunk.getPos().x, chunk.getPos().z));
         }
     }
 
@@ -252,7 +339,7 @@ public class ChunkPostProcessor {
         if (!(chunk.getLevel() instanceof ServerLevel)) {
             return;
         }
-        long key = chunkKey(chunk.getPos().x, chunk.getPos().z);
+        ChunkScanKey key = chunkKey(chunk.getLevel().dimension().location(), chunk.getPos().x, chunk.getPos().z);
         if (!COMPLETED_CHUNKS.contains(key)) {
             return;
         }
@@ -268,7 +355,8 @@ public class ChunkPostProcessor {
 
     @SubscribeEvent
     public static void onLevelTick(TickEvent.LevelTickEvent event) {
-        if (!ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL && !ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER) return;
+        boolean floatingScanEnabled = ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL && ENABLE_FLOATING_SCAN;
+        if (!floatingScanEnabled && !ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER) return;
         if (!(event.level instanceof ServerLevel level) || event.phase != TickEvent.Phase.END) return;
 
         // Hard governor: never contribute to lag. If the tick is already "spent", skip all post-processing.
@@ -287,9 +375,13 @@ public class ChunkPostProcessor {
             LCLogger.info("LC2H ChunkPostProcessor rescan triggered (auto after 5s)");
         }
 
+        double avgTick = level.getServer().getAverageTickTime();
+
         // Optional legacy mode: drain backlog in a single scheduled task.
         // Disabled by default because it can starve server ticks when backlog is large.
-        if (ENABLE_BATCH_DRAIN) {
+        boolean useBatchDrain = !ENABLE_THREADED_SCAN && (ENABLE_BATCH_DRAIN
+            || (CHUNK_SCAN_PROGRESS.size() >= QUEUE_ALERT_THRESHOLD && avgTick < (TICK_TIME_BUDGET_MS * 0.65D)));
+        if (useBatchDrain) {
             if (!CHUNK_SCAN_PROGRESS.isEmpty() && BATCH_IN_FLIGHT.compareAndSet(false, true)) {
                 submitBatch(level);
             }
@@ -298,13 +390,8 @@ public class ChunkPostProcessor {
             }
         }
 
-        double avgTick = level.getServer().getAverageTickTime();
         if (avgTick > TICK_TIME_BUDGET_MS) {
             return;
-        }
-
-        if (ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL) {
-            processPendingRemovals(level);
         }
 
         // Auto-tuned time-slicing: use spare tick time without causing spikes.
@@ -319,14 +406,18 @@ public class ChunkPostProcessor {
         int maxChunksThisTick = computeMaxChunksThisTick(workBudgetMs);
 
         int processed = 0;
+        ResourceLocation dimension = level.dimension().location();
         for (var it = CHUNK_SCAN_PROGRESS.entrySet().iterator(); it.hasNext() && processed < maxChunksThisTick; ) {
             if (System.nanoTime() > deadlineNs) {
                 break;
             }
-            Map.Entry<Long, ScanCursor> entry = it.next();
-            long key = entry.getKey();
-            int chunkX = (int) (key >> 32);
-            int chunkZ = (int) key;
+            Map.Entry<ChunkScanKey, ScanCursor> entry = it.next();
+            ChunkScanKey key = entry.getKey();
+            if (!dimension.equals(key.dimension())) {
+                continue;
+            }
+            int chunkX = key.chunkX();
+            int chunkZ = key.chunkZ();
 
             if (!level.hasChunk(chunkX, chunkZ)) {
                 continue;
@@ -334,6 +425,16 @@ public class ChunkPostProcessor {
 
             LevelChunk chunk = level.getChunk(chunkX, chunkZ);
             ScanCursor cursor = entry.getValue();
+            if (ENABLE_THREADED_SCAN) {
+                if (INFLIGHT_CHUNK_SCANS.add(key)) {
+                    submitAsyncScan(level, key, chunk, cursor);
+                    processed++;
+                }
+                if (processed >= MAX_ASYNC_CHUNKS_PER_TICK) {
+                    break;
+                }
+                continue;
+            }
             ScanCursor next = processChunk(level, chunk, cursor, deadlineNs);
             if (next == null) {
                 markChunkComplete(chunk);
@@ -344,7 +445,9 @@ public class ChunkPostProcessor {
             processed++;
         }
 
-        if (RESCAN_IN_PROGRESS && CHUNK_SCAN_PROGRESS.isEmpty()) {
+        if (ENABLE_THREADED_SCAN) {
+            maybeFinishRescan(level);
+        } else if (RESCAN_IN_PROGRESS && CHUNK_SCAN_PROGRESS.isEmpty()) {
             long durationTicks = Math.max(1, level.getServer().getTickCount() - RESCAN_START_TICK);
             LCLogger.info("LC2H ChunkPostProcessor rescan completed: fixed double-blocks={}, removed floating={}, duration={} ticks",
                     FIXED_DOUBLE_BLOCKS, FIXED_FLOATING, durationTicks);
@@ -355,9 +458,12 @@ public class ChunkPostProcessor {
     }
 
     private static ScanCursor processChunk(ServerLevel level, LevelChunk chunk, ScanCursor cursor, long deadlineNs) {
+        int minY = level.getMinBuildHeight();
         int maxY = level.getMaxBuildHeight() - 1;
         int baseX = chunk.getPos().getMinBlockX();
         int baseZ = chunk.getPos().getMinBlockZ();
+        boolean floatingScanEnabled = ENABLE_FLOATING_SCAN && ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL;
+        boolean doubleBlockEnabled = ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER;
 
         ScanCursor current = cursor;
         int samples = 0;
@@ -366,32 +472,42 @@ public class ChunkPostProcessor {
                 // Yield to the next tick; keep the cursor so we can resume.
                 return current;
             }
+            if (current.y < minY) {
+                current = new ScanCursor(current.x, minY, current.z);
+            }
             if (current.y > maxY) {
                 return null;
             }
 
             int sectionIndex = chunk.getSectionIndex(current.y);
-            LevelChunkSection section = chunk.getSection(sectionIndex);
-            if (!sectionHasInterestingBlocks(section)) {
+            LevelChunkSection[] sections = chunk.getSections();
+            if (sectionIndex < 0 || sectionIndex >= sections.length) {
+                current = new ScanCursor(0, Math.max(minY, current.y + 1), 0);
+                continue;
+            }
+            LevelChunkSection section = sections[sectionIndex];
+            if (!sectionHasInterestingBlocks(section, floatingScanEnabled, doubleBlockEnabled)) {
                 int nextY = chunk.getMinBuildHeight() + sectionIndex * 16 + 16;
                 current = new ScanCursor(0, Math.max(nextY, current.y + 1), 0);
                 continue;
             }
 
-            BlockPos pos = new BlockPos(baseX + current.x, current.y, baseZ + current.z);
+            BlockPos.MutableBlockPos pos = LOCAL_SCAN_POS.get();
+            pos.set(baseX + current.x, current.y, baseZ + current.z);
             BlockState state = chunk.getBlockState(pos);
 
-            if (ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL && isTracked(state.getBlock())) {
-                BlockPos below = pos.below();
-                if (level.isEmptyBlock(below) || !level.getBlockState(below).isCollisionShapeFullBlock(level, below)) {
-                    level.removeBlockEntity(pos);
-                    level.setBlock(pos, Blocks.AIR.defaultBlockState(), 3);
-                    LCLogger.debug("Removed floating vegetation on chunk scan at {}", pos);
-                    FIXED_FLOATING++;
-                }
+            if (floatingScanEnabled && isTracked(state.getBlock())) {
+                BlockPos.MutableBlockPos below = LOCAL_BELOW_POS.get();
+                below.set(pos.getX(), pos.getY() - 1, pos.getZ());
+                    if (level.isEmptyBlock(below) || !level.getBlockState(below).isCollisionShapeFullBlock(level, below)) {
+                        level.removeBlockEntity(pos);
+                        level.setBlock(pos, Blocks.AIR.defaultBlockState(), SAFE_SET_FLAGS);
+                        LCLogger.debug("Removed floating vegetation on chunk scan at {}", pos);
+                        FIXED_FLOATING++;
+                    }
             }
 
-            if (ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER && hasDoubleHalf(state)) {
+            if (doubleBlockEnabled && hasDoubleHalf(state)) {
                 repairDoubleHalf(level, pos, state);
             }
 
@@ -400,6 +516,171 @@ public class ChunkPostProcessor {
         }
 
         return current;
+    }
+
+    private static void submitAsyncScan(ServerLevel level, ChunkScanKey key, LevelChunk chunk, ScanCursor cursor) {
+        CpuBatchScheduler.submit("chunk_post_scan", () -> {
+            try {
+                ChunkScanResult result = scanChunkAsync(key, chunk, cursor);
+                ServerRescheduler.runOnServer(() -> applyScanResult(level, result));
+            } catch (Throwable t) {
+                INFLIGHT_CHUNK_SCANS.remove(key);
+            }
+        });
+    }
+
+    private static ChunkScanResult scanChunkAsync(ChunkScanKey key, LevelChunk chunk, ScanCursor cursor) {
+        int minY = chunk.getLevel().getMinBuildHeight();
+        int maxY = chunk.getLevel().getMaxBuildHeight() - 1;
+        int baseX = chunk.getPos().getMinBlockX();
+        int baseZ = chunk.getPos().getMinBlockZ();
+        boolean floatingScanEnabled = ENABLE_FLOATING_SCAN && ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL;
+        boolean doubleBlockEnabled = ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER;
+
+        ScanCursor current = cursor;
+        int samples = 0;
+        List<Long> floating = null;
+        List<Long> doubleBlocks = null;
+
+        while (samples < SAMPLES_PER_CHUNK) {
+            if (current.y < minY) {
+                current = new ScanCursor(current.x, minY, current.z);
+            }
+            if (current.y > maxY) {
+                return new ChunkScanResult(key, null, floating == null ? List.of() : floating, doubleBlocks == null ? List.of() : doubleBlocks);
+            }
+
+            int sectionIndex = chunk.getSectionIndex(current.y);
+            LevelChunkSection[] sections = chunk.getSections();
+            if (sectionIndex < 0 || sectionIndex >= sections.length) {
+                current = new ScanCursor(0, Math.max(minY, current.y + 1), 0);
+                continue;
+            }
+            LevelChunkSection section = sections[sectionIndex];
+            if (!sectionHasInterestingBlocks(section, floatingScanEnabled, doubleBlockEnabled)) {
+                int nextY = chunk.getMinBuildHeight() + sectionIndex * 16 + 16;
+                current = new ScanCursor(0, Math.max(nextY, current.y + 1), 0);
+                continue;
+            }
+
+            BlockPos.MutableBlockPos pos = LOCAL_SCAN_POS.get();
+            pos.set(baseX + current.x, current.y, baseZ + current.z);
+            BlockState state;
+            try {
+                state = chunk.getBlockState(pos);
+            } catch (Throwable ignored) {
+                current = current.advance(maxY);
+                samples++;
+                continue;
+            }
+
+            if (floatingScanEnabled && isTracked(state.getBlock())) {
+                BlockPos.MutableBlockPos below = LOCAL_BELOW_POS.get();
+                below.set(pos.getX(), pos.getY() - 1, pos.getZ());
+                try {
+                    BlockState belowState = chunk.getBlockState(below);
+                    if (belowState.isAir() || !belowState.isCollisionShapeFullBlock(chunk.getLevel(), below)) {
+                        if (floating == null) {
+                            floating = new java.util.ArrayList<>();
+                        }
+                        floating.add(pos.asLong());
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+
+            if (doubleBlockEnabled && hasDoubleHalf(state)) {
+                if (doubleBlocks == null) {
+                    doubleBlocks = new java.util.ArrayList<>();
+                }
+                doubleBlocks.add(pos.asLong());
+            }
+
+            samples++;
+            current = current.advance(maxY);
+        }
+
+        return new ChunkScanResult(key, current, floating == null ? List.of() : floating, doubleBlocks == null ? List.of() : doubleBlocks);
+    }
+
+    private static void applyScanResult(ServerLevel level, ChunkScanResult result) {
+        if (result == null) {
+            return;
+        }
+        ChunkScanKey key = result.key();
+        INFLIGHT_CHUNK_SCANS.remove(key);
+        if (level == null) {
+            return;
+        }
+        if (!level.hasChunk(key.chunkX(), key.chunkZ())) {
+            return;
+        }
+
+        LevelChunk chunk = level.getChunk(key.chunkX(), key.chunkZ());
+        if (chunk == null) {
+            return;
+        }
+
+        for (Long posLong : result.floating()) {
+            if (posLong == null) {
+                continue;
+            }
+            BlockPos pos = BlockPos.of(posLong);
+            if (!level.isLoaded(pos)) {
+                continue;
+            }
+            BlockState state = level.getBlockState(pos);
+            if (!isTracked(state.getBlock())) {
+                continue;
+            }
+            BlockPos below = pos.below();
+            if (level.isEmptyBlock(below) || !level.getBlockState(below).isCollisionShapeFullBlock(level, below)) {
+                level.removeBlockEntity(pos);
+                level.setBlock(pos, Blocks.AIR.defaultBlockState(), SAFE_SET_FLAGS);
+                FIXED_FLOATING++;
+            }
+        }
+
+        for (Long posLong : result.doubleBlocks()) {
+            if (posLong == null) {
+                continue;
+            }
+            BlockPos pos = BlockPos.of(posLong);
+            if (!level.isLoaded(pos)) {
+                continue;
+            }
+            BlockState state = level.getBlockState(pos);
+            if (hasDoubleHalf(state)) {
+                repairDoubleHalf(level, pos, state);
+            }
+        }
+
+        if (result.next() == null) {
+            markChunkComplete(chunk);
+            CHUNK_SCAN_PROGRESS.remove(key);
+        } else {
+            CHUNK_SCAN_PROGRESS.put(key, result.next());
+        }
+
+        maybeFinishRescan(level);
+    }
+
+    private static void maybeFinishRescan(ServerLevel level) {
+        if (!RESCAN_IN_PROGRESS) {
+            return;
+        }
+        if (!CHUNK_SCAN_PROGRESS.isEmpty()) {
+            return;
+        }
+        if (!INFLIGHT_CHUNK_SCANS.isEmpty()) {
+            return;
+        }
+        long durationTicks = Math.max(1, level.getServer().getTickCount() - RESCAN_START_TICK);
+        LCLogger.info("LC2H ChunkPostProcessor rescan completed: fixed double-blocks={}, removed floating={}, duration={} ticks",
+                FIXED_DOUBLE_BLOCKS, FIXED_FLOATING, durationTicks);
+        FIXED_DOUBLE_BLOCKS = 0;
+        FIXED_FLOATING = 0;
+        RESCAN_IN_PROGRESS = false;
     }
 
     private static int computeMaxChunksThisTick(double workBudgetMs) {
@@ -453,32 +734,44 @@ public class ChunkPostProcessor {
 
     private static void drainAll(ServerLevel level) {
         int processed = 0;
+        ResourceLocation dimension = level.dimension().location();
         while (!CHUNK_SCAN_PROGRESS.isEmpty()) {
             // Even in batch mode, never monopolize the server thread.
             if (level.getServer().getAverageTickTime() > TICK_TIME_BUDGET_MS * 1.5) {
                 break;
             }
+            boolean processedEntry = false;
             var it = CHUNK_SCAN_PROGRESS.entrySet().iterator();
-            if (!it.hasNext()) break;
-            Map.Entry<Long, ScanCursor> entry = it.next();
-            long key = entry.getKey();
-            int chunkX = (int) (key >> 32);
-            int chunkZ = (int) key;
-            if (!level.hasChunk(chunkX, chunkZ)) {
-                it.remove();
-                continue;
+            while (it.hasNext()) {
+                Map.Entry<ChunkScanKey, ScanCursor> entry = it.next();
+                ChunkScanKey key = entry.getKey();
+                if (!dimension.equals(key.dimension())) {
+                    continue;
+                }
+                int chunkX = key.chunkX();
+                int chunkZ = key.chunkZ();
+                if (!level.hasChunk(chunkX, chunkZ)) {
+                    it.remove();
+                    processedEntry = true;
+                    break;
+                }
+                LevelChunk chunk = level.getChunk(chunkX, chunkZ);
+                // Use a generous deadline in batch mode, but still allow yielding.
+                long deadlineNs = System.nanoTime() + (long) (Math.max(2.0D, ADAPTIVE_WORK_BUDGET_MS * 4.0D) * 1_000_000.0);
+                ScanCursor next = processChunk(level, chunk, entry.getValue(), deadlineNs);
+                if (next == null) {
+                    markChunkComplete(chunk);
+                    it.remove();
+                } else {
+                    entry.setValue(next);
+                }
+                processed++;
+                processedEntry = true;
+                break;
             }
-            LevelChunk chunk = level.getChunk(chunkX, chunkZ);
-            // Use a generous deadline in batch mode, but still allow yielding.
-            long deadlineNs = System.nanoTime() + (long) (Math.max(2.0D, ADAPTIVE_WORK_BUDGET_MS * 4.0D) * 1_000_000.0);
-            ScanCursor next = processChunk(level, chunk, entry.getValue(), deadlineNs);
-            if (next == null) {
-                markChunkComplete(chunk);
-                it.remove();
-            } else {
-                entry.setValue(next);
+            if (!processedEntry) {
+                break;
             }
-            processed++;
             if ((processed & 63) == 0 && level.getServer().getAverageTickTime() > TICK_TIME_BUDGET_MS * 2) {
                 break;
             }
@@ -504,14 +797,44 @@ public class ChunkPostProcessor {
                 LCLogger.warn("ChunkPostProcessor: could not resolve ChunkMap via reflection");
                 return;
             }
+            boolean floatingScanEnabled = ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL && ENABLE_FLOATING_SCAN;
+            boolean doubleBlockEnabled = ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER;
+            int backlog = CHUNK_SCAN_PROGRESS.size();
+            if (backlog >= MAX_QUEUE) {
+                if (LOGGED_QUEUE_HARD_LIMIT.compareAndSet(false, true)) {
+                    LCLogger.warn(
+                        "ChunkPostProcessor backlog hard limit reached ({} queued chunks >= max_queue {}). Skipping rescan enqueue.",
+                        backlog,
+                        MAX_QUEUE
+                    );
+                }
+                return;
+            }
             Iterable<net.minecraft.server.level.ChunkHolder> holders = resolveChunkHolders(map);
             if (holders != null) {
                 for (net.minecraft.server.level.ChunkHolder holder : holders) {
                     LevelChunk chunk = holder.getTickingChunk();
                     if (chunk != null) {
-                        long key = chunkKey(chunk.getPos().x, chunk.getPos().z);
+                        if (!chunkHasInterestingBlocks(chunk, floatingScanEnabled, doubleBlockEnabled)) {
+                            ChunkScanKey key = chunkKey(level.dimension().location(), chunk.getPos().x, chunk.getPos().z);
+                            COMPLETED_CHUNKS.add(key);
+                            continue;
+                        }
+                        ChunkScanKey key = chunkKey(level.dimension().location(), chunk.getPos().x, chunk.getPos().z);
                         int minY = chunk.getLevel().getMinBuildHeight();
-                        CHUNK_SCAN_PROGRESS.computeIfAbsent(key, k -> new ScanCursor(0, minY, 0));
+                        if (CHUNK_SCAN_PROGRESS.putIfAbsent(key, new ScanCursor(0, minY, 0)) == null) {
+                            backlog++;
+                            if (backlog >= MAX_QUEUE) {
+                                if (LOGGED_QUEUE_HARD_LIMIT.compareAndSet(false, true)) {
+                                    LCLogger.warn(
+                                        "ChunkPostProcessor backlog hard limit reached ({} queued chunks >= max_queue {}). Halting rescan enqueue.",
+                                        backlog,
+                                        MAX_QUEUE
+                                    );
+                                }
+                                break;
+                            }
+                        }
                     }
                 }
             } else {
@@ -597,16 +920,43 @@ public class ChunkPostProcessor {
         return null;
     }
 
-    private static boolean sectionHasInterestingBlocks(LevelChunkSection section) {
+    private static boolean sectionHasInterestingBlocks(LevelChunkSection section,
+                                                       boolean floatingScanEnabled,
+                                                       boolean doubleBlockEnabled) {
         if (section.hasOnlyAir()) {
             return false;
         }
+        if (!floatingScanEnabled && !doubleBlockEnabled) {
+            return false;
+        }
         PalettedContainer<BlockState> states = section.getStates();
-        return states.maybeHas(ChunkPostProcessor::isInterestingState);
+        return states.maybeHas(state -> {
+            if (state == null) {
+                return false;
+            }
+            if (doubleBlockEnabled && hasDoubleHalf(state)) {
+                return true;
+            }
+            return floatingScanEnabled && isTracked(state.getBlock());
+        });
     }
 
-    private static boolean isInterestingState(BlockState state) {
-        return isTracked(state.getBlock()) || hasDoubleHalf(state);
+    private static boolean chunkHasInterestingBlocks(LevelChunk chunk) {
+        boolean floatingScanEnabled = ENABLE_FLOATING_SCAN && ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL;
+        boolean doubleBlockEnabled = ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER;
+        return chunkHasInterestingBlocks(chunk, floatingScanEnabled, doubleBlockEnabled);
+    }
+
+    private static boolean chunkHasInterestingBlocks(LevelChunk chunk,
+                                                     boolean floatingScanEnabled,
+                                                     boolean doubleBlockEnabled) {
+        LevelChunkSection[] sections = chunk.getSections();
+        for (LevelChunkSection section : sections) {
+            if (section != null && sectionHasInterestingBlocks(section, floatingScanEnabled, doubleBlockEnabled)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean hasDoubleHalf(BlockState state) {
@@ -625,7 +975,7 @@ public class ChunkPostProcessor {
 
             if (missingUpper && canReplace(level, upperPos)) {
                 BlockState newUpper = copyHalf(state, halfProp, DoubleBlockHalf.UPPER);
-                level.setBlock(upperPos, newUpper, 2);
+                level.setBlock(upperPos, newUpper, SAFE_SET_FLAGS);
             }
         } else {
             BlockPos lowerPos = pos.below();
@@ -637,16 +987,16 @@ public class ChunkPostProcessor {
                     BlockPos support = lowerPos.below();
                     BlockState supportState = level.getBlockState(support);
                     if (!supportState.isCollisionShapeFullBlock(level, support)) {
-                        level.setBlock(support, Blocks.DIRT.defaultBlockState(), 2);
+                        level.setBlock(support, Blocks.DIRT.defaultBlockState(), SAFE_SET_FLAGS);
                     }
                     BlockState newLower = copyHalf(state, halfProp, DoubleBlockHalf.LOWER);
-                    level.setBlock(lowerPos, newLower, 2);
-                    level.setBlock(pos, copyHalf(state, halfProp, DoubleBlockHalf.UPPER), 2);
+                    level.setBlock(lowerPos, newLower, SAFE_SET_FLAGS);
+                    level.setBlock(pos, copyHalf(state, halfProp, DoubleBlockHalf.UPPER), SAFE_SET_FLAGS);
                 } else if (canReplace(level, lowerPos) && state.canSurvive(level, lowerPos)) {
                     BlockState newLower = copyHalf(state, halfProp, DoubleBlockHalf.LOWER);
-                    level.setBlock(lowerPos, newLower, 2);
+                    level.setBlock(lowerPos, newLower, SAFE_SET_FLAGS);
                 } else {
-                    level.setBlock(pos, Blocks.AIR.defaultBlockState(), 2);
+                    level.setBlock(pos, Blocks.AIR.defaultBlockState(), SAFE_SET_FLAGS);
                 }
             }
         }
@@ -662,19 +1012,147 @@ public class ChunkPostProcessor {
     }
 
     private static void markChunkComplete(LevelChunk chunk) {
-        long key = chunkKey(chunk.getPos().x, chunk.getPos().z);
+        ChunkScanKey key = chunkKey(chunk.getLevel().dimension().location(), chunk.getPos().x, chunk.getPos().z);
         COMPLETED_CHUNKS.add(key);
     }
 
     public static void forceRescanChunk(ServerLevel level, net.minecraft.world.level.ChunkPos pos) {
-        long key = chunkKey(pos.x, pos.z);
+        ChunkScanKey key = chunkKey(level.dimension().location(), pos.x, pos.z);
         COMPLETED_CHUNKS.remove(key);
+        int backlog = CHUNK_SCAN_PROGRESS.size();
+        if (backlog >= MAX_QUEUE) {
+            if (LOGGED_QUEUE_HARD_LIMIT.compareAndSet(false, true)) {
+                LCLogger.warn(
+                    "ChunkPostProcessor backlog hard limit reached ({} queued chunks >= max_queue {}). Skipping forced rescan enqueue.",
+                    backlog,
+                    MAX_QUEUE
+                );
+            }
+            return;
+        }
         int minY = level.getMinBuildHeight();
         CHUNK_SCAN_PROGRESS.put(key, new ScanCursor(0, minY, 0));
         LCLogger.info("ChunkPostProcessor: forced rescan queued for chunk ({}, {})", pos.x, pos.z);
     }
 
-    private static long chunkKey(int chunkX, int chunkZ) {
-        return (((long) chunkX) << 32) | (chunkZ & 0xffffffffL);
+    private static ChunkScanKey chunkKey(ResourceLocation dimension, int chunkX, int chunkZ) {
+        return new ChunkScanKey(dimension, chunkX, chunkZ);
+    }
+
+    private static void enqueueFloatingCheck(ServerLevel level, BlockPos pos) {
+        if (level == null || pos == null) {
+            return;
+        }
+        ResourceKey<Level> dimension = level.dimension();
+        PendingCheckQueue bucket = PENDING_FLOATING.computeIfAbsent(dimension, k -> new PendingCheckQueue());
+        bucket.dimensionKey = dimension;
+        bucket.level = level;
+        int pending = bucket.size.incrementAndGet();
+        if (pending > MAX_PENDING_FLOATING_CHECKS) {
+            bucket.size.decrementAndGet();
+            if (LOGGED_FLOATING_QUEUE_HARD_LIMIT.compareAndSet(false, true)) {
+                LCLogger.warn(
+                    "ChunkPostProcessor floating check queue full ({} >= {}). Dropping new checks until backlog reduces.",
+                    pending,
+                    MAX_PENDING_FLOATING_CHECKS
+                );
+            }
+            return;
+        }
+        bucket.queue.add(pos.asLong());
+        if (pending < MAX_PENDING_FLOATING_CHECKS / 2) {
+            LOGGED_FLOATING_QUEUE_HARD_LIMIT.set(false);
+        }
+        scheduleFloatingDrain();
+    }
+
+    private static void scheduleFloatingDrain() {
+        if (!FLOATING_DRAIN_SCHEDULED.compareAndSet(false, true)) {
+            return;
+        }
+        scheduleFloatingDrainLater(0L);
+    }
+
+    private static void scheduleFloatingDrainLater(long delayMs) {
+        long delay = Math.max(0L, delayMs);
+        AsyncManager.runLater(
+            "floating-check-drain",
+            () -> ServerRescheduler.runOnServer(ChunkPostProcessor::drainFloatingChecks),
+            delay,
+            Priority.LOW
+        );
+    }
+
+    private static void drainFloatingChecks() {
+        if (!ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL) {
+            FLOATING_DRAIN_SCHEDULED.set(false);
+            return;
+        }
+        var server = ServerRescheduler.getServer();
+        if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+            scheduleFloatingDrainLater(50L);
+            return;
+        }
+        int remainingBudget = MAX_FLOATING_CHECKS_PER_TICK;
+        boolean pending = false;
+        for (PendingCheckQueue bucket : PENDING_FLOATING.values()) {
+            if (remainingBudget <= 0) {
+                pending = pending || bucket.size.get() > 0;
+                continue;
+            }
+            ServerLevel level = bucket.level;
+            if (level == null && server != null && bucket.dimensionKey != null) {
+                level = server.getLevel(bucket.dimensionKey);
+                bucket.level = level;
+            }
+            if (level == null) {
+                pending = pending || bucket.size.get() > 0;
+                continue;
+            }
+            while (remainingBudget > 0) {
+                Long posLong = bucket.queue.poll();
+                if (posLong == null) {
+                    break;
+                }
+                if (bucket.size.decrementAndGet() < 0) {
+                    bucket.size.set(0);
+                }
+                BlockPos pos = BlockPos.of(posLong);
+                if (!level.isLoaded(pos)) {
+                    continue;
+                }
+                BlockState state = level.getBlockState(pos);
+                if (!isTracked(state.getBlock())) {
+                    continue;
+                }
+                BlockPos below = pos.below();
+                if (level.isEmptyBlock(below) || !level.getBlockState(below).isCollisionShapeFullBlock(level, below)) {
+                    level.removeBlockEntity(pos);
+                    level.setBlock(pos, Blocks.AIR.defaultBlockState(), SAFE_SET_FLAGS);
+                    FIXED_FLOATING++;
+                }
+                remainingBudget--;
+            }
+            if (bucket.size.get() > 0) {
+                pending = true;
+            }
+        }
+        if (pending) {
+            scheduleFloatingDrainLater(0L);
+            return;
+        }
+        FLOATING_DRAIN_SCHEDULED.set(false);
+        if (hasPendingFloatingChecks() && FLOATING_DRAIN_SCHEDULED.compareAndSet(false, true)) {
+            scheduleFloatingDrainLater(0L);
+        }
+    }
+
+    private static boolean hasPendingFloatingChecks() {
+        for (PendingCheckQueue bucket : PENDING_FLOATING.values()) {
+            if (bucket.size.get() > 0) {
+                return true;
+            }
+        }
+        return false;
     }
 }

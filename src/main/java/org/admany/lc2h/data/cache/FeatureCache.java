@@ -13,11 +13,12 @@ import java.util.function.Supplier;
 public class FeatureCache {
 
     private static final Map<String, LocalEntry> memoryCache = new ConcurrentHashMap<>();
-    private static final int MAX_MEMORY_CACHE_SIZE = 500;
+    private static final int MAX_MEMORY_CACHE_SIZE = Math.max(500,
+        Integer.getInteger("lc2h.featureCache.localMaxEntries", 2000));
     private static final long LOCAL_TTL_MS = Math.max(1_000L,
         Long.getLong("lc2h.featureCache.localTtlMs", TimeUnit.MINUTES.toMillis(20)));
     private static final long QUANTIFIED_MAX_ENTRIES = Math.max(1L,
-        Long.getLong("lc2h.featureCache.maxEntries", 10_000L));
+        Long.getLong("lc2h.featureCache.maxEntries", 50_000L));
     private static final Duration MEMORY_TTL = Duration.ofMinutes(Math.max(1L,
         Long.getLong("lc2h.featureCache.memoryTtlMinutes", 20L)));
     private static final Duration DISK_TTL = Duration.ofHours(Math.max(1L,

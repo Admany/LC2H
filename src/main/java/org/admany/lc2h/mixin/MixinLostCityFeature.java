@@ -48,7 +48,7 @@ public class MixinLostCityFeature {
 	        }
 	    }
 
-    @Inject(method = "place", at = @At("HEAD"), remap = true, cancellable = true)
+    @Inject(method = "m_142674_(Lnet/minecraft/world/level/levelgen/feature/FeaturePlaceContext;)Z", at = @At("HEAD"), remap = false, cancellable = true)
     private void lc2h$warmupFeature(FeaturePlaceContext<?> context, CallbackInfoReturnable<Boolean> cir) {
         WorldGenLevel level = context.level();
         if (!(level instanceof WorldGenRegion region)) {
@@ -112,7 +112,7 @@ public class MixinLostCityFeature {
     }
 
     @Redirect(
-        method = "place",
+        method = "m_142674_",
         at = @At(
             value = "INVOKE",
             target = "Lmcjty/lostcities/worldgen/LostCityTerrainFeature;generate(Lnet/minecraft/server/level/WorldGenRegion;Lnet/minecraft/world/level/chunk/ChunkAccess;)V"
@@ -131,7 +131,7 @@ public class MixinLostCityFeature {
         LostCitiesGenerationLocks.withChunkStripeLock(dim, cx, cz, () -> feature.generate(region, chunk));
     }
 
-    @Inject(method = "place", at = @At("RETURN"), remap = true)
+    @Inject(method = "m_142674_(Lnet/minecraft/world/level/levelgen/feature/FeaturePlaceContext;)Z", at = @At("RETURN"), remap = false)
     private void lc2h$markPlace(FeaturePlaceContext<?> context, CallbackInfoReturnable<Boolean> cir) {
         WorldGenLevel level = context.level();
         if (!(level instanceof WorldGenRegion region)) {

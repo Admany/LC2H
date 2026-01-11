@@ -4,14 +4,21 @@ import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.lost.MultiChunk;
 
+import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
 import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
+import org.admany.lc2h.util.lostcities.MultiChunkCacheAccess;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(value = MultiChunk.class, remap = false)
 public class MixinMultiChunk {
+
+    @Unique
+    private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_MULTICHUNK_BUDGET =
+        LostCitiesCacheBudgetManager.register("lc_multichunk", 4096, 256, MultiChunkCacheAccess::remove);
 
     @Inject(method = "getOrCreate", at = @At("HEAD"), cancellable = true)
     private static void lc2h$asyncGetOrCreate(IDimensionInfo provider, ChunkCoord coord, CallbackInfoReturnable<MultiChunk> cir) {
@@ -47,5 +54,10 @@ public class MixinMultiChunk {
     @Inject(method = "getOrCreate", at = @At("RETURN"))
     private static void lc2h$afterGetOrCreate(IDimensionInfo provider, ChunkCoord coord, CallbackInfoReturnable<MultiChunk> cir) {
         AsyncMultiChunkPlanner.onSynchronousResult(provider, coord, cir.getReturnValue());
+    }
+
+    @Inject(method = "cleanCache", at = @At("HEAD"))
+    private static void lc2h$clearMultiChunkBudget(org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+        LostCitiesCacheBudgetManager.clear(LC2H_MULTICHUNK_BUDGET);
     }
 }

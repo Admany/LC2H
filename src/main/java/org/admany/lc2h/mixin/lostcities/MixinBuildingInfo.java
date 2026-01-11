@@ -19,12 +19,15 @@ import net.minecraft.world.level.CommonLevelAccessor;
 import net.minecraft.world.level.LevelReader;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.WorldGenLevel;
+import org.admany.lc2h.data.cache.LostCitiesCacheBridge;
+import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
 import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
 import org.objectweb.asm.Opcodes;
 import org.admany.lc2h.diagnostics.ChunkGenTracker;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.gen.Invoker;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
@@ -42,6 +45,18 @@ public abstract class MixinBuildingInfo {
     private static final ConcurrentMap<ChunkCoord, Boolean> LC2H_IS_CITY_RAW_CACHE = new ConcurrentHashMap<>();
 
     private static final ConcurrentMap<ChunkCoord, Object> LC2H_BUILDING_INFO_LOCKS = new ConcurrentHashMap<>();
+    @Unique
+    private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_CITY_INFO_BUDGET =
+        LostCitiesCacheBudgetManager.register("lc_city_info", 256, 1024, key -> LC2H_CITY_INFO_MAP.remove(key) != null);
+    @Unique
+    private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_BUILDING_INFO_BUDGET =
+        LostCitiesCacheBudgetManager.register("lc_building_info", 8192, 1024, key -> LC2H_BUILDING_INFO_MAP.remove(key) != null);
+    @Unique
+    private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_CITY_LEVEL_BUDGET =
+        LostCitiesCacheBudgetManager.register("lc_city_level", 64, 2048, key -> LC2H_CITY_LEVEL_CACHE.remove(key) != null);
+    @Unique
+    private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_CITY_RAW_BUDGET =
+        LostCitiesCacheBudgetManager.register("lc_city_raw", 32, 2048, key -> LC2H_IS_CITY_RAW_CACHE.remove(key) != null);
 
     @Shadow public ChunkCoord coord;
     @Shadow public IDimensionInfo provider;
@@ -338,7 +353,14 @@ public abstract class MixinBuildingInfo {
     public static LostChunkCharacteristics getChunkCharacteristicsGui(ChunkCoord key, IDimensionInfo provider) {
         LostChunkCharacteristics cached = LC2H_CITY_INFO_MAP.get(key);
         if (cached != null) {
+            LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_INFO_BUDGET, key);
             return cached;
+        }
+        LostChunkCharacteristics disk = LostCitiesCacheBridge.getDisk("city_info", key, LostChunkCharacteristics.class);
+        if (disk != null) {
+            LostChunkCharacteristics prev = LC2H_CITY_INFO_MAP.putIfAbsent(key, disk);
+            LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, key, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
+            return prev != null ? prev : disk;
         }
 
         int chunkX = key.chunkX();
@@ -351,7 +373,9 @@ public abstract class MixinBuildingInfo {
         Random rand = getBuildingRandom(chunkX, chunkZ, provider.getSeed());
         characteristics.couldHaveBuilding = characteristics.isCity && rand.nextFloat() < profile.BUILDING_CHANCE;
 
-        LC2H_CITY_INFO_MAP.putIfAbsent(key, characteristics);
+        LostChunkCharacteristics prev = LC2H_CITY_INFO_MAP.putIfAbsent(key, characteristics);
+        LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, key, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
+        LostCitiesCacheBridge.putDisk("city_info", key, characteristics);
         return characteristics;
     }
 
@@ -367,7 +391,14 @@ public abstract class MixinBuildingInfo {
 
         LostChunkCharacteristics cached = LC2H_CITY_INFO_MAP.get(coord);
         if (cached != null) {
+            LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_INFO_BUDGET, coord);
             return cached;
+        }
+        LostChunkCharacteristics disk = LostCitiesCacheBridge.getDisk("city_info", coord, LostChunkCharacteristics.class);
+        if (disk != null) {
+            LostChunkCharacteristics prev = LC2H_CITY_INFO_MAP.putIfAbsent(coord, disk);
+            LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, coord, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
+            return prev != null ? prev : disk;
         }
 
         int chunkX = coord.chunkX();
@@ -447,7 +478,9 @@ public abstract class MixinBuildingInfo {
                         // Multi-building definition is missing; fall back to single-building selection.
                         String fallbackName = City.getCityStyle(coord, provider, profile).getRandomBuilding(rand, coord);
                         characteristics.buildingType = fallbackName != null ? resolveBuildingWithFallback(world, fallbackName) : null;
-                        LC2H_CITY_INFO_MAP.putIfAbsent(coord, characteristics);
+                        LostChunkCharacteristics prev = LC2H_CITY_INFO_MAP.putIfAbsent(coord, characteristics);
+                        LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, coord, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
+                        LostCitiesCacheBridge.putDisk("city_info", coord, characteristics);
                         return characteristics;
                     }
                     characteristics.multiPos = new MultiPos(predefinedBuilding.relChunkX(), predefinedBuilding.relChunkZ(), characteristics.multiBuilding.getDimX(), characteristics.multiBuilding.getDimZ());
@@ -470,7 +503,9 @@ public abstract class MixinBuildingInfo {
                             // Multi-building definition is missing; treat this as a single-building chunk.
                             String buildingName = cityStyle.getRandomBuilding(rand, coord);
                             characteristics.buildingType = buildingName != null ? resolveBuildingWithFallback(world, buildingName) : null;
-                            LC2H_CITY_INFO_MAP.putIfAbsent(coord, characteristics);
+                            LostChunkCharacteristics prev = LC2H_CITY_INFO_MAP.putIfAbsent(coord, characteristics);
+                            LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, coord, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
+                            LostCitiesCacheBridge.putDisk("city_info", coord, characteristics);
                             return characteristics;
                         }
                         characteristics.multiPos = new MultiPos(0, 0, characteristics.multiBuilding.getDimX(), characteristics.multiBuilding.getDimZ());
@@ -491,7 +526,9 @@ public abstract class MixinBuildingInfo {
             }
         }
 
-        LC2H_CITY_INFO_MAP.putIfAbsent(coord, characteristics);
+        LostChunkCharacteristics prev = LC2H_CITY_INFO_MAP.putIfAbsent(coord, characteristics);
+        LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, coord, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
+        LostCitiesCacheBridge.putDisk("city_info", coord, characteristics);
         return characteristics;
     }
 
@@ -580,6 +617,7 @@ public abstract class MixinBuildingInfo {
 
         BuildingInfo cached = LC2H_BUILDING_INFO_MAP.get(key);
         if (cached != null) {
+            LostCitiesCacheBudgetManager.recordAccess(LC2H_BUILDING_INFO_BUDGET, key);
             return cached;
         }
 
@@ -589,12 +627,14 @@ public abstract class MixinBuildingInfo {
         synchronized (lock) {
             cached = LC2H_BUILDING_INFO_MAP.get(key);
             if (cached != null) {
+                LostCitiesCacheBudgetManager.recordAccess(LC2H_BUILDING_INFO_BUDGET, key);
                 LC2H_BUILDING_INFO_LOCKS.remove(key, lock);
                 return cached;
             }
             try {
                 BuildingInfo created = lc2h$create(key, provider);
-                LC2H_BUILDING_INFO_MAP.put(key, created);
+                BuildingInfo prev = LC2H_BUILDING_INFO_MAP.put(key, created);
+                LostCitiesCacheBudgetManager.recordPut(LC2H_BUILDING_INFO_BUDGET, key, LC2H_BUILDING_INFO_BUDGET.defaultEntryBytes(), prev == null);
                 try {
                     ChunkGenTracker.recordBuildingInfo(created);
                 } catch (Throwable ignored) {
@@ -628,7 +668,14 @@ public abstract class MixinBuildingInfo {
     public static int getCityLevel(ChunkCoord key, IDimensionInfo provider) {
         Integer cached = LC2H_CITY_LEVEL_CACHE.get(key);
         if (cached != null) {
+            LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_LEVEL_BUDGET, key);
             return cached;
+        }
+        Integer disk = LostCitiesCacheBridge.getDisk("city_level", key, Integer.class);
+        if (disk != null) {
+            Integer prev = LC2H_CITY_LEVEL_CACHE.putIfAbsent(key, disk);
+            LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_LEVEL_BUDGET, key, LC2H_CITY_LEVEL_BUDGET.defaultEntryBytes(), prev == null);
+            return prev != null ? prev : disk;
         }
         int result;
         if ((provider.getProfile().isSpace() || provider.getProfile().isVoidSpheres())) {
@@ -641,6 +688,8 @@ public abstract class MixinBuildingInfo {
             result = getCityLevelNormal(key, provider, provider.getProfile());
         }
         Integer prev = LC2H_CITY_LEVEL_CACHE.putIfAbsent(key, result);
+        LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_LEVEL_BUDGET, key, LC2H_CITY_LEVEL_BUDGET.defaultEntryBytes(), prev == null);
+        LostCitiesCacheBridge.putDisk("city_level", key, result);
         return prev != null ? prev : result;
     }
 
@@ -656,6 +705,10 @@ public abstract class MixinBuildingInfo {
         LC2H_CITY_INFO_MAP.clear();
         LC2H_CITY_LEVEL_CACHE.clear();
         LC2H_IS_CITY_RAW_CACHE.clear();
+        LostCitiesCacheBudgetManager.clear(LC2H_BUILDING_INFO_BUDGET);
+        LostCitiesCacheBudgetManager.clear(LC2H_CITY_INFO_BUDGET);
+        LostCitiesCacheBudgetManager.clear(LC2H_CITY_LEVEL_BUDGET);
+        LostCitiesCacheBudgetManager.clear(LC2H_CITY_RAW_BUDGET);
     }
 
     @org.spongepowered.asm.mixin.injection.Inject(method = "isCityRaw", at = @org.spongepowered.asm.mixin.injection.At("HEAD"), cancellable = true)
@@ -666,7 +719,15 @@ public abstract class MixinBuildingInfo {
         }
         Boolean cached = LC2H_IS_CITY_RAW_CACHE.get(coord);
         if (cached != null) {
+            LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_RAW_BUDGET, coord);
             cir.setReturnValue(cached);
+            return;
+        }
+        Boolean disk = LostCitiesCacheBridge.getDisk("city_raw", coord, Boolean.class);
+        if (disk != null) {
+            Boolean prev = LC2H_IS_CITY_RAW_CACHE.putIfAbsent(coord, disk);
+            LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_RAW_BUDGET, coord, LC2H_CITY_RAW_BUDGET.defaultEntryBytes(), prev == null);
+            cir.setReturnValue(prev != null ? prev : disk);
         }
     }
 
@@ -676,6 +737,8 @@ public abstract class MixinBuildingInfo {
         if (coord == null) {
             return;
         }
-        LC2H_IS_CITY_RAW_CACHE.putIfAbsent(coord, cir.getReturnValue());
+        Boolean prev = LC2H_IS_CITY_RAW_CACHE.putIfAbsent(coord, cir.getReturnValue());
+        LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_RAW_BUDGET, coord, LC2H_CITY_RAW_BUDGET.defaultEntryBytes(), prev == null);
+        LostCitiesCacheBridge.putDisk("city_raw", coord, cir.getReturnValue());
     }
 }

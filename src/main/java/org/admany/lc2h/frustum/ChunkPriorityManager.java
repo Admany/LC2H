@@ -25,7 +25,8 @@ public class ChunkPriorityManager {
         double dirX,
         double dirZ,
         double cosHalfFov,
-        double maxDistanceSq
+        double maxDistanceSq,
+        double viewDistanceSq
     ) {}
 
     private static volatile ViewSample[] SERVER_VIEWS = new ViewSample[0];
@@ -50,8 +51,10 @@ public class ChunkPriorityManager {
         } catch (Throwable ignored) {
         }
 
+        double viewDistanceBlocks = viewDistanceChunks * 16.0;
         double maxDistanceBlocks = (viewDistanceChunks + 1) * 16.0;
         double maxDistanceSq = maxDistanceBlocks * maxDistanceBlocks;
+        double viewDistanceSq = viewDistanceBlocks * viewDistanceBlocks;
 
         Double overrideFov = null;
         try {
@@ -80,7 +83,14 @@ public class ChunkPriorityManager {
             var look = player.getLookAngle();
             double dirX = look.x;
             double dirZ = look.z;
-            samples[idx++] = new ViewSample(dim, player.getX(), player.getZ(), dirX, dirZ, cosHalfFov, maxDistanceSq);
+            double dirLenSq = (dirX * dirX) + (dirZ * dirZ);
+            if (dirLenSq < 1.0e-6) {
+                float yaw = player.getYRot();
+                double yawRad = Math.toRadians(yaw);
+                dirX = -Math.sin(yawRad);
+                dirZ = Math.cos(yawRad);
+            }
+            samples[idx++] = new ViewSample(dim, player.getX(), player.getZ(), dirX, dirZ, cosHalfFov, maxDistanceSq, viewDistanceSq);
         }
         if (idx != samples.length) {
             ViewSample[] trimmed = new ViewSample[idx];
@@ -128,5 +138,69 @@ public class ChunkPriorityManager {
 
     public static Priority getPriorityForChunk(int chunkX, int chunkZ) {
         return getPriorityForChunk(Level.OVERWORLD.location(), chunkX, chunkZ);
+    }
+
+    public static boolean isChunkWithinViewDistance(ResourceLocation dimension, int chunkX, int chunkZ) {
+        if (dimension == null) {
+            return false;
+        }
+        ViewSample[] views = SERVER_VIEWS;
+        if (views.length == 0) {
+            return false;
+        }
+        double cx = chunkX * 16.0 + 8.0;
+        double cz = chunkZ * 16.0 + 8.0;
+        for (ViewSample view : views) {
+            if (view == null || !dimension.equals(view.dimension)) {
+                continue;
+            }
+            double dx = cx - view.x;
+            double dz = cz - view.z;
+            double distSq = dx * dx + dz * dz;
+            if (distSq <= view.viewDistanceSq) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static boolean isRegionWithinViewDistance(ResourceLocation dimension,
+                                                     int minChunkX,
+                                                     int maxChunkX,
+                                                     int minChunkZ,
+                                                     int maxChunkZ) {
+        if (dimension == null) {
+            return false;
+        }
+        ViewSample[] views = SERVER_VIEWS;
+        if (views.length == 0) {
+            return false;
+        }
+        double minX = minChunkX * 16.0;
+        double maxX = maxChunkX * 16.0 + 15.0;
+        double minZ = minChunkZ * 16.0;
+        double maxZ = maxChunkZ * 16.0 + 15.0;
+        for (ViewSample view : views) {
+            if (view == null || !dimension.equals(view.dimension)) {
+                continue;
+            }
+            double dx = distanceToRange(view.x, minX, maxX);
+            double dz = distanceToRange(view.z, minZ, maxZ);
+            double distSq = dx * dx + dz * dz;
+            if (distSq <= view.viewDistanceSq) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static double distanceToRange(double value, double min, double max) {
+        if (value < min) {
+            return min - value;
+        }
+        if (value > max) {
+            return value - max;
+        }
+        return 0.0;
     }
 }

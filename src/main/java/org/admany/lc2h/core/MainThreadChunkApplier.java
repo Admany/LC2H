@@ -10,9 +10,15 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.fml.loading.FMLEnvironment;
+import net.minecraftforge.server.ServerLifecycleHooks;
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.frustum.ChunkPriorityManager;
+import org.admany.lc2h.util.spawn.SpawnSearchScheduler;
 import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.lc2h.util.server.ServerRescheduler;
+import org.admany.lc2h.diagnostics.ViewCullingStats;
 
 import java.util.Comparator;
 import java.util.concurrent.ConcurrentHashMap;
@@ -64,6 +70,19 @@ public class MainThreadChunkApplier {
             return;
         }
         if (APPLIED_CHUNKS.containsKey(chunk)) {
+            return;
+        }
+
+        if (!ServerRescheduler.isServerAvailable() && shouldRunInlineClient()) {
+            try {
+                applicationTask.run();
+                APPLIED_CHUNKS.put(chunk, Boolean.TRUE);
+            } catch (Throwable t) {
+                LC2H.LOGGER.error("[LC2H] Failed to apply chunk {} on client thread: {}", chunk, t.getMessage());
+                LC2H.LOGGER.debug("[LC2H] Apply error", t);
+            } finally {
+                ENQUEUED_CHUNKS.remove(chunk);
+            }
             return;
         }
 
@@ -234,6 +253,7 @@ public class MainThreadChunkApplier {
             }
         } catch (Throwable ignored) {
         }
+        final boolean cullOutOfView = playerCount > 0 && !SpawnSearchScheduler.isSearchActive(server);
 
         // getAverageTickTime() returns ms-per-tick, higher means more overloaded.
         double avgTickMs = 50.0;
@@ -272,6 +292,12 @@ public class MainThreadChunkApplier {
                 break;
             }
             ENQUEUED_CHUNKS.remove(task.chunk);
+            if (cullOutOfView && task.chunk != null && task.chunk.dimension() != null) {
+                if (!ChunkPriorityManager.isChunkWithinViewDistance(task.chunk.dimension().location(), task.chunk.chunkX(), task.chunk.chunkZ())) {
+                    ViewCullingStats.recordMainThreadApply(1);
+                    continue;
+                }
+            }
 
             try {
                 task.applicationTask.run();
@@ -301,5 +327,16 @@ public class MainThreadChunkApplier {
 
     public static int getQueueSize() {
         return APPLICATION_QUEUE.size();
+    }
+
+    private static boolean shouldRunInlineClient() {
+        if (FMLEnvironment.dist != Dist.CLIENT) {
+            return false;
+        }
+        try {
+            return ServerLifecycleHooks.getCurrentServer() == null;
+        } catch (Throwable ignored) {
+            return true;
+        }
     }
 }

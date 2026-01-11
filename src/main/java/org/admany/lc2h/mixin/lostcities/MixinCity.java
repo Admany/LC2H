@@ -11,6 +11,8 @@ import mcjty.lostcities.worldgen.lost.regassets.data.PredefinedStreet;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.CommonLevelAccessor;
+import org.admany.lc2h.data.cache.LostCitiesCacheBridge;
+import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
@@ -27,6 +29,9 @@ import java.util.concurrent.ConcurrentHashMap;
 public abstract class MixinCity {
 
     private static final Map<ChunkCoord, CityStyle> LC2H_CITY_STYLE_CACHE = new ConcurrentHashMap<>();
+    @Unique
+    private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_CITY_STYLE_BUDGET =
+        LostCitiesCacheBudgetManager.register("lc_city_style", 128, 2048, key -> LC2H_CITY_STYLE_CACHE.remove(key) != null);
     @Unique
     private static final Object LC2H_NULL_LEVEL_KEY = new Object();
     @Unique
@@ -61,10 +66,19 @@ public abstract class MixinCity {
     public static CityStyle getCityStyle(ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile) {
         CityStyle cached = LC2H_CITY_STYLE_CACHE.get(coord);
         if (cached != null) {
+            LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_STYLE_BUDGET, coord);
             return cached;
         }
+        CityStyle disk = LostCitiesCacheBridge.getDisk("city_style", coord, CityStyle.class);
+        if (disk != null) {
+            CityStyle prev = LC2H_CITY_STYLE_CACHE.putIfAbsent(coord, disk);
+            LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_STYLE_BUDGET, coord, LC2H_CITY_STYLE_BUDGET.defaultEntryBytes(), prev == null);
+            return prev != null ? prev : disk;
+        }
         CityStyle style = getCityStyleInt(coord, provider, profile);
-        LC2H_CITY_STYLE_CACHE.putIfAbsent(coord, style);
+        CityStyle prev = LC2H_CITY_STYLE_CACHE.putIfAbsent(coord, style);
+        LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_STYLE_BUDGET, coord, LC2H_CITY_STYLE_BUDGET.defaultEntryBytes(), prev == null);
+        LostCitiesCacheBridge.putDisk("city_style", coord, style);
         return style;
     }
 
@@ -84,6 +98,7 @@ public abstract class MixinCity {
     private static void lc2h$clearLc2hCaches(CallbackInfo ci) {
         LC2H_CITY_STYLE_CACHE.clear();
         LC2H_CITY_RARITY_CACHE.clear();
+        LostCitiesCacheBudgetManager.clear(LC2H_CITY_STYLE_BUDGET);
         LC2H_OCCUPIED_READY = false;
         LC2H_PREDEFINED_READY = false;
     }

@@ -122,6 +122,11 @@ public class Lc2hConfigScreen extends Screen {
     private EditBox blendWidthBox;
     private EditBox blendSoftnessBox;
     private EditBox accentColorBox;
+    private EditBox cacheCapBox;
+    private EditBox lc2hCacheBox;
+    private EditBox lostCitiesCacheBox;
+    private EditBox lostCitiesTtlBox;
+    private EditBox lostCitiesDiskTtlBox;
     private static final int DEFAULT_ACCENT_COLOR = 0x3A86FF;
     private static final int QUANTIFIED_HIGHLIGHT_COLOR = 0xB36CFF;
     private String cachedAccentInput = "";
@@ -154,6 +159,33 @@ public class Lc2hConfigScreen extends Screen {
     private static final Component RESTART_LATER_LABEL = Component.literal("Do It Later");
     private static final Component SERVER_RESTART_TITLE = Component.literal("Server Restart Required");
     private static final Component SERVER_RESTART_ACTION = Component.literal("Stop Server");
+
+    private boolean cacheCapWarningVisible = false;
+    private float cacheCapWarningProgress = 0f;
+    private Component cacheCapWarningTitle = Component.literal("Cache Budget Warning");
+    private Component cacheCapWarningSummary = Component.empty();
+    private Component cacheCapWarningWarning = Component.empty();
+    private Component cacheCapContinueLabel = Component.literal("Continue");
+    private Component cacheCapRevertLabel = Component.literal("Revert");
+    private float cacheCapContinueHover = 0f;
+    private float cacheCapRevertHover = 0f;
+    private final int[] cacheCapContinueRect = new int[4];
+    private final int[] cacheCapRevertRect = new int[4];
+    private Lc2hConfigController.FormValues cacheCapPendingValues;
+    private boolean cacheCapPendingCloseAfterApply = false;
+    private boolean closeAfterApplyPending = false;
+
+    private boolean unsavedWarningVisible = false;
+    private float unsavedWarningProgress = 0f;
+private Component unsavedWarningTitle = Component.literal("Hold on!");
+private Component unsavedWarningSummary = Component.literal("Looks like you’ve made some changes that aren’t saved yet. Want to save them before moving on?");
+private Component unsavedSaveLabel = Component.literal("Save Changes");
+private Component unsavedDiscardLabel = Component.literal("Don’t Save");
+
+    private float unsavedSaveHover = 0f;
+    private float unsavedDiscardHover = 0f;
+    private final int[] unsavedSaveRect = new int[4];
+    private final int[] unsavedDiscardRect = new int[4];
 
     private record LabelEntry(int x, int y, int descStartY, Component title,
                               List<FormattedCharSequence> lines, boolean requiresRestart) { }
@@ -245,6 +277,12 @@ public class Lc2hConfigScreen extends Screen {
         this.restartWarningServer = false;
         this.restartCloseHover = 0f;
         this.restartLaterHover = 0f;
+        this.cacheCapPendingCloseAfterApply = false;
+        this.closeAfterApplyPending = false;
+        this.unsavedWarningVisible = false;
+        this.unsavedWarningProgress = 0f;
+        this.unsavedSaveHover = 0f;
+        this.unsavedDiscardHover = 0f;
 
         controller.registerBenchmarkListener();
 
@@ -293,6 +331,30 @@ public class Lc2hConfigScreen extends Screen {
         addToggle(layout, "Part Safety Checks (Recommended)", working.enableLostCitiesPartSliceCompat,
                 "Prevents rare crashes from broken/invalid Lost Cities parts in addon packs. Leave ON unless you're troubleshooting.", false,
                 val -> working.enableLostCitiesPartSliceCompat = val);
+        addSectionHeader(layout, Component.literal("CACHING"));
+        addToggle(layout, "Enforce Combined Cache Cap", working.cacheEnforceCombinedMax,
+                "If enabled, evict from the largest cache when combined usage exceeds the cap.", false,
+                val -> working.cacheEnforceCombinedMax = val);
+        addToggle(layout, "Split Combined Cap Evenly", working.cacheSplitEqual,
+                "If enabled, splits the combined cap evenly between LC2H and Lost Cities.", false,
+                val -> working.cacheSplitEqual = val);
+        this.cacheCapBox = addNumberField(layout, "Combined Cache Cap (MB)",
+                "Maximum combined Lost Cities + LC2H cache memory before eviction.", String.valueOf(working.cacheCombinedMaxMB), false);
+        this.cacheCapBox.setFilter(this::isNumericInput);
+        this.lc2hCacheBox = addNumberField(layout, "LC2H Cache Cap (MB)",
+                "Max LC2H cache memory. Ignored if split-even is enabled.", String.valueOf(working.cacheMaxMB), false);
+        this.lc2hCacheBox.setFilter(this::isNumericInput);
+        this.lostCitiesCacheBox = addNumberField(layout, "Lost Cities Cache Cap (MB)",
+                "Max Lost Cities cache memory. Ignored if split-even is enabled.", String.valueOf(working.cacheLostCitiesMaxMB), false);
+        this.lostCitiesCacheBox.setFilter(this::isNumericInput);
+        this.lostCitiesTtlBox = addNumberField(layout, "Lost Cities RAM TTL (minutes)",
+                "Time before cold Lost Cities cache entries expire from RAM.", String.valueOf(working.cacheLostCitiesTtlMinutes), false);
+        this.lostCitiesTtlBox.setFilter(this::isNumericInput);
+        this.lostCitiesDiskTtlBox = addNumberField(layout, "Lost Cities Disk TTL (hours)",
+                "Time before Lost Cities disk cache entries expire.", String.valueOf(working.cacheLostCitiesDiskTtlHours), false);
+        this.lostCitiesDiskTtlBox.setFilter(this::isNumericInput);
+
+        addSectionHeader(layout, Component.literal("STATISTICS"));
         addToggle(layout, "Enable Cache Stats Logging", working.enableCacheStatsLogging,
                 "Log cache statistics periodically.", false, val -> working.enableCacheStatsLogging = val);
         addToggle(layout, "Hide Experimental Warning", working.hideExperimentalWarning,
@@ -341,13 +403,7 @@ public class Lc2hConfigScreen extends Screen {
         this.targetScrollOffset = Math.min(this.targetScrollOffset, this.maxScrollOffset);
 
         CustomButton applyButton = createAnimatedButton(this.contentLeft, footerY, 160, 20,
-                Component.literal("Apply & Save"), btn -> {
-                    Lc2hConfigController.FormValues values = buildFormValues();
-                    boolean needsRestart = controller.applyChanges(values, Minecraft.getInstance());
-                    if (needsRestart) {
-                        showRestartWarning(null);
-                    }
-                }, false);
+                Component.literal("Apply & Save"), btn -> applyChangesFromUi(false), false);
         addRenderableWidget(applyButton);
 
         CustomButton revertButton = createAnimatedButton(this.contentLeft + 172, footerY, 140, 20,
@@ -384,10 +440,6 @@ public class Lc2hConfigScreen extends Screen {
                     state[0] = !state[0];
                     onChange.accept(state[0]);
                     b.setMessage(Component.literal(state[0] ? "Enabled" : "Disabled"));
-                    boolean needsRestart = controller.applyToggleChange(Minecraft.getInstance(), false);
-                    if (needsRestart) {
-                        showRestartWarning(title);
-                    }
                 });
         addRenderableWidget(button);
     }
@@ -534,6 +586,16 @@ public class Lc2hConfigScreen extends Screen {
         if (!restartWarningVisible && restartWarningProgress < 0.01f) {
             restartWarningProgress = 0f;
         }
+        float cacheWarningTarget = cacheCapWarningVisible ? 1f : 0f;
+        cacheCapWarningProgress += (cacheWarningTarget - cacheCapWarningProgress) * 0.18f;
+        if (!cacheCapWarningVisible && cacheCapWarningProgress < 0.01f) {
+            cacheCapWarningProgress = 0f;
+        }
+        float unsavedWarningTarget = unsavedWarningVisible ? 1f : 0f;
+        unsavedWarningProgress += (unsavedWarningTarget - unsavedWarningProgress) * 0.18f;
+        if (!unsavedWarningVisible && unsavedWarningProgress < 0.01f) {
+            unsavedWarningProgress = 0f;
+        }
         targetScrollOffset = clamp(0f, (float)maxScrollOffset, targetScrollOffset);
         scrollOffset = clamp(0f, (float)maxScrollOffset, scrollOffset);
     }
@@ -562,6 +624,8 @@ public class Lc2hConfigScreen extends Screen {
         renderButtonHighlights(graphics);
         renderButtonText(graphics);
         renderRestartWarning(graphics, mouseX, mouseY);
+        renderCacheCapWarning(graphics, mouseX, mouseY);
+        renderUnsavedWarning(graphics, mouseX, mouseY);
     }
 
     private void renderUniverseBackground(GuiGraphics graphics, int screenW, int screenH, float partialTick) {
@@ -676,7 +740,7 @@ public class Lc2hConfigScreen extends Screen {
         }
 
         renderCenteredTextWithGlow(graphics, this.font,
-                Component.literal("Includes bug fixes, general improvements, and... DUCKS :DDD. Fields marked in red require a server restart."),
+                Component.literal("Includes bug fixes, general improvements, and... DUCKS :DDD. Fields marked in red require a server/client restart."),
                 centerX, 62, 0x66FFFFFF, 0x22222222);
     }
 
@@ -1173,6 +1237,19 @@ public class Lc2hConfigScreen extends Screen {
         return true;
     }
 
+    private boolean isNumericInput(String value) {
+        if (value == null || value.isEmpty()) {
+            return true;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private String getAccentInput() {
         if (accentColorBox != null) {
             return accentColorBox.getValue();
@@ -1225,6 +1302,7 @@ public class Lc2hConfigScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
+        if (isCacheCapWarningActive()) return true;
         if (isRestartWarningActive()) return true;
         if (controller.isBenchmarkRunning()) return true;
 
@@ -1246,6 +1324,12 @@ public class Lc2hConfigScreen extends Screen {
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (isUnsavedWarningActive()) {
+            return handleUnsavedWarningClick(mouseX, mouseY);
+        }
+        if (isCacheCapWarningActive()) {
+            return handleCacheCapWarningClick(mouseX, mouseY);
+        }
         if (isRestartWarningActive()) {
             return handleRestartWarningClick(mouseX, mouseY);
         }
@@ -1257,9 +1341,22 @@ public class Lc2hConfigScreen extends Screen {
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (isUnsavedWarningActive()) {
+            if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
+                closeUnsavedWarning();
+            }
+            return true;
+        }
+        if (isCacheCapWarningActive()) {
+            if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
+                closeCacheCapWarning();
+            }
+            return true;
+        }
         if (isRestartWarningActive()) {
             if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
                 closeRestartWarning();
+                closeAfterApplyIfNeeded();
             }
             return true;
         }
@@ -1268,6 +1365,10 @@ public class Lc2hConfigScreen extends Screen {
                 controller.requestUserCancelFromClient("User pressed ESC");
                 controller.cancelBenchmarkFeedback(Component.literal("Benchmark cancelled by user"), 0xFF5555);
             }
+            return true;
+        }
+        if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
+            attemptClose();
             return true;
         }
         return super.keyPressed(keyCode, scanCode, modifiers);
@@ -1288,7 +1389,12 @@ public class Lc2hConfigScreen extends Screen {
         return new Lc2hConfigController.FormValues(
                 blendWidthBox.getValue(),
                 blendSoftnessBox.getValue(),
-                accentColorBox == null ? null : accentColorBox.getValue()
+                accentColorBox == null ? null : accentColorBox.getValue(),
+                lc2hCacheBox == null ? null : lc2hCacheBox.getValue(),
+                lostCitiesCacheBox == null ? null : lostCitiesCacheBox.getValue(),
+                cacheCapBox == null ? null : cacheCapBox.getValue(),
+                lostCitiesTtlBox == null ? null : lostCitiesTtlBox.getValue(),
+                lostCitiesDiskTtlBox == null ? null : lostCitiesDiskTtlBox.getValue()
         );
     }
 
@@ -1314,12 +1420,43 @@ public class Lc2hConfigScreen extends Screen {
         restartWarningVisible = true;
     }
 
+    private void showCacheCapWarning(Lc2hConfigController.FormValues values, Lc2hConfigController.CacheCapChange change) {
+        cacheCapPendingValues = values;
+        cacheCapWarningSummary = Component.literal(change.summary());
+        cacheCapWarningWarning = Component.literal("This can increase RAM usage and cause instability on low-memory systems.");
+        cacheCapWarningVisible = true;
+    }
+
     private void closeRestartWarning() {
         restartWarningVisible = false;
     }
 
+    private void closeCacheCapWarning() {
+        cacheCapWarningVisible = false;
+        cacheCapPendingValues = null;
+        cacheCapWarningSummary = Component.empty();
+        cacheCapWarningWarning = Component.empty();
+        cacheCapPendingCloseAfterApply = false;
+    }
+
     private boolean isRestartWarningActive() {
         return restartWarningProgress > 0.01f;
+    }
+
+    private boolean isCacheCapWarningActive() {
+        return cacheCapWarningProgress > 0.01f;
+    }
+
+    private void showUnsavedWarning() {
+        unsavedWarningVisible = true;
+    }
+
+    private void closeUnsavedWarning() {
+        unsavedWarningVisible = false;
+    }
+
+    private boolean isUnsavedWarningActive() {
+        return unsavedWarningProgress > 0.01f;
     }
 
     private boolean handleRestartWarningClick(double mouseX, double mouseY) {
@@ -1335,6 +1472,44 @@ public class Lc2hConfigScreen extends Screen {
         if (isInRect(mouseX, mouseY, restartLaterRect)) {
             controller.playClickSound();
             closeRestartWarning();
+            closeAfterApplyIfNeeded();
+            return true;
+        }
+        return true;
+    }
+
+    private boolean handleCacheCapWarningClick(double mouseX, double mouseY) {
+        if (isInRect(mouseX, mouseY, cacheCapContinueRect)) {
+            controller.playClickSound();
+            Lc2hConfigController.FormValues values = cacheCapPendingValues;
+            boolean closeAfterApply = cacheCapPendingCloseAfterApply;
+            closeCacheCapWarning();
+            if (values != null) {
+                boolean needsRestart = controller.applyChanges(values, Minecraft.getInstance());
+                handlePostApply(needsRestart, closeAfterApply);
+            }
+            return true;
+        }
+        if (isInRect(mouseX, mouseY, cacheCapRevertRect)) {
+            controller.playClickSound();
+            Minecraft.getInstance().setScreen(new Lc2hConfigScreen(parent));
+            closeCacheCapWarning();
+            return true;
+        }
+        return true;
+    }
+
+    private boolean handleUnsavedWarningClick(double mouseX, double mouseY) {
+        if (isInRect(mouseX, mouseY, unsavedSaveRect)) {
+            controller.playClickSound();
+            closeUnsavedWarning();
+            applyChangesFromUi(true);
+            return true;
+        }
+        if (isInRect(mouseX, mouseY, unsavedDiscardRect)) {
+            controller.playClickSound();
+            closeUnsavedWarning();
+            Minecraft.getInstance().setScreen(parent);
             return true;
         }
         return true;
@@ -1450,6 +1625,178 @@ public class Lc2hConfigScreen extends Screen {
         graphics.pose().popPose();
     }
 
+    private void renderCacheCapWarning(GuiGraphics graphics, int mouseX, int mouseY) {
+        if (cacheCapWarningProgress <= 0.01f) {
+            return;
+        }
+        graphics.flush();
+        graphics.pose().pushPose();
+        graphics.pose().translate(0.0f, 0.0f, 220.0f);
+        float eased = 1f - (float) Math.pow(1f - cacheCapWarningProgress, 3);
+        renderBlurOverlay(graphics, eased);
+
+        int modalWidth = Math.min(440, Math.max(300, this.contentWidth - 40));
+        int modalHeight = 180;
+        int baseX = (this.width - modalWidth) / 2;
+        int baseY = (this.height - modalHeight) / 2;
+
+        float scale = 0.9f + 0.1f * eased;
+        int drawWidth = Math.round(modalWidth * scale);
+        int drawHeight = Math.round(modalHeight * scale);
+        int drawX = baseX + (modalWidth - drawWidth) / 2;
+        int drawY = baseY + (modalHeight - drawHeight) / 2;
+
+        int borderColor = applyAlpha(getAccentColor(), eased);
+        int frameColor = applyAlpha(0x1A1A2E, eased);
+        int fillColor = applyAlpha(0x0A0A15, eased);
+
+        graphics.fill(drawX - 3, drawY - 3, drawX + drawWidth + 3, drawY + drawHeight + 3, applyAlpha(0x000000, eased * 0.35f));
+        graphics.fill(drawX - 2, drawY - 2, drawX + drawWidth + 2, drawY + drawHeight + 2, borderColor);
+        graphics.fill(drawX - 1, drawY - 1, drawX + drawWidth + 1, drawY + drawHeight + 1, frameColor);
+        graphics.fill(drawX, drawY, drawX + drawWidth, drawY + drawHeight, fillColor);
+
+        int titleColor = applyAlpha(0xFFD166, eased);
+        int glowColor = applyAlpha(0x553311, eased);
+        renderCenteredTextWithGlow(graphics, this.font, cacheCapWarningTitle, drawX + drawWidth / 2, drawY + 16, titleColor, glowColor);
+
+        int textAreaWidth = drawWidth - 40;
+        List<FormattedCharSequence> lines = this.font.split(cacheCapWarningSummary, textAreaWidth);
+        int textY = drawY + 42;
+        int textColor = applyAlpha(0xFFFFFF, eased);
+        for (FormattedCharSequence line : lines) {
+            graphics.drawString(this.font, line, drawX + 20, textY, textColor);
+            textY += this.font.lineHeight + 2;
+        }
+        if (!cacheCapWarningWarning.getString().isEmpty()) {
+            textY += 6;
+            int warningColor = applyAlpha(0xFF4B4B, eased);
+            graphics.drawString(this.font, Component.literal("WARNING:"), drawX + 20, textY, warningColor);
+            textY += this.font.lineHeight + 2;
+            List<FormattedCharSequence> warningLines = this.font.split(cacheCapWarningWarning, textAreaWidth);
+            int warningTextColor = applyAlpha(0xFFD25A, eased);
+            for (FormattedCharSequence line : warningLines) {
+                graphics.drawString(this.font, line, drawX + 20, textY, warningTextColor);
+                textY += this.font.lineHeight + 2;
+            }
+        }
+
+        int buttonWidth = 140;
+        int buttonHeight = 18;
+        int gap = 14;
+        int buttonsTotalWidth = buttonWidth * 2 + gap;
+        int buttonsX = drawX + (drawWidth - buttonsTotalWidth) / 2;
+        int buttonsY = drawY + drawHeight - buttonHeight - 18;
+
+        cacheCapContinueRect[0] = buttonsX;
+        cacheCapContinueRect[1] = buttonsY;
+        cacheCapContinueRect[2] = buttonWidth;
+        cacheCapContinueRect[3] = buttonHeight;
+        cacheCapRevertRect[0] = buttonsX + buttonWidth + gap;
+        cacheCapRevertRect[1] = buttonsY;
+        cacheCapRevertRect[2] = buttonWidth;
+        cacheCapRevertRect[3] = buttonHeight;
+
+        boolean overContinue = isInRect(mouseX, mouseY, cacheCapContinueRect);
+        boolean overRevert = isInRect(mouseX, mouseY, cacheCapRevertRect);
+        cacheCapContinueHover += ((overContinue ? 1f : 0f) - cacheCapContinueHover) * 0.2f;
+        cacheCapRevertHover += ((overRevert ? 1f : 0f) - cacheCapRevertHover) * 0.2f;
+
+        float pulse = 1f + (float) Math.sin(time * 0.08f) * 0.05f;
+        renderModalButton(graphics, cacheCapContinueRect[0], cacheCapContinueRect[1], cacheCapContinueRect[2], cacheCapContinueRect[3], cacheCapContinueHover, pulse, eased);
+        renderModalButton(graphics, cacheCapRevertRect[0], cacheCapRevertRect[1], cacheCapRevertRect[2], cacheCapRevertRect[3], cacheCapRevertHover, pulse, eased);
+
+        int buttonTextColor = applyAlpha(0xFFFFFF, eased);
+        graphics.drawCenteredString(this.font, cacheCapContinueLabel,
+                cacheCapContinueRect[0] + cacheCapContinueRect[2] / 2,
+                cacheCapContinueRect[1] + (cacheCapContinueRect[3] - this.font.lineHeight) / 2 + 1,
+                buttonTextColor);
+        graphics.drawCenteredString(this.font, cacheCapRevertLabel,
+                cacheCapRevertRect[0] + cacheCapRevertRect[2] / 2,
+                cacheCapRevertRect[1] + (cacheCapRevertRect[3] - this.font.lineHeight) / 2 + 1,
+                buttonTextColor);
+        graphics.pose().popPose();
+    }
+
+    private void renderUnsavedWarning(GuiGraphics graphics, int mouseX, int mouseY) {
+        if (unsavedWarningProgress <= 0.01f) {
+            return;
+        }
+        graphics.flush();
+        graphics.pose().pushPose();
+        graphics.pose().translate(0.0f, 0.0f, 240.0f);
+        float eased = 1f - (float) Math.pow(1f - unsavedWarningProgress, 3);
+        renderBlurOverlay(graphics, eased);
+
+        int modalWidth = Math.min(440, Math.max(300, this.contentWidth - 40));
+        int modalHeight = 170;
+        int baseX = (this.width - modalWidth) / 2;
+        int baseY = (this.height - modalHeight) / 2;
+
+        float scale = 0.9f + 0.1f * eased;
+        int drawWidth = Math.round(modalWidth * scale);
+        int drawHeight = Math.round(modalHeight * scale);
+        int drawX = baseX + (modalWidth - drawWidth) / 2;
+        int drawY = baseY + (modalHeight - drawHeight) / 2;
+
+        int borderColor = applyAlpha(getAccentColor(), eased);
+        int frameColor = applyAlpha(0x1A1A2E, eased);
+        int fillColor = applyAlpha(0x0A0A15, eased);
+
+        graphics.fill(drawX - 3, drawY - 3, drawX + drawWidth + 3, drawY + drawHeight + 3, applyAlpha(0x000000, eased * 0.35f));
+        graphics.fill(drawX - 2, drawY - 2, drawX + drawWidth + 2, drawY + drawHeight + 2, borderColor);
+        graphics.fill(drawX - 1, drawY - 1, drawX + drawWidth + 1, drawY + drawHeight + 1, frameColor);
+        graphics.fill(drawX, drawY, drawX + drawWidth, drawY + drawHeight, fillColor);
+
+        int titleColor = applyAlpha(0xFFB703, eased);
+        int glowColor = applyAlpha(0x554411, eased);
+        renderCenteredTextWithGlow(graphics, this.font, unsavedWarningTitle, drawX + drawWidth / 2, drawY + 16, titleColor, glowColor);
+
+        int textAreaWidth = drawWidth - 40;
+        List<FormattedCharSequence> lines = this.font.split(unsavedWarningSummary, textAreaWidth);
+        int textY = drawY + 42;
+        int textColor = applyAlpha(0xFFFFFF, eased);
+        for (FormattedCharSequence line : lines) {
+            graphics.drawString(this.font, line, drawX + 20, textY, textColor);
+            textY += this.font.lineHeight + 2;
+        }
+
+        int buttonWidth = 150;
+        int buttonHeight = 18;
+        int gap = 14;
+        int buttonsTotalWidth = buttonWidth * 2 + gap;
+        int buttonsX = drawX + (drawWidth - buttonsTotalWidth) / 2;
+        int buttonsY = drawY + drawHeight - buttonHeight - 18;
+
+        unsavedSaveRect[0] = buttonsX;
+        unsavedSaveRect[1] = buttonsY;
+        unsavedSaveRect[2] = buttonWidth;
+        unsavedSaveRect[3] = buttonHeight;
+        unsavedDiscardRect[0] = buttonsX + buttonWidth + gap;
+        unsavedDiscardRect[1] = buttonsY;
+        unsavedDiscardRect[2] = buttonWidth;
+        unsavedDiscardRect[3] = buttonHeight;
+
+        boolean overSave = isInRect(mouseX, mouseY, unsavedSaveRect);
+        boolean overDiscard = isInRect(mouseX, mouseY, unsavedDiscardRect);
+        unsavedSaveHover += ((overSave ? 1f : 0f) - unsavedSaveHover) * 0.2f;
+        unsavedDiscardHover += ((overDiscard ? 1f : 0f) - unsavedDiscardHover) * 0.2f;
+
+        float pulse = 1f + (float) Math.sin(time * 0.08f) * 0.05f;
+        renderModalButton(graphics, unsavedSaveRect[0], unsavedSaveRect[1], unsavedSaveRect[2], unsavedSaveRect[3], unsavedSaveHover, pulse, eased);
+        renderModalButton(graphics, unsavedDiscardRect[0], unsavedDiscardRect[1], unsavedDiscardRect[2], unsavedDiscardRect[3], unsavedDiscardHover, pulse, eased);
+
+        int buttonTextColor = applyAlpha(0xFFFFFF, eased);
+        graphics.drawCenteredString(this.font, unsavedSaveLabel,
+                unsavedSaveRect[0] + unsavedSaveRect[2] / 2,
+                unsavedSaveRect[1] + (unsavedSaveRect[3] - this.font.lineHeight) / 2 + 1,
+                buttonTextColor);
+        graphics.drawCenteredString(this.font, unsavedDiscardLabel,
+                unsavedDiscardRect[0] + unsavedDiscardRect[2] / 2,
+                unsavedDiscardRect[1] + (unsavedDiscardRect[3] - this.font.lineHeight) / 2 + 1,
+                buttonTextColor);
+        graphics.pose().popPose();
+    }
+
     private void renderBlurOverlay(GuiGraphics graphics, float alpha) {
         int baseAlpha = Math.min(235, Math.round(210 * alpha));
         graphics.fill(0, 0, this.width, this.height, (baseAlpha << 24) | 0x0A0A15);
@@ -1514,6 +1861,51 @@ public class Lc2hConfigScreen extends Screen {
 
     @Override
     public void onClose() {
+        attemptClose();
+    }
+
+    private void applyChangesFromUi(boolean closeAfterApply) {
+        Lc2hConfigController.FormValues values = buildFormValues();
+        Lc2hConfigController.CacheCapChange capChange = controller.inspectCacheCapChange(values);
+        if (capChange != null) {
+            cacheCapPendingCloseAfterApply = closeAfterApply;
+            showCacheCapWarning(values, capChange);
+            return;
+        }
+        boolean needsRestart = controller.applyChanges(values, Minecraft.getInstance());
+        handlePostApply(needsRestart, closeAfterApply);
+    }
+
+    private void handlePostApply(boolean needsRestart, boolean closeAfterApply) {
+        if (needsRestart) {
+            closeAfterApplyPending = closeAfterApply;
+            showRestartWarning(null);
+            return;
+        }
+        if (closeAfterApply) {
+            Minecraft.getInstance().setScreen(parent);
+        }
+    }
+
+    private void closeAfterApplyIfNeeded() {
+        if (closeAfterApplyPending) {
+            closeAfterApplyPending = false;
+            Minecraft.getInstance().setScreen(parent);
+        }
+    }
+
+    private void attemptClose() {
+        if (isCacheCapWarningActive() || isRestartWarningActive() || isUnsavedWarningActive()) {
+            return;
+        }
+        if (hasUnsavedChanges()) {
+            showUnsavedWarning();
+            return;
+        }
         Minecraft.getInstance().setScreen(parent);
+    }
+
+    private boolean hasUnsavedChanges() {
+        return controller.hasUnsavedChanges(buildFormValues());
     }
 }

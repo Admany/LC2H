@@ -6,6 +6,10 @@ import com.google.gson.stream.JsonReader;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.fml.loading.FMLEnvironment;
 import net.minecraftforge.server.ServerLifecycleHooks;
+import org.admany.lc2h.data.cache.CacheBudgetManager;
+import org.admany.lc2h.data.cache.CombinedCacheBudgetManager;
+import org.admany.lc2h.data.cache.LostCitiesCacheBridge;
+import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
 import org.admany.lc2h.logging.LCLogger;
 
 import java.io.*;
@@ -27,6 +31,14 @@ public class ConfigManager {
     public static boolean ENABLE_DEBUG_LOGGING = false;
     public static String UI_ACCENT_COLOR = "3A86FF";
     public static int UI_ACCENT_COLOR_RGB = 0x3A86FF;
+    public static int CACHE_MAX_MB = 384;
+    public static long CACHE_MAX_BYTES = 10L * 1024L * 1024L;
+    public static int LOSTCITIES_CACHE_MAX_MB = 384;
+    public static int CACHE_COMBINED_MAX_MB = 512;
+    public static boolean CACHE_ENFORCE_COMBINED_MAX = true;
+    public static boolean CACHE_SPLIT_EQUAL = false;
+    public static int LOSTCITIES_CACHE_TTL_MINUTES = 20;
+    public static int LOSTCITIES_CACHE_DISK_TTL_HOURS = 6;
 
     // City edge tree handling
     public static boolean CITY_BLEND_CLEAR_TREES = true;
@@ -53,6 +65,13 @@ public class ConfigManager {
         public boolean hideExperimentalWarning = true;
         public boolean enableDebugLogging = false;
         public String uiAccentColor = "3A86FF";
+        public int cacheMaxMB = 384;
+        public int cacheLostCitiesMaxMB = 384;
+        public int cacheCombinedMaxMB = 512;
+        public boolean cacheEnforceCombinedMax = true;
+        public boolean cacheSplitEqual = false;
+        public int cacheLostCitiesTtlMinutes = 20;
+        public int cacheLostCitiesDiskTtlHours = 6;
 
         // City edge blending
         public boolean cityBlendEnabled = false;
@@ -139,6 +158,13 @@ public class ConfigManager {
         comments.put("hideExperimentalWarning", "Hide the experimental features warning screen");
         comments.put("enableDebugLogging", "Enable debug logging for memory management and warmup operations");
         comments.put("uiAccentColor", "UI accent color in hex (example: 3A86FF)");
+        comments.put("cacheMaxMB", "Max LC2H cache budget (MB).");
+        comments.put("cacheLostCitiesMaxMB", "Max Lost Cities cache budget (MB).");
+        comments.put("cacheCombinedMaxMB", "Max combined LC2H + Lost Cities cache budget (MB).");
+        comments.put("cacheEnforceCombinedMax", "If true, enforce combined max by evicting from the largest cache.");
+        comments.put("cacheSplitEqual", "If true, split the combined max evenly between LC2H and Lost Cities.");
+        comments.put("cacheLostCitiesTtlMinutes", "Lost Cities RAM cache TTL (minutes).");
+        comments.put("cacheLostCitiesDiskTtlHours", "Lost Cities disk cache TTL (hours).");
 
         // City edge blending
         comments.put("cityBlendEnabled", "Enable smooth blending of city edges into surrounding terrain");
@@ -172,6 +198,15 @@ public class ConfigManager {
                 "enableExplosionDebris",
                 "hideExperimentalWarning",
                 "enableDebugLogging",
+            });
+            groups.put("Caching", new String[]{
+                "cacheCombinedMaxMB",
+                "cacheEnforceCombinedMax",
+                "cacheSplitEqual",
+                "cacheMaxMB",
+                "cacheLostCitiesMaxMB",
+                "cacheLostCitiesTtlMinutes",
+                "cacheLostCitiesDiskTtlHours",
             });
             groups.put("Interface", new String[]{
                 "uiAccentColor"
@@ -265,6 +300,26 @@ public class ConfigManager {
         ENABLE_DEBUG_LOGGING = CONFIG.enableDebugLogging;
         UI_ACCENT_COLOR = CONFIG.uiAccentColor != null ? CONFIG.uiAccentColor : UI_ACCENT_COLOR;
         UI_ACCENT_COLOR_RGB = parseHexColor(UI_ACCENT_COLOR, 0x3A86FF);
+        CACHE_COMBINED_MAX_MB = Math.max(16, CONFIG.cacheCombinedMaxMB);
+        CACHE_ENFORCE_COMBINED_MAX = CONFIG.cacheEnforceCombinedMax;
+        CACHE_SPLIT_EQUAL = CONFIG.cacheSplitEqual;
+        int desiredLc2hMax = Math.max(8, CONFIG.cacheMaxMB);
+        int desiredLostCitiesMax = Math.max(8, CONFIG.cacheLostCitiesMaxMB);
+        if (CACHE_SPLIT_EQUAL) {
+            int half = Math.max(8, CACHE_COMBINED_MAX_MB / 2);
+            desiredLc2hMax = half;
+            desiredLostCitiesMax = half;
+        }
+        CACHE_MAX_MB = desiredLc2hMax;
+        CACHE_MAX_BYTES = CACHE_MAX_MB * 1024L * 1024L;
+        CacheBudgetManager.applyMaxBytes(CACHE_MAX_BYTES);
+        LOSTCITIES_CACHE_MAX_MB = desiredLostCitiesMax;
+        LostCitiesCacheBudgetManager.applyMaxBytes(LOSTCITIES_CACHE_MAX_MB * 1024L * 1024L);
+        LOSTCITIES_CACHE_TTL_MINUTES = Math.max(1, CONFIG.cacheLostCitiesTtlMinutes);
+        LOSTCITIES_CACHE_DISK_TTL_HOURS = Math.max(1, CONFIG.cacheLostCitiesDiskTtlHours);
+        LostCitiesCacheBudgetManager.applyTtlMinutes(LOSTCITIES_CACHE_TTL_MINUTES);
+        LostCitiesCacheBridge.applyDiskTtlHours(LOSTCITIES_CACHE_DISK_TTL_HOURS);
+        CombinedCacheBudgetManager.apply(CACHE_ENFORCE_COMBINED_MAX, CACHE_COMBINED_MAX_MB * 1024L * 1024L);
         CITY_BLEND_ENABLED = CONFIG.cityBlendEnabled;
         CITY_BLEND_WIDTH = CONFIG.cityBlendWidth;
         CITY_BLEND_SOFTNESS = CONFIG.cityBlendSoftness;

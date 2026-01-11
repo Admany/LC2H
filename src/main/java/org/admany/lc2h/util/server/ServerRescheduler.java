@@ -1,6 +1,9 @@
 package org.admany.lc2h.util.server;
 
 import net.minecraft.server.MinecraftServer;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.fml.loading.FMLEnvironment;
+import net.minecraftforge.server.ServerLifecycleHooks;
 
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -43,6 +46,21 @@ public final class ServerRescheduler {
             server.execute(task);
             return;
         }
+        if (shouldRunInlineClient()) {
+            task.run();
+            return;
+        }
         PENDING.add(task);
+    }
+
+    private static boolean shouldRunInlineClient() {
+        if (FMLEnvironment.dist != Dist.CLIENT) {
+            return false;
+        }
+        try {
+            return ServerLifecycleHooks.getCurrentServer() == null;
+        } catch (Throwable ignored) {
+            return true;
+        }
     }
 }

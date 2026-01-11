@@ -6,6 +6,9 @@ import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import org.admany.lc2h.async.Priority;
+import org.admany.lc2h.data.cache.CacheBudgetManager;
+import org.admany.lc2h.frustum.ChunkPriorityManager;
 import org.admany.lc2h.mixin.accessor.BuildingInfoAccessor;
 
 import java.lang.reflect.Method;
@@ -13,6 +16,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -22,8 +26,12 @@ public final class ChunkGenTracker {
     private static final int MAX_EVENTS = Integer.getInteger("lc2h.chunkinfo.events", 6);
     private static final long MAX_AGE_MS = Long.getLong("lc2h.chunkinfo.maxAgeMs", 30L * 60L * 1000L);
     private static final ConcurrentHashMap<ChunkCoord, ChunkGenTrace> TRACE = new ConcurrentHashMap<>();
+    private static final CacheBudgetManager.CacheGroup TRACE_BUDGET =
+        CacheBudgetManager.register("lc2h_chunkgen_trace", 512, 1024, key -> TRACE.remove(key) != null);
     private static final DateTimeFormatter TIME_FORMAT =
         DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
+    private static final LongAdder PRIORITY_FOREGROUND = new LongAdder();
+    private static final LongAdder PRIORITY_BACKGROUND = new LongAdder();
 
     private ChunkGenTracker() {
     }
@@ -34,6 +42,7 @@ public final class ChunkGenTracker {
 
     public static void recordGenerateEnd(ChunkCoord coord) {
         record(coord, "generate-end", null);
+        recordPriority(coord);
     }
 
     public static void recordGenerateSkip(ChunkCoord coord, String reason) {
@@ -166,17 +175,50 @@ public final class ChunkGenTracker {
         return root;
     }
 
+    public static PrioritySnapshot prioritySnapshot() {
+        return new PrioritySnapshot(PRIORITY_FOREGROUND.sum(), PRIORITY_BACKGROUND.sum());
+    }
+
     private static void record(ChunkCoord coord, String event, String detail) {
         if (coord == null || event == null) {
             return;
         }
         long now = System.currentTimeMillis();
-        ChunkGenTrace trace = TRACE.computeIfAbsent(coord, k -> new ChunkGenTrace());
+        ChunkGenTrace trace = TRACE.get(coord);
+        if (trace == null) {
+            ChunkGenTrace created = new ChunkGenTrace();
+            ChunkGenTrace existing = TRACE.putIfAbsent(coord, created);
+            if (existing == null) {
+                trace = created;
+                CacheBudgetManager.recordPut(TRACE_BUDGET, coord, TRACE_BUDGET.defaultEntryBytes(), true);
+            } else {
+                trace = existing;
+                CacheBudgetManager.recordAccess(TRACE_BUDGET, coord);
+            }
+        } else {
+            CacheBudgetManager.recordAccess(TRACE_BUDGET, coord);
+        }
         synchronized (trace) {
             trace.lastUpdateMs = now;
             trace.addEvent(new ChunkGenEvent(now, event, Thread.currentThread().getName(), detail));
         }
         pruneIfExpired(coord, trace, now);
+    }
+
+    private static void recordPriority(ChunkCoord coord) {
+        if (coord == null) {
+            return;
+        }
+        Priority priority = Priority.LOW;
+        try {
+            priority = ChunkPriorityManager.getPriorityForChunk(coord);
+        } catch (Throwable ignored) {
+        }
+        if (priority == Priority.HIGH) {
+            PRIORITY_FOREGROUND.increment();
+        } else {
+            PRIORITY_BACKGROUND.increment();
+        }
     }
 
     private static void pruneIfExpired(ChunkCoord coord, ChunkGenTrace trace, long now) {
@@ -188,7 +230,9 @@ public final class ChunkGenTracker {
             expired = trace.lastUpdateMs > 0 && (now - trace.lastUpdateMs) > MAX_AGE_MS;
         }
         if (expired) {
-            TRACE.remove(coord, trace);
+            if (TRACE.remove(coord, trace)) {
+                CacheBudgetManager.recordRemove(TRACE_BUDGET, coord);
+            }
         }
     }
 
@@ -199,7 +243,9 @@ public final class ChunkGenTracker {
         }
         synchronized (trace) {
             if (trace.lastUpdateMs > 0 && (System.currentTimeMillis() - trace.lastUpdateMs) > MAX_AGE_MS) {
-                TRACE.remove(coord, trace);
+                if (TRACE.remove(coord, trace)) {
+                    CacheBudgetManager.recordRemove(TRACE_BUDGET, coord);
+                }
                 return null;
             }
             return trace.snapshot();
@@ -280,5 +326,8 @@ public final class ChunkGenTracker {
                                     int buildingInfoCount,
                                     String lastBuildingDetail,
                                     List<ChunkGenEvent> events) {
+    }
+
+    public record PrioritySnapshot(long foreground, long background) {
     }
 }

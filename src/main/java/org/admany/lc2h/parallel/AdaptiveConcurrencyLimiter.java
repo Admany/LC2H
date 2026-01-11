@@ -1,8 +1,10 @@
 package org.admany.lc2h.parallel;
 
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ForkJoinWorkerThread;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 
 public final class AdaptiveConcurrencyLimiter {
 
@@ -11,80 +13,86 @@ public final class AdaptiveConcurrencyLimiter {
         void close();
     }
 
-    private final ReentrantLock lock = new ReentrantLock();
-    private final Condition available = lock.newCondition();
-
     private final int min;
     private final int max;
 
-    private final AtomicInteger limit;
-    private int active;
+    private final AtomicInteger active = new AtomicInteger();
+    private volatile int limit;
 
     public AdaptiveConcurrencyLimiter(int initialLimit, int min, int max) {
         this.min = Math.max(1, min);
         this.max = Math.max(this.min, max);
         int clamped = clamp(initialLimit);
-        this.limit = new AtomicInteger(clamped);
-        this.active = 0;
+        this.limit = clamped;
     }
 
     public int getLimit() {
-        return limit.get();
+        return limit;
     }
 
     public void setLimit(int newLimit) {
-        int clamped = clamp(newLimit);
-        int prev = limit.getAndSet(clamped);
-        if (prev != clamped) {
-            signalAll();
-        }
+        limit = clamp(newLimit);
     }
 
     public Token enter() {
-        lock.lock();
-        try {
-            while (active >= limit.get()) {
-                available.awaitUninterruptibly();
+        long backoffNanos = 500_000L;
+        while (true) {
+            if (tryAcquireInternal()) {
+                return newToken();
             }
-            active++;
-            return this::exit;
-        } finally {
-            lock.unlock();
+            if (Thread.currentThread() instanceof ForkJoinWorkerThread) {
+                try {
+                    ForkJoinPool.managedBlock(new LimiterBlocker(this));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            } else {
+                LockSupport.parkNanos(backoffNanos);
+            }
+            if (backoffNanos < 5_000_000L) {
+                backoffNanos += 250_000L;
+            }
         }
     }
 
     public Token tryEnter() {
-        lock.lock();
-        try {
-            if (active >= limit.get()) {
-                return null;
-            }
-            active++;
-            return this::exit;
-        } finally {
-            lock.unlock();
+        return tryAcquireInternal() ? newToken() : null;
+    }
+
+    public int availableSlots() {
+        int currentLimit = limit;
+        int currentActive = active.get();
+        return Math.max(0, currentLimit - currentActive);
+    }
+
+    private boolean tryAcquireInternal() {
+        int currentLimit = limit;
+        int currentActive = active.get();
+        if (currentActive >= currentLimit) {
+            return false;
         }
+        return active.compareAndSet(currentActive, currentActive + 1);
     }
 
     private void exit() {
-        lock.lock();
-        try {
-            if (active > 0) {
-                active--;
+        while (true) {
+            int current = active.get();
+            if (current <= 0) {
+                return;
             }
-            available.signal();
-        } finally {
-            lock.unlock();
+            if (active.compareAndSet(current, current - 1)) {
+                return;
+            }
         }
     }
 
-    private void signalAll() {
-        lock.lock();
-        try {
-            available.signalAll();
-        } finally {
-            lock.unlock();
-        }
+    private Token newToken() {
+        AtomicBoolean closed = new AtomicBoolean(false);
+        return () -> {
+            if (closed.compareAndSet(false, true)) {
+                exit();
+            }
+        };
     }
 
     private int clamp(int value) {
@@ -95,5 +103,30 @@ public final class AdaptiveConcurrencyLimiter {
             return max;
         }
         return value;
+    }
+
+    private static final class LimiterBlocker implements ForkJoinPool.ManagedBlocker {
+        private final AdaptiveConcurrencyLimiter limiter;
+        private boolean acquired;
+
+        private LimiterBlocker(AdaptiveConcurrencyLimiter limiter) {
+            this.limiter = limiter;
+        }
+
+        @Override
+        public boolean block() {
+            if (!acquired) {
+                acquired = limiter.tryAcquireInternal();
+                if (!acquired) {
+                    LockSupport.parkNanos(500_000L);
+                }
+            }
+            return acquired;
+        }
+
+        @Override
+        public boolean isReleasable() {
+            return acquired || (acquired = limiter.tryAcquireInternal());
+        }
     }
 }

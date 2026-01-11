@@ -63,12 +63,21 @@ public final class ClientChunkPriorityManager {
         double cosHalfFov = Math.cos(Math.toRadians(fovDeg * 0.5));
 
         var look = mc.player.getLookAngle();
+        double dirX = look.x;
+        double dirZ = look.z;
+        double dirLenSq = (dirX * dirX) + (dirZ * dirZ);
+        if (dirLenSq < 1.0e-6) {
+            float yaw = mc.player.getYRot();
+            double yawRad = Math.toRadians(yaw);
+            dirX = -Math.sin(yawRad);
+            dirZ = Math.cos(yawRad);
+        }
         LOCAL_VIEW = new ViewSample(
             mc.level.dimension().location(),
             mc.player.getX(),
             mc.player.getZ(),
-            look.x,
-            look.z,
+            dirX,
+            dirZ,
             cosHalfFov,
             maxDistanceSq
         );
@@ -89,4 +98,3 @@ public final class ClientChunkPriorityManager {
         return inPov ? Priority.HIGH : Priority.LOW;
     }
 }
-
