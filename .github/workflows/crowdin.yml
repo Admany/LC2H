@@ -1,19 +1,28 @@
 name: Crowdin
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
     permissions:
       contents: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.LC2H_GITHUB_TOKEN || github.token }}
+
+      - name: Configure git identity
+        shell: bash
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
 
       - name: Sync translations with Crowdin
         uses: crowdin/github-action@v2
@@ -21,9 +30,6 @@ jobs:
           config: crowdin.yml
           upload_sources: true
           download_translations: true
-          create_pull_request: false
-          push_translations: false
-          push_sources: false
           skip_ref_checkout: true
         env:
           GITHUB_TOKEN: ${{ secrets.LC2H_GITHUB_TOKEN || github.token }}
@@ -55,21 +61,14 @@ jobs:
             fi
           done
 
-      - name: Configure git identity
+      - name: Commit and push to main
         shell: bash
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Create pull request
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.LC2H_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-          branch: crowdin/translations
-          title: "Update translations from Crowdin"
-          body: "Automated pull of latest translations."
-          commit-message: "Update translations from Crowdin"
-          committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
-          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          set -euo pipefail
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "No translation changes."
+            exit 0
+          fi
+          git add -A
+          git commit -m "Update translations from Crowdin"
+          git push origin HEAD:main
