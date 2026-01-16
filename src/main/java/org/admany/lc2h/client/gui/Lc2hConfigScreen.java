@@ -497,9 +497,15 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         Minecraft minecraft = Minecraft.getInstance();
         eligibleLocales = computeEligibleLocales(minecraft);
 
-        int x = this.contentRight - 28;
-        int y = 8;
-        languageButton = createAnimatedButton(x, y, 24, 20, Component.literal("\uD83C\uDF10"), btn -> cycleLanguage(), false);
+        int buttonW = 24;
+        int buttonH = 20;
+        int headerTop = this.headerBottom - 76;
+        int x = this.contentRight - buttonW;
+        int y = headerTop - 20;
+        if (y < 0) {
+            y = 0;
+        }
+        languageButton = createAnimatedButton(x, y, buttonW, buttonH, Component.literal("\uD83C\uDF10"), btn -> cycleLanguage(), false);
         languageButton.active = eligibleLocales.size() > 1;
         updateLanguageButtonTooltip();
         addRenderableWidget(languageButton);
