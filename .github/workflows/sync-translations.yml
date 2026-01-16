@@ -21,7 +21,7 @@ jobs:
       - name: Update Crowdin branch with source changes
         run: |
           git checkout crowdin/translations
-          git merge main --no-edit
+          git merge main --no-edit --allow-unrelated-histories
           git push origin crowdin/translations
 
   merge-translations-to-main:
