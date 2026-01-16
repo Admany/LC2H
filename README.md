@@ -109,7 +109,7 @@ We welcome contributions! Here's how to get involved:
 4. **Wait for review** - we'll provide feedback and merge when ready
 
 ### Translation Contributions
-- Translations are managed via [Crowdin](https://crowdin.com/)
+- Translations are managed via [Crowdin LC2H](https://crowdin.com/project/lc2h)
 - Join our Crowdin project to contribute translations
 - Changes are automatically synced to the repository
 
