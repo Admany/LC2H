@@ -14,6 +14,7 @@ import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.config.ConfigManager;
 import org.lwjgl.glfw.GLFW;
 
 import com.google.gson.JsonElement;
@@ -23,6 +24,7 @@ import com.google.gson.JsonParser;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.IdentityHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import java.util.ArrayList;
@@ -35,6 +37,68 @@ import net.minecraft.util.FormattedCharSequence;
 
 @OnlyIn(Dist.CLIENT)
 public class Lc2hConfigScreen extends Screen {
+    private static final class UiTranslations {
+        private static final String FALLBACK_LOCALE = "en_us";
+        private static final Map<String, Map<String, String>> CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+        private static Map<String, String> load(String locale) {
+            String normalized = normalizeLocale(locale);
+            return CACHE.computeIfAbsent(normalized, key -> {
+                String resourcePath = "assets/" + LC2H.MODID + "/lang/" + key + ".json";
+                try (var stream = Lc2hConfigScreen.class.getClassLoader().getResourceAsStream(resourcePath)) {
+                    if (stream == null) {
+                        return Map.of();
+                    }
+                    try (var reader = new InputStreamReader(stream, StandardCharsets.UTF_8)) {
+                        JsonElement el = JsonParser.parseReader(reader);
+                        if (el == null || !el.isJsonObject()) {
+                            return Map.of();
+                        }
+                        JsonObject obj = el.getAsJsonObject();
+                        Map<String, String> map = new java.util.HashMap<>();
+                        for (var entry : obj.entrySet()) {
+                            if (entry.getValue() != null && entry.getValue().isJsonPrimitive()) {
+                                map.put(entry.getKey(), entry.getValue().getAsString());
+                            }
+                        }
+                        return map;
+                    }
+                } catch (Throwable ignored) {
+                    return Map.of();
+                }
+            });
+        }
+
+        static String translate(String locale, String key) {
+            if (key == null) {
+                return "";
+            }
+            String normalized = normalizeLocale(locale);
+            String value = load(normalized).get(key);
+            if (value != null) {
+                return value;
+            }
+            value = load(FALLBACK_LOCALE).get(key);
+            return value != null ? value : key;
+        }
+
+        static String format(String locale, String key, Object... args) {
+            String pattern = translate(locale, key);
+            if (args == null || args.length == 0) {
+                return pattern;
+            }
+            try {
+                return String.format(Locale.ROOT, pattern, args);
+            } catch (Throwable ignored) {
+                return pattern;
+            }
+        }
+
+        static Component component(String locale, String key, Object... args) {
+            return Component.literal(format(locale, key, args));
+        }
+    }
+
     private static class CustomButton extends Button {
         public CustomButton(int x, int y, int width, int height, Component message, Button.OnPress onPress) {
             super(x, y, width, height, message, onPress, DEFAULT_NARRATION);
@@ -56,6 +120,7 @@ public class Lc2hConfigScreen extends Screen {
     private final Screen parent;
     private final Lc2hConfigController controller;
     private final Lc2hConfigController.UiState uiState;
+    private final String uiLocale;
     private int contentLeft;
     private int contentRight;
 	    private int contentWidth;
@@ -118,10 +183,31 @@ public class Lc2hConfigScreen extends Screen {
     }
 
     public Lc2hConfigScreen(Screen parent) {
-        super(Component.translatable("lc2h.config.title"));
+        this(parent, new Lc2hConfigController(), preferredUiLocale());
+    }
+
+    private static String preferredUiLocale() {
+        if (ConfigManager.CONFIG != null && ConfigManager.CONFIG.uiLocale != null && !ConfigManager.CONFIG.uiLocale.isBlank()) {
+            return ConfigManager.CONFIG.uiLocale;
+        }
+        return ConfigManager.UI_LOCALE;
+    }
+
+    private Lc2hConfigScreen(Screen parent, Lc2hConfigController controller, String locale) {
+        super(UiTranslations.component(locale, "lc2h.config.title"));
         this.parent = parent;
-        this.controller = new Lc2hConfigController();
+        this.controller = controller;
         this.uiState = controller.getUiState();
+        this.uiLocale = normalizeLocale(locale);
+
+        this.cacheCapWarningTitle = tr("lc2h.config.modal.cache_budget.title");
+        this.cacheCapWarningWarning = tr("lc2h.config.modal.cache_budget.warning");
+        this.cacheCapContinueLabel = tr("lc2h.config.modal.cache_budget.continue");
+        this.cacheCapRevertLabel = tr("lc2h.config.modal.cache_budget.revert");
+        this.unsavedWarningTitle = tr("lc2h.config.modal.unsaved.title");
+        this.unsavedWarningSummary = tr("lc2h.config.modal.unsaved.summary");
+        this.unsavedSaveLabel = tr("lc2h.config.modal.unsaved.save");
+        this.unsavedDiscardLabel = tr("lc2h.config.modal.unsaved.discard");
 
         for (int i = 0; i < 25; i++) {
             particles.add(new Particle(0, 0, 0x33AAAAAA));
@@ -130,6 +216,21 @@ public class Lc2hConfigScreen extends Screen {
         for (int i = 0; i < 150; i++) {
             stars.add(new Star(0, 0));
         }
+    }
+
+    private static String normalizeLocale(String locale) {
+        if (locale == null || locale.isBlank()) {
+            return "en_us";
+        }
+        return locale.toLowerCase(Locale.ROOT).replace('-', '_');
+    }
+
+    private Component tr(String key, Object... args) {
+        return UiTranslations.component(uiLocale, key, args);
+    }
+
+    private String trRaw(String key, Object... args) {
+        return UiTranslations.format(uiLocale, key, args);
     }
 
     private EditBox blendWidthBox;
@@ -170,19 +271,19 @@ public class Lc2hConfigScreen extends Screen {
     private float restartLaterHover = 0f;
     private final int[] restartCloseRect = new int[4];
     private final int[] restartLaterRect = new int[4];
-    private static final Component RESTART_WARNING_TITLE = Component.translatable("lc2h.config.modal.restart_required.title");
-    private static final Component RESTART_CLOSE_LABEL = Component.translatable("lc2h.config.modal.restart_required.close_game");
-    private static final Component RESTART_LATER_LABEL = Component.translatable("lc2h.config.modal.restart_required.do_later");
-    private static final Component SERVER_RESTART_TITLE = Component.translatable("lc2h.config.modal.server_restart_required.title");
-    private static final Component SERVER_RESTART_ACTION = Component.translatable("lc2h.config.modal.server_restart_required.action");
+    private static final String RESTART_WARNING_TITLE_KEY = "lc2h.config.modal.restart_required.title";
+    private static final String RESTART_CLOSE_LABEL_KEY = "lc2h.config.modal.restart_required.close_game";
+    private static final String RESTART_LATER_LABEL_KEY = "lc2h.config.modal.restart_required.do_later";
+    private static final String SERVER_RESTART_TITLE_KEY = "lc2h.config.modal.server_restart_required.title";
+    private static final String SERVER_RESTART_ACTION_KEY = "lc2h.config.modal.server_restart_required.action";
 
     private boolean cacheCapWarningVisible = false;
     private float cacheCapWarningProgress = 0f;
-    private Component cacheCapWarningTitle = Component.translatable("lc2h.config.modal.cache_budget.title");
+    private Component cacheCapWarningTitle = Component.empty();
     private Component cacheCapWarningSummary = Component.empty();
     private Component cacheCapWarningWarning = Component.empty();
-    private Component cacheCapContinueLabel = Component.translatable("lc2h.config.modal.cache_budget.continue");
-    private Component cacheCapRevertLabel = Component.translatable("lc2h.config.modal.cache_budget.revert");
+    private Component cacheCapContinueLabel = Component.empty();
+    private Component cacheCapRevertLabel = Component.empty();
     private float cacheCapContinueHover = 0f;
     private float cacheCapRevertHover = 0f;
     private final int[] cacheCapContinueRect = new int[4];
@@ -193,10 +294,10 @@ public class Lc2hConfigScreen extends Screen {
 
     private boolean unsavedWarningVisible = false;
     private float unsavedWarningProgress = 0f;
-private Component unsavedWarningTitle = Component.translatable("lc2h.config.modal.unsaved.title");
-private Component unsavedWarningSummary = Component.translatable("lc2h.config.modal.unsaved.summary");
-private Component unsavedSaveLabel = Component.translatable("lc2h.config.modal.unsaved.save");
-private Component unsavedDiscardLabel = Component.translatable("lc2h.config.modal.unsaved.discard");
+private Component unsavedWarningTitle = Component.empty();
+private Component unsavedWarningSummary = Component.empty();
+private Component unsavedSaveLabel = Component.empty();
+private Component unsavedDiscardLabel = Component.empty();
 
     private float unsavedSaveHover = 0f;
     private float unsavedDiscardHover = 0f;
@@ -288,8 +389,8 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         this.restartWarningProgress = 0f;
         this.restartWarningSummary = Component.empty();
         this.restartWarningWarning = Component.empty();
-        this.restartWarningTitle = RESTART_WARNING_TITLE;
-        this.restartPrimaryLabel = RESTART_CLOSE_LABEL;
+        this.restartWarningTitle = tr(RESTART_WARNING_TITLE_KEY);
+        this.restartPrimaryLabel = tr(RESTART_CLOSE_LABEL_KEY);
         this.restartWarningServer = false;
         this.restartCloseHover = 0f;
         this.restartLaterHover = 0f;
@@ -333,123 +434,123 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         int columnWidth = (this.contentWidth - (columnCount - 1) * columnSpacing) / columnCount;
         LayoutHelper layout = new LayoutHelper(this.contentLeft, this.contentTop, columnCount, columnWidth, columnSpacing, 8);
 
-        addSectionHeader(layout, Component.translatable("lc2h.config.section.general"));
+        addSectionHeader(layout, tr("lc2h.config.section.general"));
         addToggle(layout,
-                Component.translatable("lc2h.config.option.async_double_block_batcher.title"),
+                tr("lc2h.config.option.async_double_block_batcher.title"),
                 working.enableAsyncDoubleBlockBatcher,
-                Component.translatable("lc2h.config.option.async_double_block_batcher.desc"),
+                tr("lc2h.config.option.async_double_block_batcher.desc"),
                 false, val -> working.enableAsyncDoubleBlockBatcher = val);
         addToggle(layout,
-                Component.translatable("lc2h.config.option.floating_vegetation_removal.title"),
+                tr("lc2h.config.option.floating_vegetation_removal.title"),
                 working.enableFloatingVegetationRemoval,
-                Component.translatable("lc2h.config.option.floating_vegetation_removal.desc"),
+                tr("lc2h.config.option.floating_vegetation_removal.desc"),
                 false, val -> working.enableFloatingVegetationRemoval = val);
         addToggle(layout,
-                Component.translatable("lc2h.config.option.explosion_debris.title"),
+                tr("lc2h.config.option.explosion_debris.title"),
                 working.enableExplosionDebris,
-                Component.translatable("lc2h.config.option.explosion_debris.desc"),
+                tr("lc2h.config.option.explosion_debris.desc"),
                 false,
                 val -> working.enableExplosionDebris = val);
         addToggle(layout,
-                Component.translatable("lc2h.config.option.lostcities_gen_lock.title"),
+                tr("lc2h.config.option.lostcities_gen_lock.title"),
                 working.enableLostCitiesGenerationLock,
-                Component.translatable("lc2h.config.option.lostcities_gen_lock.desc"),
+                tr("lc2h.config.option.lostcities_gen_lock.desc"),
                 false,
                 val -> working.enableLostCitiesGenerationLock = val);
         addToggle(layout,
-                Component.translatable("lc2h.config.option.lostcities_part_safety.title"),
+                tr("lc2h.config.option.lostcities_part_safety.title"),
                 working.enableLostCitiesPartSliceCompat,
-                Component.translatable("lc2h.config.option.lostcities_part_safety.desc"),
+                tr("lc2h.config.option.lostcities_part_safety.desc"),
                 false,
                 val -> working.enableLostCitiesPartSliceCompat = val);
-        addSectionHeader(layout, Component.translatable("lc2h.config.section.caching"));
+        addSectionHeader(layout, tr("lc2h.config.section.caching"));
         addToggle(layout,
-                Component.translatable("lc2h.config.option.cache_enforce_combined.title"),
+                tr("lc2h.config.option.cache_enforce_combined.title"),
                 working.cacheEnforceCombinedMax,
-                Component.translatable("lc2h.config.option.cache_enforce_combined.desc"),
+                tr("lc2h.config.option.cache_enforce_combined.desc"),
                 false,
                 val -> working.cacheEnforceCombinedMax = val);
         addToggle(layout,
-                Component.translatable("lc2h.config.option.cache_split_equal.title"),
+                tr("lc2h.config.option.cache_split_equal.title"),
                 working.cacheSplitEqual,
-                Component.translatable("lc2h.config.option.cache_split_equal.desc"),
+                tr("lc2h.config.option.cache_split_equal.desc"),
                 false,
                 val -> working.cacheSplitEqual = val);
         this.cacheCapBox = addNumberField(layout,
-                Component.translatable("lc2h.config.option.cache_combined_max_mb.title"),
-                Component.translatable("lc2h.config.option.cache_combined_max_mb.desc"),
+                tr("lc2h.config.option.cache_combined_max_mb.title"),
+                tr("lc2h.config.option.cache_combined_max_mb.desc"),
                 String.valueOf(working.cacheCombinedMaxMB), false);
         this.cacheCapBox.setFilter(this::isNumericInput);
         this.lc2hCacheBox = addNumberField(layout,
-                Component.translatable("lc2h.config.option.cache_lc2h_max_mb.title"),
-                Component.translatable("lc2h.config.option.cache_lc2h_max_mb.desc"),
+                tr("lc2h.config.option.cache_lc2h_max_mb.title"),
+                tr("lc2h.config.option.cache_lc2h_max_mb.desc"),
                 String.valueOf(working.cacheMaxMB), false);
         this.lc2hCacheBox.setFilter(this::isNumericInput);
         this.lostCitiesCacheBox = addNumberField(layout,
-                Component.translatable("lc2h.config.option.cache_lostcities_max_mb.title"),
-                Component.translatable("lc2h.config.option.cache_lostcities_max_mb.desc"),
+                tr("lc2h.config.option.cache_lostcities_max_mb.title"),
+                tr("lc2h.config.option.cache_lostcities_max_mb.desc"),
                 String.valueOf(working.cacheLostCitiesMaxMB), false);
         this.lostCitiesCacheBox.setFilter(this::isNumericInput);
         this.lostCitiesTtlBox = addNumberField(layout,
-                Component.translatable("lc2h.config.option.cache_lostcities_ttl_minutes.title"),
-                Component.translatable("lc2h.config.option.cache_lostcities_ttl_minutes.desc"),
+                tr("lc2h.config.option.cache_lostcities_ttl_minutes.title"),
+                tr("lc2h.config.option.cache_lostcities_ttl_minutes.desc"),
                 String.valueOf(working.cacheLostCitiesTtlMinutes), false);
         this.lostCitiesTtlBox.setFilter(this::isNumericInput);
         this.lostCitiesDiskTtlBox = addNumberField(layout,
-                Component.translatable("lc2h.config.option.cache_lostcities_disk_ttl_hours.title"),
-                Component.translatable("lc2h.config.option.cache_lostcities_disk_ttl_hours.desc"),
+                tr("lc2h.config.option.cache_lostcities_disk_ttl_hours.title"),
+                tr("lc2h.config.option.cache_lostcities_disk_ttl_hours.desc"),
                 String.valueOf(working.cacheLostCitiesDiskTtlHours), false);
         this.lostCitiesDiskTtlBox.setFilter(this::isNumericInput);
 
-        addSectionHeader(layout, Component.translatable("lc2h.config.section.statistics"));
+        addSectionHeader(layout, tr("lc2h.config.section.statistics"));
         addToggle(layout,
-                Component.translatable("lc2h.config.option.cache_stats_logging.title"),
+                tr("lc2h.config.option.cache_stats_logging.title"),
                 working.enableCacheStatsLogging,
-                Component.translatable("lc2h.config.option.cache_stats_logging.desc"),
+                tr("lc2h.config.option.cache_stats_logging.desc"),
                 false, val -> working.enableCacheStatsLogging = val);
         addToggle(layout,
-                Component.translatable("lc2h.config.option.hide_experimental_warning.title"),
+                tr("lc2h.config.option.hide_experimental_warning.title"),
                 working.hideExperimentalWarning,
-                Component.translatable("lc2h.config.option.hide_experimental_warning.desc"),
+                tr("lc2h.config.option.hide_experimental_warning.desc"),
                 false, val -> working.hideExperimentalWarning = val);
         addToggle(layout,
-                Component.translatable("lc2h.config.option.debug_logging.title"),
+                tr("lc2h.config.option.debug_logging.title"),
                 working.enableDebugLogging,
-                Component.translatable("lc2h.config.option.debug_logging.desc"),
+                tr("lc2h.config.option.debug_logging.desc"),
                 false, val -> working.enableDebugLogging = val);
-        addSectionHeader(layout, Component.translatable("lc2h.config.section.interface"));
+        addSectionHeader(layout, tr("lc2h.config.section.interface"));
         String accentValue = working.uiAccentColor == null ? "3A86FF" : working.uiAccentColor;
         this.accentColorBox = addTextField(layout,
-                Component.translatable("lc2h.config.option.ui_accent_color.title"),
-                Component.translatable("lc2h.config.option.ui_accent_color.desc"),
+                tr("lc2h.config.option.ui_accent_color.title"),
+                tr("lc2h.config.option.ui_accent_color.desc"),
                 accentValue, false, 9);
         this.accentColorBox.setFilter(this::isHexInput);
         this.accentColorBox.setResponder(value -> working.uiAccentColor = value);
-        addSectionHeader(layout, Component.translatable("lc2h.config.section.city_edge"));
+        addSectionHeader(layout, tr("lc2h.config.section.city_edge"));
         addToggle(layout,
-                Component.translatable("lc2h.config.option.city_blend_enabled.title"),
+                tr("lc2h.config.option.city_blend_enabled.title"),
                 working.cityBlendEnabled,
-                Component.translatable("lc2h.config.option.city_blend_enabled.desc"),
+                tr("lc2h.config.option.city_blend_enabled.desc"),
                 Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendEnabled = val);
         addToggle(layout,
-                Component.translatable("lc2h.config.option.city_blend_clear_trees.title"),
+                tr("lc2h.config.option.city_blend_clear_trees.title"),
                 working.cityBlendClearTrees,
-                Component.translatable("lc2h.config.option.city_blend_clear_trees.desc"),
+                tr("lc2h.config.option.city_blend_clear_trees.desc"),
                 Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendClearTrees = val);
         this.blendWidthBox = addNumberField(layout,
-                Component.translatable("lc2h.config.option.city_blend_width.title"),
-                Component.translatable("lc2h.config.option.city_blend_width.desc"),
+                tr("lc2h.config.option.city_blend_width.title"),
+                tr("lc2h.config.option.city_blend_width.desc"),
                 String.valueOf(working.cityBlendWidth), Lc2hConfigController.RESTART_CITY_EDGE);
         this.blendSoftnessBox = addNumberField(layout,
-                Component.translatable("lc2h.config.option.city_blend_softness.title"),
-                Component.translatable("lc2h.config.option.city_blend_softness.desc"),
+                tr("lc2h.config.option.city_blend_softness.title"),
+                tr("lc2h.config.option.city_blend_softness.desc"),
                 String.valueOf(working.cityBlendSoftness), Lc2hConfigController.RESTART_CITY_EDGE);
 
-        addSectionHeader(layout, Component.translatable("lc2h.config.section.benchmark"));
+        addSectionHeader(layout, tr("lc2h.config.section.benchmark"));
         addActionButton(layout,
-                Component.translatable("lc2h.config.option.benchmark.title"),
-                Component.translatable("lc2h.config.option.benchmark.desc"),
-                Component.translatable("lc2h.config.button.launch_benchmark"), btn -> {
+                tr("lc2h.config.option.benchmark.title"),
+                tr("lc2h.config.option.benchmark.desc"),
+                tr("lc2h.config.button.launch_benchmark"), btn -> {
                     if (controller.requestBenchmarkStart()) {
                         Minecraft.getInstance().setScreen(null);
                     }
@@ -472,22 +573,22 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         this.targetScrollOffset = Math.min(this.targetScrollOffset, this.maxScrollOffset);
 
         CustomButton applyButton = createAnimatedButton(this.contentLeft, footerY, 160, 20,
-                Component.translatable("lc2h.config.button.apply_save"), btn -> applyChangesFromUi(false), false);
+                tr("lc2h.config.button.apply_save"), btn -> applyChangesFromUi(false), false);
         addRenderableWidget(applyButton);
 
         CustomButton revertButton = createAnimatedButton(this.contentLeft + 172, footerY, 140, 20,
-                Component.translatable("lc2h.config.button.revert"), btn -> Minecraft.getInstance().setScreen(new Lc2hConfigScreen(parent)), false);
+                tr("lc2h.config.button.revert"), btn -> Minecraft.getInstance().setScreen(new Lc2hConfigScreen(parent, new Lc2hConfigController(), uiLocale)), false);
         addRenderableWidget(revertButton);
 
         int rightPrimaryX = this.contentRight - 160;
         int rightSecondaryX = rightPrimaryX - 172;
 
         CustomButton openConfigButton = createAnimatedButton(rightSecondaryX, footerY, 160, 20,
-                Component.translatable("lc2h.config.button.open_config_file"), btn -> controller.openConfigFile(), false);
+                tr("lc2h.config.button.open_config_file"), btn -> controller.openConfigFile(), false);
         addRenderableWidget(openConfigButton);
 
         CustomButton doneButton = createAnimatedButton(rightPrimaryX, footerY, 160, 20,
-                Component.translatable("gui.done"), btn -> onClose(), false);
+                tr("lc2h.config.button.done"), btn -> onClose(), false);
         addRenderableWidget(doneButton);
 
         initLanguageButton();
@@ -500,8 +601,8 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         int buttonW = 24;
         int buttonH = 20;
         int headerTop = this.headerBottom - 76;
-        int x = this.contentRight - buttonW;
-        int y = headerTop - 20;
+        int x = this.width - buttonW - 1;
+        int y = headerTop + 16;
         if (y < 0) {
             y = 0;
         }
@@ -515,15 +616,11 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         if (languageButton == null) {
             return;
         }
-        Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft == null) {
-            return;
-        }
         if (eligibleLocales.size() <= 1) {
-            languageButton.setTooltip(Tooltip.create(Component.translatable("lc2h.config.button.language.tooltip.none")));
+            languageButton.setTooltip(Tooltip.create(tr("lc2h.config.button.language.tooltip.none")));
             return;
         }
-        languageButton.setTooltip(Tooltip.create(Component.translatable("lc2h.config.button.language.tooltip", minecraft.options.languageCode)));
+        languageButton.setTooltip(Tooltip.create(tr("lc2h.config.button.language.tooltip", uiLocale)));
     }
 
     private void cycleLanguage() {
@@ -533,35 +630,16 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         }
         eligibleLocales = computeEligibleLocales(minecraft);
         if (eligibleLocales.size() <= 1) {
-            minecraft.reloadResourcePacks().thenRun(() -> minecraft.execute(() -> {
-                eligibleLocales = computeEligibleLocales(minecraft);
-                updateLanguageButtonTooltip();
-            }));
             updateLanguageButtonTooltip();
             return;
         }
-        String current = minecraft.options.languageCode;
-        int idx = eligibleLocales.indexOf(current);
+        int idx = eligibleLocales.indexOf(uiLocale);
         if (idx < 0) {
             idx = 0;
         }
         String next = eligibleLocales.get((idx + 1) % eligibleLocales.size());
-        if (next.equals(current)) {
-            updateLanguageButtonTooltip();
-            return;
-        }
-        try {
-            minecraft.getLanguageManager().setSelected(next);
-            minecraft.options.languageCode = next;
-            minecraft.options.save();
-            minecraft.reloadResourcePacks().thenRun(() -> minecraft.execute(() -> {
-                if (minecraft.screen == null) {
-                    minecraft.setScreen(this);
-                }
-                updateLanguageButtonTooltip();
-            }));
-        } catch (Throwable ignored) {
-        }
+        controller.setPreferredUiLocale(next);
+        minecraft.setScreen(new Lc2hConfigScreen(parent, controller, next));
     }
 
     private static List<String> computeEligibleLocales(Minecraft minecraft) {
@@ -580,26 +658,35 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         }
         List<String> keys = en.keySet().stream().sorted().collect(Collectors.toList());
 
-        Map<ResourceLocation, Resource> resources;
+        java.util.Set<String> candidates = new java.util.LinkedHashSet<>();
+        candidates.add("en_us");
+
         try {
-            resources = manager.listResources("lang", loc -> loc.getNamespace().equals(LC2H.MODID) && loc.getPath().endsWith(".json"));
-        } catch (Throwable t) {
-            return List.of("en_us");
+            var languages = minecraft.getLanguageManager().getLanguages();
+            for (String code : languages.keySet()) {
+                candidates.add(normalizeLocale(code));
+            }
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            Map<ResourceLocation, Resource> resources = manager.listResources("lang", loc -> loc.getNamespace().equals(LC2H.MODID) && loc.getPath().startsWith("lang/") && loc.getPath().endsWith(".json"));
+            for (ResourceLocation loc : resources.keySet()) {
+                String path = loc.getPath();
+                String locale = path.substring("lang/".length(), path.length() - ".json".length());
+                candidates.add(normalizeLocale(locale));
+            }
+        } catch (Throwable ignored) {
         }
 
         List<String> eligible = new ArrayList<>();
         eligible.add("en_us");
-        for (ResourceLocation loc : resources.keySet()) {
-            String path = loc.getPath();
-            if (!path.startsWith("lang/") || !path.endsWith(".json")) {
-                continue;
-            }
-            String locale = path.substring("lang/".length(), path.length() - ".json".length());
-            if (locale.equals("en_us")) {
+        for (String locale : candidates) {
+            if (locale == null || locale.isBlank() || locale.equals("en_us")) {
                 continue;
             }
 
-            JsonObject candidate = loadLangJson(manager, loc);
+            JsonObject candidate = loadLangJson(manager, ResourceLocation.fromNamespaceAndPath(LC2H.MODID, "lang/" + locale + ".json"));
             if (candidate == null || candidate.size() == 0) {
                 continue;
             }
@@ -633,8 +720,11 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
             return null;
         }
         try {
-            Resource res = manager.getResourceOrThrow(location);
-            try (var reader = new InputStreamReader(res.open(), StandardCharsets.UTF_8)) {
+            var opt = manager.getResource(location);
+            if (opt.isEmpty()) {
+                return null;
+            }
+            try (var reader = new InputStreamReader(opt.get().open(), StandardCharsets.UTF_8)) {
                 JsonElement el = JsonParser.parseReader(reader);
                 if (el == null || !el.isJsonObject()) {
                     return null;
@@ -660,10 +750,10 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         EntryPlacement placement = prepareEntry(layout, title, description, requiresRestart, 150, 20);
         final boolean[] state = { initialValue };
         CustomButton button = createAnimatedButton(placement.controlX(), placement.controlY(), placement.controlWidth(), placement.controlHeight(),
-                Component.translatable(state[0] ? "lc2h.ui.enabled" : "lc2h.ui.disabled"), b -> {
+                tr(state[0] ? "lc2h.ui.enabled" : "lc2h.ui.disabled"), b -> {
                     state[0] = !state[0];
                     onChange.accept(state[0]);
-                    b.setMessage(Component.translatable(state[0] ? "lc2h.ui.enabled" : "lc2h.ui.disabled"));
+                    b.setMessage(tr(state[0] ? "lc2h.ui.enabled" : "lc2h.ui.disabled"));
                 });
         addRenderableWidget(button);
     }
@@ -707,7 +797,7 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
             controlWidth = Math.max(96, columnWidth - textWidth - 12);
         }
         Component descText = requiresRestart
-                ? Component.empty().append(description).append(Component.translatable("lc2h.ui.restart_required_suffix"))
+                ? Component.empty().append(description).append(tr("lc2h.ui.restart_required_suffix"))
                 : description;
         List<FormattedCharSequence> lines = wrapText(descText, textWidth);
         int descHeight = lines.size() * this.font.lineHeight;
@@ -951,9 +1041,9 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
                 (0xFF << 24) | (accent & 0xFFFFFF),
                 (0x66 << 24) | (accent & 0xFFFFFF));
 
-        String subline = Component.translatable("lc2h.config.header.subline").getString();
-        renderCenteredTextWithGlow(graphics, this.font, Component.translatable("lc2h.config.header.subline"), centerX, 44, 0x88FFFFFF, 0x33333333);
-        String highlight = Component.translatable("lc2h.config.header.subline.highlight").getString();
+        String subline = trRaw("lc2h.config.header.subline");
+        renderCenteredTextWithGlow(graphics, this.font, tr("lc2h.config.header.subline"), centerX, 44, 0x88FFFFFF, 0x33333333);
+        String highlight = trRaw("lc2h.config.header.subline.highlight");
         int highlightIndex = subline.indexOf(highlight);
         if (highlightIndex >= 0) {
             int fullWidth = this.font.width(subline);
@@ -966,7 +1056,7 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         }
 
         renderCenteredTextWithGlow(graphics, this.font,
-                Component.translatable("lc2h.config.subtitle"),
+                tr("lc2h.config.subtitle"),
                 centerX, 62, 0x66FFFFFF, 0x22222222);
     }
 
@@ -1588,8 +1678,8 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         }
         if (controller.isBenchmarkRunning()) {
             if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
-                controller.requestUserCancelFromClient(Component.translatable("lc2h.benchmark.reason.user_pressed_esc").getString());
-                controller.cancelBenchmarkFeedback(Component.translatable("lc2h.benchmark.cancelled_by_user"), 0xFF5555);
+                controller.requestUserCancelFromClient(trRaw("lc2h.benchmark.reason.user_pressed_esc"));
+                controller.cancelBenchmarkFeedback(tr("lc2h.benchmark.cancelled_by_user"), 0xFF5555);
             }
             return true;
         }
@@ -1626,20 +1716,20 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
 
     private void showRestartWarning(String optionTitle) {
         restartWarningServer = shouldWarnServerRestart();
-        restartWarningTitle = restartWarningServer ? SERVER_RESTART_TITLE : RESTART_WARNING_TITLE;
-        restartPrimaryLabel = restartWarningServer ? SERVER_RESTART_ACTION : RESTART_CLOSE_LABEL;
+        restartWarningTitle = restartWarningServer ? tr(SERVER_RESTART_TITLE_KEY) : tr(RESTART_WARNING_TITLE_KEY);
+        restartPrimaryLabel = restartWarningServer ? tr(SERVER_RESTART_ACTION_KEY) : tr(RESTART_CLOSE_LABEL_KEY);
         if (restartWarningServer) {
             if (optionTitle == null || optionTitle.isBlank()) {
-                restartWarningSummary = Component.translatable("lc2h.config.modal.restart_required.summary_server");
+                restartWarningSummary = tr("lc2h.config.modal.restart_required.summary_server");
             } else {
-                restartWarningSummary = Component.translatable("lc2h.config.modal.restart_required.summary_server_option", optionTitle);
+                restartWarningSummary = tr("lc2h.config.modal.restart_required.summary_server_option", optionTitle);
             }
-            restartWarningWarning = Component.translatable("lc2h.config.modal.server_restart_required.warning");
+            restartWarningWarning = tr("lc2h.config.modal.server_restart_required.warning");
         } else if (optionTitle == null || optionTitle.isBlank()) {
-            restartWarningSummary = Component.translatable("lc2h.config.modal.restart_required.summary_client");
+            restartWarningSummary = tr("lc2h.config.modal.restart_required.summary_client");
             restartWarningWarning = Component.empty();
         } else {
-            restartWarningSummary = Component.translatable("lc2h.config.modal.restart_required.summary_client_option", optionTitle);
+            restartWarningSummary = tr("lc2h.config.modal.restart_required.summary_client_option", optionTitle);
             restartWarningWarning = Component.empty();
         }
         restartWarningVisible = true;
@@ -1648,7 +1738,7 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
     private void showCacheCapWarning(Lc2hConfigController.FormValues values, Lc2hConfigController.CacheCapChange change) {
         cacheCapPendingValues = values;
         cacheCapWarningSummary = change.summary();
-        cacheCapWarningWarning = Component.translatable("lc2h.config.modal.cache_budget.warning");
+        cacheCapWarningWarning = tr("lc2h.config.modal.cache_budget.warning");
         cacheCapWarningVisible = true;
     }
 
@@ -1803,7 +1893,7 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         if (!restartWarningWarning.getString().isEmpty()) {
             textY += 6;
             int warningColor = applyAlpha(0xFF4B4B, eased);
-            graphics.drawString(this.font, Component.translatable("lc2h.ui.warning"), drawX + 20, textY, warningColor);
+            graphics.drawString(this.font, tr("lc2h.ui.warning"), drawX + 20, textY, warningColor);
             textY += this.font.lineHeight + 2;
             List<FormattedCharSequence> warningLines = this.font.split(restartWarningWarning, textAreaWidth);
             int warningTextColor = applyAlpha(0xFFD25A, eased);
@@ -1843,7 +1933,7 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
                 restartCloseRect[0] + restartCloseRect[2] / 2,
                 restartCloseRect[1] + (restartCloseRect[3] - this.font.lineHeight) / 2 + 1,
                 buttonTextColor);
-        graphics.drawCenteredString(this.font, RESTART_LATER_LABEL,
+        graphics.drawCenteredString(this.font, tr(RESTART_LATER_LABEL_KEY),
                 restartLaterRect[0] + restartLaterRect[2] / 2,
                 restartLaterRect[1] + (restartLaterRect[3] - this.font.lineHeight) / 2 + 1,
                 buttonTextColor);
@@ -1895,7 +1985,7 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         if (!cacheCapWarningWarning.getString().isEmpty()) {
             textY += 6;
             int warningColor = applyAlpha(0xFF4B4B, eased);
-            graphics.drawString(this.font, Component.translatable("lc2h.ui.warning"), drawX + 20, textY, warningColor);
+            graphics.drawString(this.font, tr("lc2h.ui.warning"), drawX + 20, textY, warningColor);
             textY += this.font.lineHeight + 2;
             List<FormattedCharSequence> warningLines = this.font.split(cacheCapWarningWarning, textAreaWidth);
             int warningTextColor = applyAlpha(0xFFD25A, eased);

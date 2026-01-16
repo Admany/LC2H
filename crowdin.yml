@@ -3,6 +3,43 @@ api_token_env: CROWDIN_PERSONAL_TOKEN
 base_path: .
 preserve_hierarchy: true
 
+# Minecraft language files use lowercase with underscores (e.g. `en_us.json`).
+# Crowdin locales are typically `ll-CC` (e.g. `pt-BR`), so map them to MC-style
+# filenames to avoid renames causing translation imports to look like deletes.
+languages_mapping:
+  locale:
+    af-ZA: af_za
+    ar-SA: ar_sa
+    ca-ES: ca_es
+    cs-CZ: cs_cz
+    da-DK: da_dk
+    de-DE: de_de
+    el-GR: el_gr
+    en-US: en_us
+    es-ES: es_es
+    fi-FI: fi_fi
+    fr-FR: fr_fr
+    he-IL: he_il
+    hu-HU: hu_hu
+    it-IT: it_it
+    ja-JP: ja_jp
+    ko-KR: ko_kr
+    lt-LT: lt_lt
+    nl-NL: nl_nl
+    no-NO: no_no
+    pl-PL: pl_pl
+    pt-BR: pt_br
+    pt-PT: pt_pt
+    ro-RO: ro_ro
+    ru-RU: ru_ru
+    sr-SP: sr_sp
+    sv-SE: sv_se
+    tr-TR: tr_tr
+    uk-UA: uk_ua
+    vi-VN: vi_vn
+    zh-CN: zh_cn
+    zh-TW: zh_tw
+
 files:
   - source: /src/main/resources/assets/lc2h/lang/en_us.json
     translation: /src/main/resources/assets/lc2h/lang/%locale%.json
