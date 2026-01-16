@@ -1,7 +1,7 @@
 package org.admany.lc2h.compat;
 
 import net.minecraftforge.fml.ModList;
-import org.admany.lc2h.logging.LCLogger;
+import org.admany.lc2h.log.LCLogger;
 import java.util.concurrent.ExecutorService;
 
 public class C2MECompat {

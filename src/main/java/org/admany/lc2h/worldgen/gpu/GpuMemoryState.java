@@ -300,7 +300,7 @@ final class GpuMemoryState {
             boolean heapExceeded = usedMemory > MAX_TOTAL_MEMORY_BYTES || (maxMemory > 0 && usedMemory > (maxMemory * 0.85));
             if (heapExceeded) {
                 lastEmergencyCleanupTime = now;
-                if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+                if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                     LC2H.LOGGER.warn("High JVM memory usage: {} MB used of {} MB. Starting emergency cleanup.",
                         usedMemory / (1024 * 1024), maxMemory / (1024 * 1024));
                 } else {
@@ -340,7 +340,7 @@ final class GpuMemoryState {
             }
 
             long freedMemory = originalMemory - currentMemoryBytes;
-            if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+            if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                 LC2H.LOGGER.warn("Emergency cleanup removed {} entries, skipped {} recent entries, freed {} MB",
                     removed, skipped, freedMemory / (1024 * 1024));
             } else {
@@ -349,13 +349,13 @@ final class GpuMemoryState {
             }
 
             if (freedMemory > 0) {
-                if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+                if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                     LC2H.LOGGER.info("Emergency cleanup finished; GPU caches trimmed to ease memory pressure");
                 } else {
                     LC2H.LOGGER.debug("Emergency cleanup finished; GPU caches trimmed to ease memory pressure");
                 }
             } else {
-                if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+                if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                     LC2H.LOGGER.warn("Emergency cleanup could not free memory because entries were too recent");
                 } else {
                     LC2H.LOGGER.debug("Emergency cleanup could not free memory because entries were too recent");
@@ -650,7 +650,7 @@ final class GpuMemoryState {
     static void clearQuantifiedAPICaches() {
         try {
             CacheManager.clearAllCaches();
-            if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+            if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                 LC2H.LOGGER.info("Quantified API caches cleared");
             } else {
                 LC2H.LOGGER.debug("Quantified API caches cleared");
@@ -719,7 +719,7 @@ final class GpuMemoryState {
             emergencyCleanup();
 
             if (MEMORY_SIZES.isEmpty() && currentMemoryBytes == 0) {
-                if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+                if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                     LC2H.LOGGER.warn("GPU caches empty; clearing Quantified API caches to reduce memory pressure");
                 } else {
                     LC2H.LOGGER.debug("GPU caches empty; clearing Quantified API caches to reduce memory pressure");

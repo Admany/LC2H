@@ -24,10 +24,10 @@ import net.minecraftforge.event.level.BlockEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.admany.lc2h.LC2H;
-import org.admany.lc2h.async.AsyncManager;
-import org.admany.lc2h.async.Priority;
-import org.admany.lc2h.logging.LCLogger;
-import org.admany.lc2h.logging.config.ConfigManager;
+import org.admany.lc2h.concurrency.async.AsyncManager;
+import org.admany.lc2h.concurrency.async.Priority;
+import org.admany.lc2h.log.LCLogger;
+import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.util.batch.CpuBatchScheduler;
 import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.util.server.ServerTickLoad;
@@ -160,6 +160,9 @@ public class ChunkPostProcessor {
     private record ChunkScanKey(ResourceLocation dimension, int chunkX, int chunkZ) {
     }
 
+    private static final java.util.concurrent.atomic.AtomicReference<java.lang.reflect.Method> WORLDGENREGION_LEVEL_METHOD =
+        new java.util.concurrent.atomic.AtomicReference<>();
+
     public static void markForRemovalIfFloating(net.minecraft.server.level.WorldGenRegion region, BlockPos pos) {
         if (!ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL) return;
 
@@ -169,13 +172,52 @@ public class ChunkPostProcessor {
         BlockPos below = pos.below();
         if (region.isEmptyBlock(below) || !region.getBlockState(below).isCollisionShapeFullBlock(region, below)) {
             try {
-                ServerLevel level = region.getLevel();
+                ServerLevel level = resolveServerLevel(region);
                 if (level != null) {
                     enqueueFloatingCheck(level, pos);
                 }
             } catch (Throwable ignored) {
             }
         }
+    }
+
+    private static ServerLevel resolveServerLevel(net.minecraft.server.level.WorldGenRegion region) {
+        if (region == null) {
+            return null;
+        }
+        java.lang.reflect.Method method = WORLDGENREGION_LEVEL_METHOD.get();
+        if (method == null || method.getDeclaringClass() != region.getClass()) {
+            method = findWorldGenRegionLevelMethod(region.getClass());
+            if (method != null) {
+                WORLDGENREGION_LEVEL_METHOD.set(method);
+            }
+        }
+        if (method == null) {
+            return null;
+        }
+        try {
+            Object value = method.invoke(region);
+            return value instanceof ServerLevel level ? level : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static java.lang.reflect.Method findWorldGenRegionLevelMethod(Class<?> type) {
+        // Prefer newer method names when present.
+        try {
+            java.lang.reflect.Method m = type.getMethod("getServerLevel");
+            m.setAccessible(true);
+            return m;
+        } catch (Throwable ignored) {
+        }
+        try {
+            java.lang.reflect.Method m = type.getMethod("getLevel");
+            m.setAccessible(true);
+            return m;
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     @SubscribeEvent
@@ -939,12 +981,6 @@ public class ChunkPostProcessor {
             }
             return floatingScanEnabled && isTracked(state.getBlock());
         });
-    }
-
-    private static boolean chunkHasInterestingBlocks(LevelChunk chunk) {
-        boolean floatingScanEnabled = ENABLE_FLOATING_SCAN && ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL;
-        boolean doubleBlockEnabled = ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER;
-        return chunkHasInterestingBlocks(chunk, floatingScanEnabled, doubleBlockEnabled);
     }
 
     private static boolean chunkHasInterestingBlocks(LevelChunk chunk,

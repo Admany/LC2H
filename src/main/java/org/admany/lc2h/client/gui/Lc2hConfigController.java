@@ -4,11 +4,12 @@ import net.minecraft.Util;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
 import net.minecraftforge.fml.loading.FMLPaths;
 import org.admany.lc2h.LC2H;
-import org.admany.lc2h.benchmark.BenchmarkManager;
-import org.admany.lc2h.logging.config.ConfigManager;
-import org.admany.lc2h.network.ConfigSyncNetwork;
+import org.admany.lc2h.dev.benchmark.BenchmarkManager;
+import org.admany.lc2h.config.ConfigManager;
+import org.admany.lc2h.config.sync.ConfigSyncNetwork;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -69,7 +70,7 @@ final class Lc2hConfigController {
     boolean requestBenchmarkStart() {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft == null || minecraft.level == null || minecraft.player == null) {
-            statusMessage = Component.literal("You need to be in a world to run the benchmark.");
+            statusMessage = Component.translatable("lc2h.config.status.need_world_for_benchmark");
             statusColor = 0xFF5555;
             return false;
         }
@@ -128,10 +129,10 @@ final class Lc2hConfigController {
                 ConfigManager.writePrettyJsonConfig(ConfigManager.CONFIG != null ? ConfigManager.CONFIG : new ConfigManager.Config());
             }
             Util.getPlatform().openFile(configPath.toFile());
-            statusMessage = Component.literal("Opened config file in system editor");
+            statusMessage = Component.translatable("lc2h.config.status.opened_config_file");
             statusColor = 0x55FF55;
         } catch (Exception ex) {
-            statusMessage = Component.literal("Failed to open config file: " + ex.getMessage());
+            statusMessage = Component.translatable("lc2h.config.status.failed_open_config_file", ex.getMessage());
             statusColor = 0xFF5555;
         }
     }
@@ -165,32 +166,51 @@ final class Lc2hConfigController {
         int requestedTtl = reqTtl != null ? clampIntRange(reqTtl, CACHE_TTL_MIN_MINUTES, CACHE_TTL_MAX_MINUTES) : currentTtl;
         int requestedDiskTtl = reqDiskTtl != null ? clampIntRange(reqDiskTtl, CACHE_TTL_MIN_MINUTES, CACHE_TTL_MAX_MINUTES) : currentDiskTtl;
 
-        StringBuilder summary = new StringBuilder();
+        MutableComponent summary = Component.empty();
+        boolean any = false;
         if (requestedCombined != currentCombined) {
-            appendSummary(summary, "Combined: " + currentCombined + " -> " + requestedCombined + " MB");
+            summary.append(any ? Component.literal("\n") : Component.empty())
+                .append(Component.translatable("lc2h.config.cache_change.combined", currentCombined, requestedCombined));
+            any = true;
         }
         if (requestedLc2h != currentLc2h) {
-            appendSummary(summary, "LC2H: " + currentLc2h + " -> " + requestedLc2h + " MB");
+            summary.append(any ? Component.literal("\n") : Component.empty())
+                .append(Component.translatable("lc2h.config.cache_change.lc2h", currentLc2h, requestedLc2h));
+            any = true;
         }
         if (requestedLost != currentLost) {
-            appendSummary(summary, "Lost Cities: " + currentLost + " -> " + requestedLost + " MB");
+            summary.append(any ? Component.literal("\n") : Component.empty())
+                .append(Component.translatable("lc2h.config.cache_change.lostcities", currentLost, requestedLost));
+            any = true;
         }
         if (currentEnforce != uiState.cacheEnforceCombinedMax) {
-            appendSummary(summary, "Combined enforcement: " + (currentEnforce ? "on" : "off") + " -> " + (uiState.cacheEnforceCombinedMax ? "on" : "off"));
+            summary.append(any ? Component.literal("\n") : Component.empty())
+                .append(Component.translatable("lc2h.config.cache_change.combined_enforcement",
+                    Component.translatable(currentEnforce ? "options.on" : "options.off"),
+                    Component.translatable(uiState.cacheEnforceCombinedMax ? "options.on" : "options.off")));
+            any = true;
         }
         if (currentSplit != uiState.cacheSplitEqual) {
-            appendSummary(summary, "Split evenly: " + (currentSplit ? "on" : "off") + " -> " + (uiState.cacheSplitEqual ? "on" : "off"));
+            summary.append(any ? Component.literal("\n") : Component.empty())
+                .append(Component.translatable("lc2h.config.cache_change.split_evenly",
+                    Component.translatable(currentSplit ? "options.on" : "options.off"),
+                    Component.translatable(uiState.cacheSplitEqual ? "options.on" : "options.off")));
+            any = true;
         }
         if (requestedTtl != currentTtl) {
-            appendSummary(summary, "Lost Cities RAM TTL: " + currentTtl + " -> " + requestedTtl + " min");
+            summary.append(any ? Component.literal("\n") : Component.empty())
+                .append(Component.translatable("lc2h.config.cache_change.lostcities_ram_ttl", currentTtl, requestedTtl));
+            any = true;
         }
         if (requestedDiskTtl != currentDiskTtl) {
-            appendSummary(summary, "Lost Cities disk TTL: " + currentDiskTtl + " -> " + requestedDiskTtl + " hr");
+            summary.append(any ? Component.literal("\n") : Component.empty())
+                .append(Component.translatable("lc2h.config.cache_change.lostcities_disk_ttl", currentDiskTtl, requestedDiskTtl));
+            any = true;
         }
-        if (summary.length() == 0) {
+        if (!any) {
             return null;
         }
-        return new CacheCapChange(summary.toString());
+        return new CacheCapChange(summary);
     }
 
     int getCurrentCacheMaxMb() {
@@ -225,10 +245,10 @@ final class Lc2hConfigController {
             boolean sent = ConfigSyncNetwork.sendApplyRequest(updated);
             if (showStatus) {
                 if (sent) {
-                    statusMessage = Component.literal("Sent config changes to server (OP only).");
+                    statusMessage = Component.translatable("lc2h.config.status.sent_config_to_server");
                     statusColor = 0x55FF55;
                 } else {
-                    statusMessage = Component.literal("Failed to send config to server. Ensure config sync is reachable.");
+                    statusMessage = Component.translatable("lc2h.config.status.failed_send_config_to_server");
                     statusColor = 0xFF5555;
                 }
             }
@@ -241,10 +261,10 @@ final class Lc2hConfigController {
 
         if (showStatus) {
             if (needsRestart && (minecraft == null || minecraft.getSingleplayerServer() == null)) {
-                statusMessage = Component.literal("Saved. One or more changes require a server restart to take effect.");
+                statusMessage = Component.translatable("lc2h.config.status.saved_restart_required");
                 statusColor = 0xFF5555;
             } else {
-                statusMessage = Component.literal("Saved and applied.");
+                statusMessage = Component.translatable("lc2h.config.status.saved_applied");
                 statusColor = 0x55FF55;
             }
         }
@@ -351,13 +371,6 @@ final class Lc2hConfigController {
 
     private int clampCacheMaxMb(int value) {
         return Math.max(CACHE_CAP_MIN_MB, Math.min(CACHE_CAP_MAX_MB, value));
-    }
-
-    private void appendSummary(StringBuilder sb, String entry) {
-        if (sb.length() > 0) {
-            sb.append("; ");
-        }
-        sb.append(entry);
     }
 
     private int clampIntRange(int value, int min, int max) {
@@ -555,7 +568,7 @@ final class Lc2hConfigController {
         public boolean cityBlendClearTrees;
     }
 
-    record CacheCapChange(String summary) {
+    record CacheCapChange(Component summary) {
     }
 
     @FunctionalInterface

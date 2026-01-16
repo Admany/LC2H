@@ -1,6 +1,6 @@
 package org.admany.lc2h.worldgen;
 
-import org.admany.lc2h.logging.config.ConfigManager;
+import org.admany.lc2h.config.ConfigManager;
 
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;

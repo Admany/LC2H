@@ -32,7 +32,7 @@ public final class TweaksStagedPipeline {
             baseFuture = CompletableFuture.completedFuture(cached.get());
         } else {
             CompletableFuture<Void> scatterFuture = scatterStage != null
-                    ? org.admany.lc2h.async.AsyncManager.submitTask("scatter", scatterStage, null, org.admany.lc2h.async.Priority.LOW)
+                    ? org.admany.lc2h.concurrency.async.AsyncManager.submitTask("scatter", scatterStage, null, org.admany.lc2h.concurrency.async.Priority.LOW)
                     : CompletableFuture.completedFuture(null);
 
             baseFuture = scatterFuture.thenComposeAsync(

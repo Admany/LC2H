@@ -1,6 +1,9 @@
 package org.admany.lc2h.data.cache;
 
 import org.admany.lc2h.LC2H;
+import org.admany.quantified.api.QuantifiedAPI;
+import org.admany.quantified.core.common.cache.CacheManager;
+import org.admany.quantified.core.common.cache.interfaces.ThreadSafeCache;
 
 import java.time.Duration;
 import java.util.Map;
@@ -8,7 +11,6 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
 
 public class FeatureCache {
 
@@ -27,17 +29,16 @@ public class FeatureCache {
     private static final String MEMORY_CACHE = "feature_memory";
     private static final String DISK_CACHE = "feature_disk";
 
-    private static Object cacheManager;
+    private static ThreadSafeCache<String, Object> quantifiedMemoryCache;
+    private static ThreadSafeCache<String, Object> quantifiedDiskCache;
     private static boolean quantifiedAvailable = false;
 
     static {
         try {
-            Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
-
-            quantifiedApiClass.getMethod("register", String.class).invoke(null, LC2H.MODID);
-            cacheManager = quantifiedApiClass.getMethod("getCacheManager").invoke(null);
+            QuantifiedAPI.register(LC2H.MODID);
+            initQuantifiedCaches();
             quantifiedAvailable = true;
-            if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+            if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                 LC2H.LOGGER.info("[LC2H] FeatureCache: Quantified API integration enabled");
             } else {
                 LC2H.LOGGER.debug("[LC2H] FeatureCache: Quantified API integration enabled");
@@ -53,22 +54,15 @@ public class FeatureCache {
             return false;
         }
         try {
-            Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
-            try {
-                // Bind the Quantified handle to this thread if needed.
-                quantifiedApiClass.getMethod("register", String.class).invoke(null, LC2H.MODID);
-            } catch (NoSuchMethodException ignored) {
-                // Older/newer API variants: fall back to the extended signature if available.
-                quantifiedApiClass.getMethod("register", String.class, String.class, String.class)
-                    .invoke(null, LC2H.MODID, LC2H.MODID, null);
-            }
-            if (cacheManager == null) {
-                cacheManager = quantifiedApiClass.getMethod("getCacheManager").invoke(null);
+            QuantifiedAPI.register(LC2H.MODID);
+            if (quantifiedMemoryCache == null || quantifiedDiskCache == null) {
+                initQuantifiedCaches();
             }
             return true;
         } catch (Throwable t) {
             quantifiedAvailable = false;
-            cacheManager = null;
+            quantifiedMemoryCache = null;
+            quantifiedDiskCache = null;
             LC2H.LOGGER.debug("[LC2H] FeatureCache: Quantified API unavailable for this thread", t);
             return false;
         }
@@ -82,22 +76,22 @@ public class FeatureCache {
         try {
             if (value == null) return;
 
-            String cacheName = useDiskCache ? DISK_CACHE : MEMORY_CACHE;
             long now = System.currentTimeMillis();
 
             if (ensureQuantifiedReady()) {
-                Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
                 if (useDiskCache) {
                     try {
-                        quantifiedApiClass.getMethod("putCached", String.class, String.class, Object.class, Duration.class, long.class, boolean.class)
-                            .invoke(null, cacheName, key, value, DISK_TTL, QUANTIFIED_MAX_ENTRIES, true);
+                        if (quantifiedDiskCache != null) {
+                            quantifiedDiskCache.put(key, value);
+                        }
                     } catch (Exception e) {
                         LC2H.LOGGER.debug("[LC2H] Could not use disk cache", e);
                     }
                 } else {
                     try {
-                        quantifiedApiClass.getMethod("putCached", String.class, String.class, Object.class, Duration.class, long.class, boolean.class)
-                            .invoke(null, cacheName, key, value, MEMORY_TTL, QUANTIFIED_MAX_ENTRIES, true);
+                        if (quantifiedMemoryCache != null) {
+                            quantifiedMemoryCache.put(key, value);
+                        }
                     } catch (Exception e) {
                         LC2H.LOGGER.debug("[LC2H] Could not use memory cache", e);
                     }
@@ -134,15 +128,15 @@ public class FeatureCache {
 
             Object value = null;
             if (ensureQuantifiedReady()) {
-                Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
-                String cacheName = checkDiskCache ? DISK_CACHE : MEMORY_CACHE;
                 try {
                     if (checkDiskCache) {
-                        value = quantifiedApiClass.getMethod("getCached", String.class, String.class, Supplier.class, Duration.class, long.class, boolean.class)
-                            .invoke(null, new Object[]{cacheName, key, (Supplier<Object>) () -> null, DISK_TTL, QUANTIFIED_MAX_ENTRIES, true});
+                        if (quantifiedDiskCache != null) {
+                            value = quantifiedDiskCache.getIfPresent(key);
+                        }
                     } else {
-                        value = quantifiedApiClass.getMethod("getCached", String.class, String.class, Supplier.class, Duration.class, long.class, boolean.class)
-                            .invoke(null, new Object[]{cacheName, key, (Supplier<Object>) () -> null, MEMORY_TTL, QUANTIFIED_MAX_ENTRIES, true});
+                        if (quantifiedMemoryCache != null) {
+                            value = quantifiedMemoryCache.getIfPresent(key);
+                        }
                     }
                 } catch (Exception e) {
                     LC2H.LOGGER.debug("[LC2H] Could not retrieve from Quantified cache", e);
@@ -173,11 +167,18 @@ public class FeatureCache {
 
             if (ensureQuantifiedReady()) {
                 if (clearDiskCache) {
-                    cacheManager.getClass().getMethod("clearAllCaches").invoke(cacheManager);
-                    quantifiedEntries = (Long) cacheManager.getClass().getMethod("getTotalCacheEntryCount").invoke(cacheManager);
+                    if (quantifiedMemoryCache != null) {
+                        quantifiedMemoryCache.invalidateAll();
+                    }
+                    if (quantifiedDiskCache != null) {
+                        quantifiedDiskCache.invalidateAll();
+                    }
+                    quantifiedEntries = snapshotQuantifiedEntries();
                 } else {
-                    cacheManager.getClass().getMethod("clearCache", String.class).invoke(cacheManager, MEMORY_CACHE);
-                    quantifiedEntries = (Long) cacheManager.getClass().getMethod("getCacheEntryCount", String.class).invoke(cacheManager, MEMORY_CACHE);
+                    if (quantifiedMemoryCache != null) {
+                        quantifiedMemoryCache.invalidateAll();
+                    }
+                    quantifiedEntries = cacheSize(quantifiedMemoryCache);
                 }
             }
 
@@ -199,7 +200,7 @@ public class FeatureCache {
             localEntries = pruneLocalEntriesByAge(maxAgeMs);
 
             if (ensureQuantifiedReady()) {
-                quantifiedEntries = (Long) cacheManager.getClass().getMethod("clearOldCaches", long.class).invoke(cacheManager, maxAgeMs);
+                quantifiedEntries = snapshotQuantifiedEntries();
             }
 
             if (localEntries > 0 || (quantifiedEntries != null && quantifiedEntries > 0)) {
@@ -235,7 +236,7 @@ public class FeatureCache {
     public static long getMemoryUsageMB() {
         if (ensureQuantifiedReady()) {
             try {
-                return (Long) cacheManager.getClass().getMethod("getTotalCacheSizeMB").invoke(cacheManager);
+                return CacheManager.getTotalCacheSize() / (1024L * 1024L);
             } catch (Exception e) {
                 LC2H.LOGGER.debug("[LC2H] Could not get memory usage from cache manager", e);
             }
@@ -245,13 +246,6 @@ public class FeatureCache {
     }
 
     public static boolean isMemoryPressureHigh() {
-        if (ensureQuantifiedReady()) {
-            try {
-                return (Boolean) cacheManager.getClass().getMethod("isMemoryPressureHigh").invoke(cacheManager);
-            } catch (Exception e) {
-                LC2H.LOGGER.debug("[LC2H] Could not check memory pressure from cache manager", e);
-            }
-        }
         pruneExpiredLocalEntries(System.currentTimeMillis());
         return memoryCache.size() > MAX_MEMORY_CACHE_SIZE * 0.9;
     }
@@ -259,7 +253,12 @@ public class FeatureCache {
     public static void triggerMemoryPressureCleanup() {
         if (ensureQuantifiedReady()) {
             try {
-                cacheManager.getClass().getMethod("triggerMemoryPressureCleanup").invoke(cacheManager);
+                if (quantifiedMemoryCache != null) {
+                    quantifiedMemoryCache.invalidateAll();
+                }
+                if (quantifiedDiskCache != null) {
+                    quantifiedDiskCache.invalidateAll();
+                }
             } catch (Exception e) {
                 LC2H.LOGGER.debug("[LC2H] Could not trigger memory pressure cleanup", e);
             }
@@ -284,19 +283,18 @@ public class FeatureCache {
 
         if (ensureQuantifiedReady()) {
             try {
-                @SuppressWarnings("unchecked")
-                Set<String> cacheNames = (Set<String>) cacheManager.getClass().getMethod("getCacheNames").invoke(cacheManager);
+                Set<String> cacheNames = CacheManager.inventory().statsByName().keySet();
                 if (!cacheNames.isEmpty()) {
                     sb.append(", caches=[");
                     for (String name : cacheNames) {
-                        try {
-                            long entryCount = (Long) cacheManager.getClass().getMethod("getCacheEntryCount", String.class).invoke(cacheManager, name);
-                            sb.append(name).append("(").append(entryCount).append("),");
-                        } catch (Exception e) {
+                        ThreadSafeCache<String, Object> cache = CacheManager.lookup(name);
+                        if (cache != null) {
+                            sb.append(name).append("(").append(cacheSize(cache)).append("),");
+                        } else {
                             sb.append(name).append("(?),");
                         }
                     }
-                    sb.setLength(sb.length() - 1); // Remove last comma
+                    sb.setLength(sb.length() - 1);
                     sb.append("]");
                 }
             } catch (Exception e) {
@@ -314,7 +312,7 @@ public class FeatureCache {
 
         if (ensureQuantifiedReady()) {
             try {
-                quantified = (Long) cacheManager.getClass().getMethod("getTotalCacheEntryCount").invoke(cacheManager);
+                quantified = snapshotQuantifiedEntries();
             } catch (Exception e) {
                 LC2H.LOGGER.debug("[LC2H] Could not get cache entry count from cache manager", e);
             }
@@ -332,10 +330,9 @@ public class FeatureCache {
 
             if (quantifiedAvailable) {
                 try {
-                    Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
-                    Boolean isConnected = (Boolean) quantifiedApiClass.getMethod("isConnected", String.class).invoke(null, LC2H.MODID);
-                    if (isConnected != null && isConnected) {
-                        quantifiedApiClass.getMethod("disconnect", String.class).invoke(null, LC2H.MODID);
+                    boolean isConnected = QuantifiedAPI.isConnected(LC2H.MODID);
+                    if (isConnected) {
+                        QuantifiedAPI.disconnect(LC2H.MODID);
                         LC2H.LOGGER.info("[LC2H] FeatureCache: Disconnected from Quantified API");
                     } else {
                         LC2H.LOGGER.debug("[LC2H] FeatureCache: Already disconnected from Quantified API");
@@ -348,7 +345,8 @@ public class FeatureCache {
             memoryCache.clear();
             LC2H.LOGGER.debug("[LC2H] FeatureCache: Local cache cleared");
 
-            cacheManager = null;
+            quantifiedMemoryCache = null;
+            quantifiedDiskCache = null;
             quantifiedAvailable = false;
 
             LC2H.LOGGER.info("[LC2H] FeatureCache: Shutdown complete");
@@ -365,15 +363,15 @@ public class FeatureCache {
 
             if (quantifiedAvailable) {
                 try {
-                    Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
-                    quantifiedApiClass.getMethod("disconnect", String.class).invoke(null, LC2H.MODID);
+                    QuantifiedAPI.disconnect(LC2H.MODID);
                     LC2H.LOGGER.info("[LC2H] FeatureCache: Force disconnected from Quantified API");
                 } catch (Exception e) {
                     LC2H.LOGGER.debug("[LC2H] FeatureCache: Quantified API already shut down", e);
                 }
             }
 
-            cacheManager = null;
+            quantifiedMemoryCache = null;
+            quantifiedDiskCache = null;
             quantifiedAvailable = false;
 
             LC2H.LOGGER.info("[LC2H] FeatureCache: Force shutdown complete");
@@ -447,6 +445,51 @@ public class FeatureCache {
             return memoryCache.keySet().iterator().next();
         }
         return oldestKey;
+    }
+
+    private static void initQuantifiedCaches() {
+        ThreadSafeCache<String, Object> memory = CacheManager.lookup(MEMORY_CACHE);
+        if (memory == null) {
+            memory = CacheManager.register(
+                MEMORY_CACHE,
+                QUANTIFIED_MAX_ENTRIES,
+                MEMORY_TTL,
+                true,
+                false,
+                false
+            );
+        }
+        ThreadSafeCache<String, Object> disk = CacheManager.lookup(DISK_CACHE);
+        if (disk == null) {
+            disk = CacheManager.register(
+                DISK_CACHE,
+                QUANTIFIED_MAX_ENTRIES,
+                DISK_TTL,
+                true,
+                true,
+                true
+            );
+        }
+        quantifiedMemoryCache = memory;
+        quantifiedDiskCache = disk;
+    }
+
+    private static long cacheSize(ThreadSafeCache<String, Object> cache) {
+        if (cache == null) {
+            return 0L;
+        }
+        try {
+            return cache.size();
+        } catch (Throwable t) {
+            return 0L;
+        }
+    }
+
+    private static Long snapshotQuantifiedEntries() {
+        long total = 0L;
+        total += cacheSize(quantifiedMemoryCache);
+        total += cacheSize(quantifiedDiskCache);
+        return total;
     }
 
     private static final class LocalEntry {

@@ -7,7 +7,7 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.Level;
 import org.admany.lc2h.LC2H;
-import org.admany.lc2h.mixin.accessor.MultiChunkAccessor;
+import org.admany.lc2h.mixin.accessor.lostcities.MultiChunkAccessor;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;

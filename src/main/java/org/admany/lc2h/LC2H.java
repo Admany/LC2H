@@ -14,34 +14,33 @@ import net.minecraftforge.registries.DeferredRegister;
 import net.minecraftforge.registries.ForgeRegistries;
 import net.minecraftforge.event.TickEvent;
 import org.admany.lc2h.compat.C2MECompat;
-import org.admany.lc2h.world.VineClusterCleaner;
+import org.admany.lc2h.world.cleanup.VineClusterCleaner;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.concurrent.atomic.AtomicLong;
-import org.admany.lc2h.diagnostics.DiagnosticsReporter;
-import org.admany.lc2h.diagnostics.StallDetector;
-import org.admany.lc2h.diagnostics.ChunkGenTracker;
-import org.admany.lc2h.logging.config.ConfigManager;
+import org.admany.lc2h.dev.diagnostics.DiagnosticsReporter;
+import org.admany.lc2h.dev.diagnostics.StallDetector;
+import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
+import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.client.LC2HClient;
-import org.admany.lc2h.network.ConfigSyncNetwork;
-import org.admany.lc2h.debug.chunk.ChunkDebugNetwork;
-import org.admany.lc2h.debug.chunk.ChunkDebugManager;
-import org.admany.lc2h.debug.chunk.ChunkDebugExporter;
-import org.admany.lc2h.debug.frustum.FrustumDebugManager;
-import org.admany.lc2h.debug.frustum.FrustumDebugNetwork;
+import org.admany.lc2h.config.sync.ConfigSyncNetwork;
+import org.admany.lc2h.dev.debug.chunk.ChunkDebugNetwork;
+import org.admany.lc2h.dev.debug.chunk.ChunkDebugManager;
+import org.admany.lc2h.dev.debug.chunk.ChunkDebugExporter;
+import org.admany.lc2h.dev.debug.frustum.FrustumDebugManager;
+import org.admany.lc2h.dev.debug.frustum.FrustumDebugNetwork;
 import org.admany.lc2h.util.log.ChatMessenger;
 import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
 import org.admany.lc2h.worldgen.async.planner.PlannerBatchQueue;
 import org.admany.lc2h.worldgen.async.planner.PlannerTaskKind;
-import org.admany.lc2h.core.MainThreadChunkApplier;
+import org.admany.lc2h.worldgen.apply.MainThreadChunkApplier;
 import org.admany.lc2h.tweaks.TweaksActorSystem;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
-import org.admany.lc2h.util.spawn.SpawnSearchScheduler;
-import org.admany.lc2h.diagnostics.ViewCullingStats;
+import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
 import org.admany.quantified.api.QuantifiedAPI;
 import org.admany.quantified.core.common.cache.CacheManager;
 import org.admany.quantified.core.common.async.task.ModPriorityManager;
@@ -54,10 +53,12 @@ import net.minecraft.commands.CommandSourceStack;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.ChunkPos;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.setup.Registration;
 import mcjty.lostcities.worldgen.IDimensionInfo;
+import mcjty.lostcities.config.LostCityProfile;
 import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.server.level.ServerLevel;
 import java.util.Locale;
@@ -80,6 +81,10 @@ public class LC2H {
     private static final int WARMUP_PREFETCH_INTERVAL_TICKS =
         Math.max(1, Integer.getInteger("lc2h.warmup.prefetchIntervalTicks", 20));
     private static final AtomicLong LAST_WARMUP_PREFETCH_TICK = new AtomicLong(-1);
+    private static final long ASYNC_START_DELAY_TICKS = Math.max(0L,
+        Long.getLong("lc2h.async.startDelayTicks", 200L));
+    private static final java.util.concurrent.atomic.AtomicLong ASYNC_START_TICK = new java.util.concurrent.atomic.AtomicLong(-1L);
+    private static final java.util.concurrent.atomic.AtomicBoolean ASYNC_DELAYED = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     @SuppressWarnings("removal")
     public LC2H() {
@@ -109,7 +114,7 @@ public class LC2H {
 
         DistExecutor.safeRunWhenOn(Dist.CLIENT, () -> LC2HClient::init);
 
-        if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+        if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
             LOGGER.info("[LC2H] Multithreading Engine Started");
         } else {
             LOGGER.debug("[LC2H] Multithreading Engine Started");
@@ -170,7 +175,7 @@ public class LC2H {
     }
 
     public void onCommonSetup(FMLCommonSetupEvent event) {
-        if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+        if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
             LOGGER.info("[LC2H] onCommonSetup called");
         } else {
             LOGGER.debug("[LC2H] onCommonSetup called");
@@ -181,6 +186,7 @@ public class LC2H {
     @SubscribeEvent
     public void onServerStarting(ServerStartingEvent event) {
         SHUTDOWN_FINALIZED.set(false);
+        initializeAsyncDelay(event.getServer());
         registerWithQuantifiedApi();
         try {
             org.admany.lc2h.worldgen.lostcities.LostCityFeatureGuards.reset();
@@ -198,7 +204,7 @@ public class LC2H {
 
         try {
             AsyncChunkWarmup.initializeGpuWarmup();
-            if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+            if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                 LOGGER.info("[LC2H] GPU warmup initialized during server startup");
             } else {
                 LOGGER.debug("[LC2H] GPU warmup initialized during server startup");
@@ -213,7 +219,7 @@ public class LC2H {
 
         try {
             DiagnosticsReporter.start(event.getServer());
-            if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+            if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                 LOGGER.info("[LC2H] Diagnostics reporter started");
             } else {
                 LOGGER.debug("[LC2H] Diagnostics reporter started");
@@ -255,7 +261,7 @@ public class LC2H {
                     LOGGER.warn("[LC2H] GPU memory cleanup failed: {}", t.getMessage());
                 }
             }, 30, 30, java.util.concurrent.TimeUnit.SECONDS);
-            if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+            if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                 LOGGER.info("[LC2H] Aggressive GPU memory cleanup scheduler started (30s intervals)");
             } else {
                 LOGGER.debug("[LC2H] Aggressive GPU memory cleanup scheduler started (30s intervals)");
@@ -269,19 +275,19 @@ public class LC2H {
                 Commands.literal("lc2h").then(
                     Commands.literal("diagnostics").executes(ctx -> {
                         StallDetector.triggerDump(ctx.getSource().getServer());
-                        ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal("LC2H diagnostics dump triggered"), false);
+                        ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.diagnostics.dump_triggered"), false);
                         return 1;
                     })
                 ).then(
                 Commands.literal("gpu").executes(ctx -> {
                     String stats = org.admany.lc2h.worldgen.gpu.GPUMemoryManager.getComprehensiveMemoryStats();
-                    ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal("Memory Stats: " + stats), false);
+                    ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.gpu.stats", stats), false);
                     return 1;
                 }).then(
                         Commands.literal("cleanup").executes(ctx -> {
                             org.admany.lc2h.worldgen.gpu.GPUMemoryManager.comprehensiveCleanup();
                             String stats = org.admany.lc2h.worldgen.gpu.GPUMemoryManager.getComprehensiveMemoryStats();
-                            ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal("Comprehensive cleanup completed. Stats: " + stats), false);
+                            ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.gpu.cleanup_done", stats), false);
                             return 1;
                         })
                     )
@@ -290,7 +296,7 @@ public class LC2H {
                         ServerPlayer player = ctx.getSource().getPlayerOrException();
                         ChunkPos pos = player.chunkPosition();
                         ChunkPostProcessor.forceRescanChunk(player.serverLevel(), pos);
-                        ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal("Queued rescan for chunk " + pos), false);
+                        ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.rescan.queued", pos), false);
                         return 1;
                     })
                 ).then(
@@ -300,8 +306,8 @@ public class LC2H {
                         ServerPlayer player = ctx.getSource().getPlayerOrException();
                         ChunkPos pos = player.chunkPosition();
                         ChunkCoord coord = new ChunkCoord(player.level().dimension(), pos.x, pos.z);
-                        String report = ChunkGenTracker.buildReport(coord);
-                        ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal(report), false);
+                        net.minecraft.network.chat.Component report = ChunkGenTracker.buildReportComponent(coord);
+                        ctx.getSource().sendSuccess(() -> report, false);
                         return 1;
                     }).then(
                         Commands.argument("chunkX", IntegerArgumentType.integer()).then(
@@ -309,8 +315,8 @@ public class LC2H {
                                 int chunkX = IntegerArgumentType.getInteger(ctx, "chunkX");
                                 int chunkZ = IntegerArgumentType.getInteger(ctx, "chunkZ");
                                 ChunkCoord coord = new ChunkCoord(ctx.getSource().getLevel().dimension(), chunkX, chunkZ);
-                                String report = ChunkGenTracker.buildReport(coord);
-                                ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal(report), false);
+                                net.minecraft.network.chat.Component report = ChunkGenTracker.buildReportComponent(coord);
+                                ctx.getSource().sendSuccess(() -> report, false);
                                 return 1;
                             })
                         )
@@ -370,6 +376,7 @@ public class LC2H {
 
     @SubscribeEvent
     public void onServerStopping(ServerStoppingEvent event) {
+        resetAsyncDelay();
         try {
             org.admany.lc2h.worldgen.lostcities.LostCityFeatureGuards.reset();
             org.admany.lc2h.worldgen.lostcities.LostCityTerrainFeatureGuards.reset();
@@ -475,7 +482,7 @@ public class LC2H {
         }
 
         try {
-            org.admany.lc2h.world.VineClusterCleaner.shutdown();
+            org.admany.lc2h.world.cleanup.VineClusterCleaner.shutdown();
             LOGGER.info("[LC2H] Vine cluster cleaner shut down");
         } catch (Throwable t) {
             LOGGER.warn("[LC2H] Error shutting down vine cluster cleaner: {}", t.getMessage());
@@ -500,7 +507,7 @@ public class LC2H {
         if (!(event.getEntity() instanceof ServerPlayer player)) {
             return;
         }
-        SpawnSearchScheduler.registerPendingPlayer(player);
+        tryStartAsyncAfterDelay(player);
     }
 
     @SubscribeEvent
@@ -512,11 +519,10 @@ public class LC2H {
         if (server == null || server.getPlayerList() == null) {
             return;
         }
-        SpawnSearchScheduler.tick(server);
-        if (SpawnSearchScheduler.isSearchActive(server)) {
+        if (server.getPlayerList().getPlayerCount() == 0) {
             return;
         }
-        if (server.getPlayerList().getPlayerCount() == 0) {
+        if (!isAsyncReady(server)) {
             return;
         }
         long tick = server.getTickCount();
@@ -563,6 +569,94 @@ public class LC2H {
             LOGGER.info("[LC2H] Feature cache system force shut down");
         } catch (Throwable t) {
             LOGGER.warn("[LC2H] Error force shutting down feature cache: {}", t.getMessage());
+        }
+    }
+
+    private static void initializeAsyncDelay(MinecraftServer server) {
+        ASYNC_START_TICK.set(-1L);
+        if (server == null) {
+            ASYNC_DELAYED.set(false);
+            return;
+        }
+        boolean delay = false;
+        try {
+            ServerLevel level = server.overworld();
+            if (level != null) {
+                IDimensionInfo provider = Registration.LOSTCITY_FEATURE.get().getDimensionInfo(level);
+                if (provider != null) {
+                    LostCityProfile profile = provider.getProfile();
+                    if (profile != null) {
+                        delay = profile.FORCE_SPAWN_IN_BUILDING
+                            || (profile.FORCE_SPAWN_BUILDINGS != null && profile.FORCE_SPAWN_BUILDINGS.length > 0)
+                            || (profile.FORCE_SPAWN_PARTS != null && profile.FORCE_SPAWN_PARTS.length > 0);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        ASYNC_DELAYED.set(delay);
+    }
+
+    private static void resetAsyncDelay() {
+        ASYNC_DELAYED.set(false);
+        ASYNC_START_TICK.set(-1L);
+    }
+
+    public static boolean isAsyncReady(MinecraftServer server) {
+        if (server == null) {
+            return true;
+        }
+        if (!ASYNC_DELAYED.get()) {
+            return true;
+        }
+        long startTick = ASYNC_START_TICK.get();
+        if (startTick < 0L) {
+            return false;
+        }
+        return server.getTickCount() >= startTick;
+    }
+
+    private static void tryStartAsyncAfterDelay(ServerPlayer player) {
+        if (player == null) {
+            return;
+        }
+        if (ASYNC_START_TICK.get() >= 0L) {
+            return;
+        }
+        MinecraftServer server = player.getServer();
+        if (server == null) {
+            return;
+        }
+        boolean delay = shouldDelayForSpawn(player);
+        if (!ASYNC_DELAYED.get()) {
+            ASYNC_DELAYED.set(delay);
+        }
+        long startTick = server.getTickCount();
+        if (delay) {
+            startTick += ASYNC_START_DELAY_TICKS;
+        }
+        ASYNC_START_TICK.compareAndSet(-1L, startTick);
+    }
+
+    private static boolean shouldDelayForSpawn(ServerPlayer player) {
+        try {
+            IDimensionInfo provider = Registration.LOSTCITY_FEATURE.get().getDimensionInfo(player.serverLevel());
+            if (provider == null) {
+                return false;
+            }
+            LostCityProfile profile = provider.getProfile();
+            if (profile == null) {
+                return false;
+            }
+            if (profile.FORCE_SPAWN_IN_BUILDING) {
+                return true;
+            }
+            if (profile.FORCE_SPAWN_BUILDINGS != null && profile.FORCE_SPAWN_BUILDINGS.length > 0) {
+                return true;
+            }
+            return profile.FORCE_SPAWN_PARTS != null && profile.FORCE_SPAWN_PARTS.length > 0;
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
@@ -616,55 +710,63 @@ public class LC2H {
         } catch (Throwable ignored) {
         }
 
-        String header = String.format(Locale.ROOT,
-            "tick=%d | avgTick=%.2fms | players=%d",
-            tick, avgTick, players);
+        String header = net.minecraft.network.chat.Component.translatable("lc2h.command.stats.header",
+            tick, String.format(Locale.ROOT, "%.2f", avgTick), players).getString();
         List<String> lines = new ArrayList<>();
         lines.add(header);
-        lines.add(statLine("Planner",
-            String.format(Locale.ROOT, "batches=%d pending=%d byKind=%s",
-                planner.batchCount(), planner.pendingTasks(), plannerKinds)));
-        lines.add(statLine("MultiChunk",
-            String.format(Locale.ROOT, "planned=%d gpuCache=%d", planned, gpuCache)));
-        lines.add(statLine("Warmup",
-            String.format(Locale.ROOT, "regionQueue=%d activeBatches=%d hitRate=%.1f%% (%d/%d)",
-                warmupQueue, warmupActive, warmupHitRate, warmupHits, warmupTotal)));
-        lines.add(statLine("MainThread",
-            String.format(Locale.ROOT, "queue=%d | Tweaks inflight=%d validated=%d",
-                applyQueue, inflight, validated)));
-        lines.add(statLine("PostProcess",
-            String.format(Locale.ROOT, "pendingScans=%d", pendingScans)));
-        lines.add(statLine("ChunkPriority",
-            String.format(Locale.ROOT, "foreground=%d background=%d",
-                prioritySnapshot.foreground(),
-                prioritySnapshot.background())));
-        lines.add(statLine("ViewCulling",
-            String.format(Locale.ROOT, "total=%d plannerQ=%d plannerBatch=%d multiChunk=%d warmupQ=%d warmupBatch=%d apply=%d",
+        lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.planner").getString(),
+            net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.planner",
+                planner.batchCount(), planner.pendingTasks(), plannerKinds).getString()));
+        lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.multichunk").getString(),
+            net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.multichunk",
+                planned, gpuCache).getString()));
+        lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.warmup").getString(),
+            net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.warmup",
+                warmupQueue, warmupActive, String.format(Locale.ROOT, "%.1f", warmupHitRate), warmupHits, warmupTotal).getString()));
+        lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.main_thread").getString(),
+            net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.main_thread",
+                applyQueue, inflight, validated).getString()));
+        lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.post_process").getString(),
+            net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.post_process", pendingScans).getString()));
+        lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.chunk_priority").getString(),
+            net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.chunk_priority",
+                prioritySnapshot.foreground(), prioritySnapshot.background()).getString()));
+        lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.view_culling").getString(),
+            net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.view_culling",
                 viewCulling.total(),
                 viewCulling.plannerQueue(),
                 viewCulling.plannerBatch(),
                 viewCulling.multiChunkPending(),
                 viewCulling.warmupQueue(),
                 viewCulling.warmupBatch(),
-                viewCulling.mainThreadApply())));
-        lines.add(statLine("GPU",
-            String.format(Locale.ROOT, "entries=%d mem=%s diskEntries=%d diskMem=%s qApiMem=%s",
-                gpuEntries, formatBytes(gpuBytes), diskEntries, formatBytes(diskBytes), formatBytes(quantifiedBytes))));
+                viewCulling.mainThreadApply()).getString()));
+        lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.gpu").getString(),
+            net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.gpu",
+                gpuEntries, formatBytes(gpuBytes), diskEntries, formatBytes(diskBytes), formatBytes(quantifiedBytes)).getString()));
         if (quantifiedEntries != null) {
-            lines.add(statLine("FeatureCache",
-                String.format(Locale.ROOT, "local=%d distributed=%d mem=%dMB pressure=%s",
-                    localCacheEntries, quantifiedEntries, cacheMemMB, cachePressure ? "HIGH" : "NORMAL")));
+            String pressureLabel = net.minecraft.network.chat.Component.translatable(cachePressure
+                ? "lc2h.command.stats.pressure.high"
+                : "lc2h.command.stats.pressure.normal").getString();
+            lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.feature_cache").getString(),
+                net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.feature_cache_distributed",
+                    localCacheEntries, quantifiedEntries, cacheMemMB, pressureLabel).getString()));
         } else {
-            lines.add(statLine("FeatureCache",
-                String.format(Locale.ROOT, "local=%d mem=%dMB pressure=%s",
-                    localCacheEntries, cacheMemMB, cachePressure ? "HIGH" : "NORMAL")));
+            String pressureLabel = net.minecraft.network.chat.Component.translatable(cachePressure
+                ? "lc2h.command.stats.pressure.high"
+                : "lc2h.command.stats.pressure.normal").getString();
+            lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.feature_cache").getString(),
+                net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.feature_cache_local",
+                    localCacheEntries, cacheMemMB, pressureLabel).getString()));
         }
         if (schedulerStats != null) {
-            lines.add(statLine("Quantified",
-                String.format(Locale.ROOT, "total=%d gpu=%d cpu=%d gpuRatio=%.2f",
-                    schedulerStats.totalTasks(), schedulerStats.gpuTasks(), schedulerStats.cpuTasks(), schedulerStats.gpuUtilizationRatio())));
+            lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.quantified").getString(),
+                net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.quantified",
+                    schedulerStats.totalTasks(),
+                    schedulerStats.gpuTasks(),
+                    schedulerStats.cpuTasks(),
+                    String.format(Locale.ROOT, "%.2f", schedulerStats.gpuUtilizationRatio())).getString()));
         }
-        sendBoxedStats(source, "LC2H Stats", lines);
+        sendBoxedStats(source, net.minecraft.network.chat.Component.translatable("lc2h.command.stats.title").getString(), lines);
 
         StringBuilder log = new StringBuilder();
         log.append("[LC2H] Stats dump\n")
@@ -786,11 +888,11 @@ public class LC2H {
             ChunkDebugManager.ChunkSelection selection = ChunkDebugManager.snapshot(player);
             Path outFile = ChunkDebugExporter.exportSelection(player, selection, label);
             ChatMessenger.success(player.createCommandSourceStack(),
-                "Chunk debug export written to " + outFile.toAbsolutePath());
+                net.minecraft.network.chat.Component.translatable("lc2h.command.chunkdebug.export_written", outFile.toAbsolutePath()));
             return 1;
         } catch (Exception e) {
             ChatMessenger.error(player.createCommandSourceStack(),
-                "Chunk debug export failed: " + e.getMessage());
+                net.minecraft.network.chat.Component.translatable("lc2h.command.chunkdebug.export_failed", e.getMessage()));
             return 0;
         }
     }

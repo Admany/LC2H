@@ -9,7 +9,7 @@ import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
-import org.admany.lc2h.benchmark.BenchmarkResult;
+import org.admany.lc2h.dev.benchmark.BenchmarkResult;
 
 @OnlyIn(Dist.CLIENT)
 public class BenchmarkResultScreen extends Screen {
@@ -20,7 +20,7 @@ public class BenchmarkResultScreen extends Screen {
     private Button copyButton;
 
     public BenchmarkResultScreen(Screen parent, BenchmarkResult result, String uploadStatus) {
-        super(Component.literal("LC2H Benchmark Results"));
+        super(Component.translatable("lc2h.benchmark.results.title"));
         this.parent = parent;
         this.result = result;
         this.uploadStatus = uploadStatus;
@@ -37,7 +37,7 @@ public class BenchmarkResultScreen extends Screen {
         closeButton = Button.builder(CommonComponents.GUI_DONE, btn -> this.onClose())
                 .bounds(centerX - buttonWidth - spacing, footerY, buttonWidth, buttonHeight)
                 .build();
-        copyButton = Button.builder(Component.literal("Copy Text"), btn -> copyResultsToClipboard())
+        copyButton = Button.builder(Component.translatable("lc2h.benchmark.results.copy"), btn -> copyResultsToClipboard())
                 .bounds(centerX + spacing, footerY, buttonWidth, buttonHeight)
                 .build();
 
@@ -59,46 +59,46 @@ public class BenchmarkResultScreen extends Screen {
         int line = top;
         int lineSpacing = 14;
 
-        line = drawSection(gfx, "Summary", left, line, lineSpacing);
-        line = drawMetric(gfx, "Chunks Loaded", String.valueOf(result.chunksGenerated()), left, line, lineSpacing);
-        line = drawMetric(gfx, "Effective CPM", format(result.effectiveChunksPerMinute()), left, line, lineSpacing);
-        line = drawMetric(gfx, "Average TPS", format(result.commonTps()), left, line, lineSpacing);
-        line = drawMetric(gfx, "Freezes", String.valueOf(result.freezeCount()), left, line, lineSpacing);
-        line = drawMetric(gfx, "Run Time (s)", format(result.realDurationSeconds()), left, line, lineSpacing);
+        line = drawSection(gfx, Component.translatable("lc2h.benchmark.results.section.summary"), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.chunks_loaded"), String.valueOf(result.chunksGenerated()), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.effective_cpm"), format(result.effectiveChunksPerMinute()), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.average_tps"), format(result.commonTps()), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.freezes"), String.valueOf(result.freezeCount()), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.run_time_seconds"), format(result.realDurationSeconds()), left, line, lineSpacing);
 
         line += lineSpacing;
-        line = drawSection(gfx, "Performance", left, line, lineSpacing);
-        line = drawMetric(gfx, "Min TPS", format(result.minTps()), left, line, lineSpacing);
-        line = drawMetric(gfx, "Max TPS", format(result.maxTps()), left, line, lineSpacing);
-        line = drawMetric(gfx, "Avg Tick (ms)", format(result.averageTickMillis()), left, line, lineSpacing);
-        line = drawMetric(gfx, "Max Tick (ms)", format(result.maxTickMillis()), left, line, lineSpacing);
-        line = drawMetric(gfx, "Score", format(result.scoreEstimate()), left, line, lineSpacing);
+        line = drawSection(gfx, Component.translatable("lc2h.benchmark.results.section.performance"), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.min_tps"), format(result.minTps()), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.max_tps"), format(result.maxTps()), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.avg_tick_ms"), format(result.averageTickMillis()), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.max_tick_ms"), format(result.maxTickMillis()), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.score"), format(result.scoreEstimate()), left, line, lineSpacing);
 
         line += lineSpacing;
-        line = drawSection(gfx, "Environment", left, line, lineSpacing);
-        line = drawMetric(gfx, "Seed", String.valueOf(result.seed()), left, line, lineSpacing);
-        line = drawMetric(gfx, "Dimension", result.dimension().location().toString(), left, line, lineSpacing);
-        line = drawMetric(gfx, "LC2H Version", result.modVersion(), left, line, lineSpacing);
-        line = drawMetric(gfx, "Minecraft", result.minecraftVersion(), left, line, lineSpacing);
-        line = drawMetric(gfx, "Player", result.playerName(), left, line, lineSpacing);
-        line = drawMetric(gfx, "Upload", uploadStatus, left, line, lineSpacing);
+        line = drawSection(gfx, Component.translatable("lc2h.benchmark.results.section.environment"), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.seed"), String.valueOf(result.seed()), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.dimension"), result.dimension().location().toString(), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.lc2h_version"), result.modVersion(), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.minecraft_version"), result.minecraftVersion(), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.player"), result.playerName(), left, line, lineSpacing);
+        line = drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.upload"), uploadStatus, left, line, lineSpacing);
 
         if (result.aborted()) {
             line += lineSpacing;
-            drawSection(gfx, "Status", left, line, lineSpacing);
-            drawMetric(gfx, "Aborted", result.abortReason(), left, line + lineSpacing, lineSpacing);
+            drawSection(gfx, Component.translatable("lc2h.benchmark.results.section.status"), left, line, lineSpacing);
+            drawMetric(gfx, Component.translatable("lc2h.benchmark.results.label.aborted"), result.abortReason(), left, line + lineSpacing, lineSpacing);
         }
 
         super.render(gfx, mouseX, mouseY, partialTick);
     }
 
-    private int drawSection(GuiGraphics gfx, String title, int left, int y, int spacing) {
+    private int drawSection(GuiGraphics gfx, Component title, int left, int y, int spacing) {
         gfx.drawString(this.font, title, left, y, 0xFFAA00);
         return y + spacing;
     }
 
-    private int drawMetric(GuiGraphics gfx, String label, String value, int left, int y, int spacing) {
-        gfx.drawString(this.font, label + ":", left, y, 0xCCCCCC);
+    private int drawMetric(GuiGraphics gfx, Component label, String value, int left, int y, int spacing) {
+        gfx.drawString(this.font, label.copy().append(Component.literal(":")), left, y, 0xCCCCCC);
         gfx.drawString(this.font, value, left + 140, y, 0xFFFFFF);
         return y + spacing;
     }
@@ -109,25 +109,25 @@ public class BenchmarkResultScreen extends Screen {
 
     private void copyResultsToClipboard() {
         StringBuilder sb = new StringBuilder();
-        sb.append("LC2H Benchmark Result\n");
-        sb.append("Chunks Loaded: ").append(result.chunksGenerated()).append('\n');
-        sb.append("Effective CPM: ").append(format(result.effectiveChunksPerMinute())).append('\n');
-        sb.append("Average TPS: ").append(format(result.commonTps())).append('\n');
-        sb.append("Freezes: ").append(result.freezeCount()).append('\n');
-        sb.append("Run Time (s): ").append(format(result.realDurationSeconds())).append('\n');
-        sb.append("Min TPS: ").append(format(result.minTps())).append('\n');
-        sb.append("Max TPS: ").append(format(result.maxTps())).append('\n');
-        sb.append("Avg Tick (ms): ").append(format(result.averageTickMillis())).append('\n');
-        sb.append("Max Tick (ms): ").append(format(result.maxTickMillis())).append('\n');
-        sb.append("Score: ").append(format(result.scoreEstimate())).append('\n');
-        sb.append("Seed: ").append(result.seed()).append('\n');
-        sb.append("Dimension: ").append(result.dimension().location()).append('\n');
-        sb.append("MC: ").append(result.minecraftVersion()).append('\n');
-        sb.append("LC2H: ").append(result.modVersion()).append('\n');
-        sb.append("Player: ").append(result.playerName()).append('\n');
-        sb.append("Upload: ").append(uploadStatus).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.clipboard.title").getString()).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.chunks_loaded").getString()).append(": ").append(result.chunksGenerated()).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.effective_cpm").getString()).append(": ").append(format(result.effectiveChunksPerMinute())).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.average_tps").getString()).append(": ").append(format(result.commonTps())).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.freezes").getString()).append(": ").append(result.freezeCount()).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.run_time_seconds").getString()).append(": ").append(format(result.realDurationSeconds())).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.min_tps").getString()).append(": ").append(format(result.minTps())).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.max_tps").getString()).append(": ").append(format(result.maxTps())).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.avg_tick_ms").getString()).append(": ").append(format(result.averageTickMillis())).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.max_tick_ms").getString()).append(": ").append(format(result.maxTickMillis())).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.score").getString()).append(": ").append(format(result.scoreEstimate())).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.seed").getString()).append(": ").append(result.seed()).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.dimension").getString()).append(": ").append(result.dimension().location()).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.minecraft_version").getString()).append(": ").append(result.minecraftVersion()).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.lc2h_version").getString()).append(": ").append(result.modVersion()).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.player").getString()).append(": ").append(result.playerName()).append('\n');
+        sb.append(Component.translatable("lc2h.benchmark.results.label.upload").getString()).append(": ").append(uploadStatus).append('\n');
         if (result.aborted()) {
-            sb.append("Aborted: ").append(result.abortReason()).append('\n');
+            sb.append(Component.translatable("lc2h.benchmark.results.label.aborted").getString()).append(": ").append(result.abortReason()).append('\n');
         }
         Minecraft.getInstance().keyboardHandler.setClipboard(sb.toString());
     }

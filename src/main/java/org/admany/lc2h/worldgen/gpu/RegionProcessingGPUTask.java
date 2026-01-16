@@ -17,8 +17,8 @@ import org.lwjgl.opencl.CL10;
 public record RegionProcessingGPUTask(IDimensionInfo provider, RegionCoord region)
     implements QuantifiedOpenCL.Workload<Boolean> {
 
-    private static final int CHUNKS_PER_REGION = 25; // 5x5 region
-    private static final int BLOCKS_PER_CHUNK = 256; // 16x16
+    private static final int CHUNKS_PER_REGION = 25; // This is a 5x5 region
+    private static final int BLOCKS_PER_CHUNK = 256; // This is a 16x16 area
 
     public static final long VRAM_BYTES = 25L * 256L * 4L * 4L;
     public static final int PARALLEL_UNITS = CHUNKS_PER_REGION * BLOCKS_PER_CHUNK;

@@ -4,16 +4,15 @@ import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import net.minecraft.server.MinecraftServer;
 import org.admany.lc2h.LC2H;
-import org.admany.lc2h.async.AsyncManager;
-import org.admany.lc2h.async.Priority;
-import org.admany.lc2h.frustum.ChunkPriorityManager;
-import org.admany.lc2h.parallel.AdaptiveBatchController;
-import org.admany.lc2h.parallel.ParallelWorkQueue;
+import org.admany.lc2h.concurrency.async.AsyncManager;
+import org.admany.lc2h.concurrency.async.Priority;
+import org.admany.lc2h.client.frustum.ChunkPriorityManager;
+import org.admany.lc2h.concurrency.parallel.AdaptiveBatchController;
+import org.admany.lc2h.concurrency.parallel.ParallelWorkQueue;
 import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.util.log.RateLimitedLogger;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
-import org.admany.lc2h.util.spawn.SpawnSearchScheduler;
-import org.admany.lc2h.diagnostics.ViewCullingStats;
+import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -315,19 +314,6 @@ public final class PlannerBatchQueue {
         boolean isEmpty() {
             return size.get() == 0;
         }
-
-        int snapshotInto(EnumMap<PlannerTaskKind, Integer> into) {
-            int count = 0;
-            for (PlannerExecutable exec : tasks) {
-                if (exec == null || exec.kind == null) {
-                    continue;
-                }
-                into.merge(exec.kind, 1, Integer::sum);
-                count++;
-            }
-            return count;
-        }
-
         private List<PlannerExecutable> drainAllLocked() {
             List<PlannerExecutable> drained = new ArrayList<>();
             PlannerExecutable next;
@@ -398,9 +384,6 @@ public final class PlannerBatchQueue {
                 return false;
             }
         } catch (Throwable ignored) {
-            return false;
-        }
-        if (SpawnSearchScheduler.isSearchActive(server)) {
             return false;
         }
         return true;

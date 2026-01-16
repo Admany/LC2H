@@ -3,10 +3,10 @@ package org.admany.lc2h.worldgen.async.planner;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import org.admany.lc2h.LC2H;
-import org.admany.lc2h.async.AsyncManager;
+import org.admany.lc2h.concurrency.async.AsyncManager;
 import org.admany.lc2h.data.cache.CacheBudgetManager;
-import org.admany.lc2h.parallel.AdaptiveBatchController;
-import org.admany.lc2h.parallel.AdaptiveConcurrencyLimiter;
+import org.admany.lc2h.concurrency.parallel.AdaptiveBatchController;
+import org.admany.lc2h.concurrency.parallel.AdaptiveConcurrencyLimiter;
 import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
@@ -98,7 +98,7 @@ public final class AsyncBuildingInfoPlanner {
             }
         }
 
-        // Reserve this coord so we don't enqueue duplicate warmup tasks.
+        // This reserves the coord to avoid enqueuing duplicate warmup tasks.
         if (BUILDING_INFO_CACHE.putIfAbsent(coord, new InFlightMarker()) != null) {
             return;
         }
@@ -153,7 +153,7 @@ public final class AsyncBuildingInfoPlanner {
         }
         SPAWN_PREFETCH_COUNT.incrementAndGet();
 
-        // Reserve this coord so we don't enqueue duplicate warmup tasks.
+        // This reserves the coord to avoid enqueuing duplicate warmup tasks.
         if (BUILDING_INFO_CACHE.putIfAbsent(coord, new InFlightMarker()) != null) {
             SPAWN_PREFETCH.remove(coord);
             SPAWN_PREFETCH_COUNT.decrementAndGet();
@@ -171,7 +171,7 @@ public final class AsyncBuildingInfoPlanner {
 
         long startTime = System.nanoTime();
         AsyncManager.submitTask("spawn-buildinginfo", () -> runBuildingInfo(provider, coord, false, startTime, true),
-            null, org.admany.lc2h.async.Priority.HIGH)
+            null, org.admany.lc2h.concurrency.async.Priority.HIGH)
             .whenComplete((ignored, throwable) -> {
                 SPAWN_PREFETCH.remove(coord);
                 SPAWN_PREFETCH_COUNT.decrementAndGet();
@@ -198,7 +198,7 @@ public final class AsyncBuildingInfoPlanner {
             touchTimestamp(coord, now);
             return cached;
         }
-        // Defensive: don't ever expose sentinel values to callers.
+        // Defensive measure - we never expose sentinel values to callers.
         return null;
     }
 
@@ -236,7 +236,7 @@ public final class AsyncBuildingInfoPlanner {
             return;
         }
 
-        // Reserve while we compute synchronously.
+        // This reserves the entry while computing synchronously.
         if (BUILDING_INFO_CACHE.putIfAbsent(coord, new InFlightMarker()) != null) {
             token.close();
             return;
@@ -253,7 +253,7 @@ public final class AsyncBuildingInfoPlanner {
             acceptBuildingInfoResult(coord, buildingInfo, System.currentTimeMillis());
         } catch (Throwable t) {
             boolean debugLogging = AsyncChunkWarmup.isWarmupDebugLoggingEnabled()
-                || org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING;
+                || org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING;
             if (debugLogging) {
                 LC2H.LOGGER.debug("Sync building info warmup failed for {}", coord, t);
             }
@@ -372,14 +372,14 @@ public final class AsyncBuildingInfoPlanner {
             AsyncManager.runLater("spawn-buildinginfo-retry",
                 () -> runBuildingInfo(provider, coord, debugLogging, startTime, true),
                 delayMs,
-                org.admany.lc2h.async.Priority.HIGH);
+                org.admany.lc2h.concurrency.async.Priority.HIGH);
             return;
         }
         AsyncManager.runLater("buildinginfo-limiter-retry",
             () -> PlannerBatchQueue.enqueue(provider, coord, PlannerTaskKind.BUILDING_INFO,
                 () -> runBuildingInfo(provider, coord, debugLogging, startTime, false)),
             delayMs,
-            org.admany.lc2h.async.Priority.LOW);
+            org.admany.lc2h.concurrency.async.Priority.LOW);
     }
 
     private static void acceptBuildingInfoResult(ChunkCoord coord, Object value, long nowMs) {

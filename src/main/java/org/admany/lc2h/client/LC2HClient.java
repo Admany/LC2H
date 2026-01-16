@@ -2,7 +2,7 @@ package org.admany.lc2h.client;
 
 import net.minecraftforge.client.ConfigScreenHandler;
 import net.minecraftforge.fml.ModLoadingContext;
-import org.admany.lc2h.benchmark.BenchmarkManager;
+import org.admany.lc2h.dev.benchmark.BenchmarkManager;
 import org.admany.lc2h.client.gui.Lc2hConfigScreen;
 
 public final class LC2HClient {

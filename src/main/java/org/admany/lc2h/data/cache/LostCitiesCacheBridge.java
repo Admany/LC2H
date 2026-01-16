@@ -1,6 +1,13 @@
 package org.admany.lc2h.data.cache;
 
+import com.mojang.blaze3d.systems.RenderSystem;
+import net.minecraft.client.Minecraft;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.fml.loading.FMLEnvironment;
 import org.admany.lc2h.LC2H;
+import org.admany.quantified.api.QuantifiedAPI;
+import org.admany.quantified.core.common.cache.CacheManager;
+import org.admany.quantified.core.common.cache.interfaces.ThreadSafeCache;
 
 import java.io.Serializable;
 import java.time.Duration;
@@ -23,30 +30,25 @@ public final class LostCitiesCacheBridge {
     private static final Object INIT_LOCK = new Object();
     private static volatile boolean READY = false;
     private static final Set<Class<?>> NON_SERIALIZABLE = ConcurrentHashMap.newKeySet();
+    private static final ConcurrentHashMap<String, ThreadSafeCache<String, Object>> DISK_CACHES =
+        new ConcurrentHashMap<>();
+
+    private static final boolean DISK_CACHE_ON_CLIENT = Boolean.parseBoolean(
+        System.getProperty("lc2h.lostcities.cache.diskOnClient", "false"));
 
     private LostCitiesCacheBridge() {
     }
 
     public static <T> T getDisk(String cacheName, Object key, Class<T> type) {
-        if (!ensureReady() || key == null || type == null) {
+        if (!shouldUseDiskCache() || !ensureReady() || key == null || type == null) {
             return null;
         }
         try {
-            Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
-            Object value = quantifiedApiClass.getMethod(
-                    "getCached",
-                    String.class,
-                    String.class,
-                    java.util.function.Supplier.class,
-                    Duration.class,
-                    long.class,
-                    boolean.class
-                )
-                .invoke(null, diskCacheName(cacheName), key.toString(),
-                    (java.util.function.Supplier<Object>) () -> null,
-                    DISK_TTL.get(),
-                    DISK_MAX_ENTRIES,
-                    true);
+            ThreadSafeCache<String, Object> cache = diskCache(cacheName);
+            if (cache == null) {
+                return null;
+            }
+            Object value = cache.getIfPresent(key.toString());
             if (type.isInstance(value)) {
                 return type.cast(value);
             }
@@ -57,24 +59,17 @@ public final class LostCitiesCacheBridge {
     }
 
     public static void putDisk(String cacheName, Object key, Object value) {
-        if (!ensureReady() || key == null || value == null) {
+        if (!shouldUseDiskCache() || !ensureReady() || key == null || value == null) {
             return;
         }
         if (!isSerializable(value)) {
             return;
         }
         try {
-            Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
-            quantifiedApiClass.getMethod(
-                    "putCached",
-                    String.class,
-                    String.class,
-                    Object.class,
-                    Duration.class,
-                    long.class,
-                    boolean.class
-                )
-                .invoke(null, diskCacheName(cacheName), key.toString(), value, DISK_TTL.get(), DISK_MAX_ENTRIES, true);
+            ThreadSafeCache<String, Object> cache = diskCache(cacheName);
+            if (cache != null) {
+                cache.put(key.toString(), value);
+            }
         } catch (Throwable t) {
             disable(t, "put");
         }
@@ -97,13 +92,7 @@ public final class LostCitiesCacheBridge {
                 return true;
             }
             try {
-                Class<?> quantifiedApiClass = Class.forName("org.admany.quantified.api.QuantifiedAPI");
-                try {
-                    quantifiedApiClass.getMethod("register", String.class, String.class, String.class)
-                        .invoke(null, MODID, "Lost Cities", "unknown");
-                } catch (NoSuchMethodException ignored) {
-                    quantifiedApiClass.getMethod("register", String.class).invoke(null, MODID);
-                }
+                QuantifiedAPI.register(MODID, "Lost Cities", "unknown");
                 READY = true;
                 return true;
             } catch (Throwable t) {
@@ -111,6 +100,50 @@ public final class LostCitiesCacheBridge {
                 return false;
             }
         }
+    }
+
+    private static boolean shouldUseDiskCache() {
+        if (DISK_CACHE_ON_CLIENT) {
+            return true;
+        }
+        return !isClientMainThread();
+    }
+
+    private static boolean isClientMainThread() {
+        if (FMLEnvironment.dist != Dist.CLIENT) {
+            return false;
+        }
+        String threadName = Thread.currentThread().getName();
+        if (threadName == null) {
+            return false;
+        }
+        if ("Render thread".equals(threadName) || "Client thread".equals(threadName)) {
+            return true;
+        }
+        if (!threadName.contains("Render") && !threadName.contains("Client")) {
+            return false;
+        }
+        try {
+            return ClientThreadChecker.isClientThread();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static ThreadSafeCache<String, Object> diskCache(String name) {
+        String cacheName = diskCacheName(name);
+        return DISK_CACHES.computeIfAbsent(cacheName, key -> {
+            try {
+                ThreadSafeCache<String, Object> existing = CacheManager.lookup(key);
+                if (existing != null) {
+                    return existing;
+                }
+                return CacheManager.register(key, DISK_MAX_ENTRIES, DISK_TTL.get(), true, true, true);
+            } catch (Throwable t) {
+                disable(t, "register-cache");
+                return null;
+            }
+        });
     }
 
     private static boolean isSerializable(Object value) {
@@ -136,6 +169,16 @@ public final class LostCitiesCacheBridge {
         if (AVAILABLE.compareAndSet(true, false)) {
             LC2H.LOGGER.warn("[LC2H] [LostCities] Quantified disk cache {} failed; disabling. Reason: {}",
                 action, t.toString());
+        }
+    }
+
+    private static final class ClientThreadChecker {
+        private static boolean isClientThread() {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc != null && mc.isSameThread()) {
+                return true;
+            }
+            return RenderSystem.isOnRenderThread();
         }
     }
 }

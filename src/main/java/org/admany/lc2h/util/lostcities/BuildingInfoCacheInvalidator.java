@@ -7,12 +7,10 @@ import java.lang.reflect.Field;
 import java.util.Map;
 
 /**
- * Best-effort cache invalidation for LC2H's BuildingInfo/characteristics caches.
+ * This provides best-effort cache invalidation for LC2H's BuildingInfo/characteristics caches.
  *
- * Problem this addresses:
- * - If a chunk's characteristics/BuildingInfo are cached as "single" before the MultiChunk
- *   (multibuilding plan) is integrated, that chunk may never get re-evaluated as part of the
- *   multibuilding, causing ugly seams at multibuilding edges.
+ * The problem this addresses:
+ * - If a chunk's characteristics/BuildingInfo are cached as "single" before the MultiChunk (multibuilding plan) is integrated, that chunk may never get re-evaluated as part of the multibuilding, causing ugly seams at multibuilding edges.
  */
 public final class BuildingInfoCacheInvalidator {
 

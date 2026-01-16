@@ -3,7 +3,7 @@ package org.admany.lc2h.worldgen.async.planner;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import org.admany.lc2h.LC2H;
-import org.admany.lc2h.async.AsyncManager;
+import org.admany.lc2h.concurrency.async.AsyncManager;
 import org.admany.lc2h.data.cache.FeatureCache;
 
 public final class AsyncCityPlanner {

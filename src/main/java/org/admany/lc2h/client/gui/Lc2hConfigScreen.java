@@ -105,7 +105,7 @@ public class Lc2hConfigScreen extends Screen {
     }
 
     public Lc2hConfigScreen(Screen parent) {
-        super(Component.literal("《▓ LC²H | Lost Cities Multithreaded ▓》"));
+        super(Component.translatable("lc2h.config.title"));
         this.parent = parent;
         this.controller = new Lc2hConfigController();
         this.uiState = controller.getUiState();
@@ -154,19 +154,19 @@ public class Lc2hConfigScreen extends Screen {
     private float restartLaterHover = 0f;
     private final int[] restartCloseRect = new int[4];
     private final int[] restartLaterRect = new int[4];
-    private static final Component RESTART_WARNING_TITLE = Component.literal("Restart Required");
-    private static final Component RESTART_CLOSE_LABEL = Component.literal("Close Game");
-    private static final Component RESTART_LATER_LABEL = Component.literal("Do It Later");
-    private static final Component SERVER_RESTART_TITLE = Component.literal("Server Restart Required");
-    private static final Component SERVER_RESTART_ACTION = Component.literal("Stop Server");
+    private static final Component RESTART_WARNING_TITLE = Component.translatable("lc2h.config.modal.restart_required.title");
+    private static final Component RESTART_CLOSE_LABEL = Component.translatable("lc2h.config.modal.restart_required.close_game");
+    private static final Component RESTART_LATER_LABEL = Component.translatable("lc2h.config.modal.restart_required.do_later");
+    private static final Component SERVER_RESTART_TITLE = Component.translatable("lc2h.config.modal.server_restart_required.title");
+    private static final Component SERVER_RESTART_ACTION = Component.translatable("lc2h.config.modal.server_restart_required.action");
 
     private boolean cacheCapWarningVisible = false;
     private float cacheCapWarningProgress = 0f;
-    private Component cacheCapWarningTitle = Component.literal("Cache Budget Warning");
+    private Component cacheCapWarningTitle = Component.translatable("lc2h.config.modal.cache_budget.title");
     private Component cacheCapWarningSummary = Component.empty();
     private Component cacheCapWarningWarning = Component.empty();
-    private Component cacheCapContinueLabel = Component.literal("Continue");
-    private Component cacheCapRevertLabel = Component.literal("Revert");
+    private Component cacheCapContinueLabel = Component.translatable("lc2h.config.modal.cache_budget.continue");
+    private Component cacheCapRevertLabel = Component.translatable("lc2h.config.modal.cache_budget.revert");
     private float cacheCapContinueHover = 0f;
     private float cacheCapRevertHover = 0f;
     private final int[] cacheCapContinueRect = new int[4];
@@ -177,10 +177,10 @@ public class Lc2hConfigScreen extends Screen {
 
     private boolean unsavedWarningVisible = false;
     private float unsavedWarningProgress = 0f;
-private Component unsavedWarningTitle = Component.literal("Hold on!");
-private Component unsavedWarningSummary = Component.literal("Looks like you’ve made some changes that aren’t saved yet. Want to save them before moving on?");
-private Component unsavedSaveLabel = Component.literal("Save Changes");
-private Component unsavedDiscardLabel = Component.literal("Don’t Save");
+private Component unsavedWarningTitle = Component.translatable("lc2h.config.modal.unsaved.title");
+private Component unsavedWarningSummary = Component.translatable("lc2h.config.modal.unsaved.summary");
+private Component unsavedSaveLabel = Component.translatable("lc2h.config.modal.unsaved.save");
+private Component unsavedDiscardLabel = Component.translatable("lc2h.config.modal.unsaved.discard");
 
     private float unsavedSaveHover = 0f;
     private float unsavedDiscardHover = 0f;
@@ -317,70 +317,123 @@ private Component unsavedDiscardLabel = Component.literal("Don’t Save");
         int columnWidth = (this.contentWidth - (columnCount - 1) * columnSpacing) / columnCount;
         LayoutHelper layout = new LayoutHelper(this.contentLeft, this.contentTop, columnCount, columnWidth, columnSpacing, 8);
 
-        addSectionHeader(layout, Component.literal("GENERAL"));
-        addToggle(layout, "Async Double Block Batcher", working.enableAsyncDoubleBlockBatcher,
-                "Use async batching for double blocks", false, val -> working.enableAsyncDoubleBlockBatcher = val);
-        addToggle(layout, "Floating Vegetation Removal", working.enableFloatingVegetationRemoval,
-                "Remove floating vegetation artifacts after terrain generation.", false, val -> working.enableFloatingVegetationRemoval = val);
-        addToggle(layout, "Explosion Debris Spill", working.enableExplosionDebris,
-                "Allow Lost Cities explosions to scatter rubble into adjacent chunks (can add clutter around streets)", false,
+        addSectionHeader(layout, Component.translatable("lc2h.config.section.general"));
+        addToggle(layout,
+                Component.translatable("lc2h.config.option.async_double_block_batcher.title"),
+                working.enableAsyncDoubleBlockBatcher,
+                Component.translatable("lc2h.config.option.async_double_block_batcher.desc"),
+                false, val -> working.enableAsyncDoubleBlockBatcher = val);
+        addToggle(layout,
+                Component.translatable("lc2h.config.option.floating_vegetation_removal.title"),
+                working.enableFloatingVegetationRemoval,
+                Component.translatable("lc2h.config.option.floating_vegetation_removal.desc"),
+                false, val -> working.enableFloatingVegetationRemoval = val);
+        addToggle(layout,
+                Component.translatable("lc2h.config.option.explosion_debris.title"),
+                working.enableExplosionDebris,
+                Component.translatable("lc2h.config.option.explosion_debris.desc"),
+                false,
                 val -> working.enableExplosionDebris = val);
-        addToggle(layout, "Lost Cities Safe Gen Lock (Recommended)", working.enableLostCitiesGenerationLock,
-                "Reduces rare Lost Cities chunk-gen bugs (duplicated/bugged chunks). Leave ON unless you're troubleshooting performance.", false,
+        addToggle(layout,
+                Component.translatable("lc2h.config.option.lostcities_gen_lock.title"),
+                working.enableLostCitiesGenerationLock,
+                Component.translatable("lc2h.config.option.lostcities_gen_lock.desc"),
+                false,
                 val -> working.enableLostCitiesGenerationLock = val);
-        addToggle(layout, "Part Safety Checks (Recommended)", working.enableLostCitiesPartSliceCompat,
-                "Prevents rare crashes from broken/invalid Lost Cities parts in addon packs. Leave ON unless you're troubleshooting.", false,
+        addToggle(layout,
+                Component.translatable("lc2h.config.option.lostcities_part_safety.title"),
+                working.enableLostCitiesPartSliceCompat,
+                Component.translatable("lc2h.config.option.lostcities_part_safety.desc"),
+                false,
                 val -> working.enableLostCitiesPartSliceCompat = val);
-        addSectionHeader(layout, Component.literal("CACHING"));
-        addToggle(layout, "Enforce Combined Cache Cap", working.cacheEnforceCombinedMax,
-                "If enabled, evict from the largest cache when combined usage exceeds the cap.", false,
+        addSectionHeader(layout, Component.translatable("lc2h.config.section.caching"));
+        addToggle(layout,
+                Component.translatable("lc2h.config.option.cache_enforce_combined.title"),
+                working.cacheEnforceCombinedMax,
+                Component.translatable("lc2h.config.option.cache_enforce_combined.desc"),
+                false,
                 val -> working.cacheEnforceCombinedMax = val);
-        addToggle(layout, "Split Combined Cap Evenly", working.cacheSplitEqual,
-                "If enabled, splits the combined cap evenly between LC2H and Lost Cities.", false,
+        addToggle(layout,
+                Component.translatable("lc2h.config.option.cache_split_equal.title"),
+                working.cacheSplitEqual,
+                Component.translatable("lc2h.config.option.cache_split_equal.desc"),
+                false,
                 val -> working.cacheSplitEqual = val);
-        this.cacheCapBox = addNumberField(layout, "Combined Cache Cap (MB)",
-                "Maximum combined Lost Cities + LC2H cache memory before eviction.", String.valueOf(working.cacheCombinedMaxMB), false);
+        this.cacheCapBox = addNumberField(layout,
+                Component.translatable("lc2h.config.option.cache_combined_max_mb.title"),
+                Component.translatable("lc2h.config.option.cache_combined_max_mb.desc"),
+                String.valueOf(working.cacheCombinedMaxMB), false);
         this.cacheCapBox.setFilter(this::isNumericInput);
-        this.lc2hCacheBox = addNumberField(layout, "LC2H Cache Cap (MB)",
-                "Max LC2H cache memory. Ignored if split-even is enabled.", String.valueOf(working.cacheMaxMB), false);
+        this.lc2hCacheBox = addNumberField(layout,
+                Component.translatable("lc2h.config.option.cache_lc2h_max_mb.title"),
+                Component.translatable("lc2h.config.option.cache_lc2h_max_mb.desc"),
+                String.valueOf(working.cacheMaxMB), false);
         this.lc2hCacheBox.setFilter(this::isNumericInput);
-        this.lostCitiesCacheBox = addNumberField(layout, "Lost Cities Cache Cap (MB)",
-                "Max Lost Cities cache memory. Ignored if split-even is enabled.", String.valueOf(working.cacheLostCitiesMaxMB), false);
+        this.lostCitiesCacheBox = addNumberField(layout,
+                Component.translatable("lc2h.config.option.cache_lostcities_max_mb.title"),
+                Component.translatable("lc2h.config.option.cache_lostcities_max_mb.desc"),
+                String.valueOf(working.cacheLostCitiesMaxMB), false);
         this.lostCitiesCacheBox.setFilter(this::isNumericInput);
-        this.lostCitiesTtlBox = addNumberField(layout, "Lost Cities RAM TTL (minutes)",
-                "Time before cold Lost Cities cache entries expire from RAM.", String.valueOf(working.cacheLostCitiesTtlMinutes), false);
+        this.lostCitiesTtlBox = addNumberField(layout,
+                Component.translatable("lc2h.config.option.cache_lostcities_ttl_minutes.title"),
+                Component.translatable("lc2h.config.option.cache_lostcities_ttl_minutes.desc"),
+                String.valueOf(working.cacheLostCitiesTtlMinutes), false);
         this.lostCitiesTtlBox.setFilter(this::isNumericInput);
-        this.lostCitiesDiskTtlBox = addNumberField(layout, "Lost Cities Disk TTL (hours)",
-                "Time before Lost Cities disk cache entries expire.", String.valueOf(working.cacheLostCitiesDiskTtlHours), false);
+        this.lostCitiesDiskTtlBox = addNumberField(layout,
+                Component.translatable("lc2h.config.option.cache_lostcities_disk_ttl_hours.title"),
+                Component.translatable("lc2h.config.option.cache_lostcities_disk_ttl_hours.desc"),
+                String.valueOf(working.cacheLostCitiesDiskTtlHours), false);
         this.lostCitiesDiskTtlBox.setFilter(this::isNumericInput);
 
-        addSectionHeader(layout, Component.literal("STATISTICS"));
-        addToggle(layout, "Enable Cache Stats Logging", working.enableCacheStatsLogging,
-                "Log cache statistics periodically.", false, val -> working.enableCacheStatsLogging = val);
-        addToggle(layout, "Hide Experimental Warning", working.hideExperimentalWarning,
-                "Hide the vanilla experimental warning screen for this mod.", false, val -> working.hideExperimentalWarning = val);
-        addToggle(layout, "Debug Logging", working.enableDebugLogging,
-                "Enable verbose debug logging for warmup/memory operations.", false, val -> working.enableDebugLogging = val);
-        addSectionHeader(layout, Component.literal("INTERFACE"));
+        addSectionHeader(layout, Component.translatable("lc2h.config.section.statistics"));
+        addToggle(layout,
+                Component.translatable("lc2h.config.option.cache_stats_logging.title"),
+                working.enableCacheStatsLogging,
+                Component.translatable("lc2h.config.option.cache_stats_logging.desc"),
+                false, val -> working.enableCacheStatsLogging = val);
+        addToggle(layout,
+                Component.translatable("lc2h.config.option.hide_experimental_warning.title"),
+                working.hideExperimentalWarning,
+                Component.translatable("lc2h.config.option.hide_experimental_warning.desc"),
+                false, val -> working.hideExperimentalWarning = val);
+        addToggle(layout,
+                Component.translatable("lc2h.config.option.debug_logging.title"),
+                working.enableDebugLogging,
+                Component.translatable("lc2h.config.option.debug_logging.desc"),
+                false, val -> working.enableDebugLogging = val);
+        addSectionHeader(layout, Component.translatable("lc2h.config.section.interface"));
         String accentValue = working.uiAccentColor == null ? "3A86FF" : working.uiAccentColor;
-        this.accentColorBox = addTextField(layout, "UI Accent Color (Hex)",
-                "Accent color for the LC2H config UI (hex, example: 3A86FF).", accentValue, false, 9);
+        this.accentColorBox = addTextField(layout,
+                Component.translatable("lc2h.config.option.ui_accent_color.title"),
+                Component.translatable("lc2h.config.option.ui_accent_color.desc"),
+                accentValue, false, 9);
         this.accentColorBox.setFilter(this::isHexInput);
         this.accentColorBox.setResponder(value -> working.uiAccentColor = value);
-        addSectionHeader(layout, Component.literal("CITY EDGE"));
-        addToggle(layout, "Enable City Blend [EXPERIMENTAL]", working.cityBlendEnabled,
-                "Smoothly blend city edges into surrounding terrain.", Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendEnabled = val);
-        addToggle(layout, "Clear Trees Near City Border", working.cityBlendClearTrees,
-                "Prevent trees from generating close to city borders.", Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendClearTrees = val);
-        this.blendWidthBox = addNumberField(layout, "Blend Width (blocks)",
-                "How many blocks to blend from city edge into terrain.", String.valueOf(working.cityBlendWidth), Lc2hConfigController.RESTART_CITY_EDGE);
-        this.blendSoftnessBox = addNumberField(layout, "Blend Softness",
-                "Softness of the falloff (higher = softer).", String.valueOf(working.cityBlendSoftness), Lc2hConfigController.RESTART_CITY_EDGE);
+        addSectionHeader(layout, Component.translatable("lc2h.config.section.city_edge"));
+        addToggle(layout,
+                Component.translatable("lc2h.config.option.city_blend_enabled.title"),
+                working.cityBlendEnabled,
+                Component.translatable("lc2h.config.option.city_blend_enabled.desc"),
+                Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendEnabled = val);
+        addToggle(layout,
+                Component.translatable("lc2h.config.option.city_blend_clear_trees.title"),
+                working.cityBlendClearTrees,
+                Component.translatable("lc2h.config.option.city_blend_clear_trees.desc"),
+                Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendClearTrees = val);
+        this.blendWidthBox = addNumberField(layout,
+                Component.translatable("lc2h.config.option.city_blend_width.title"),
+                Component.translatable("lc2h.config.option.city_blend_width.desc"),
+                String.valueOf(working.cityBlendWidth), Lc2hConfigController.RESTART_CITY_EDGE);
+        this.blendSoftnessBox = addNumberField(layout,
+                Component.translatable("lc2h.config.option.city_blend_softness.title"),
+                Component.translatable("lc2h.config.option.city_blend_softness.desc"),
+                String.valueOf(working.cityBlendSoftness), Lc2hConfigController.RESTART_CITY_EDGE);
 
-        addSectionHeader(layout, Component.literal("BENCHMARK - Performance Validation"));
-        addActionButton(layout, "Automated Throughput Trial",
-                "Creates an automated Lost Cities stress run at 10k×10k to capture chunks/min, TPS range, and freeze counts. Keep hands off inputs during the minute-long sweep.",
-                Component.literal("Launch Benchmark"), btn -> {
+        addSectionHeader(layout, Component.translatable("lc2h.config.section.benchmark"));
+        addActionButton(layout,
+                Component.translatable("lc2h.config.option.benchmark.title"),
+                Component.translatable("lc2h.config.option.benchmark.desc"),
+                Component.translatable("lc2h.config.button.launch_benchmark"), btn -> {
                     if (controller.requestBenchmarkStart()) {
                         Minecraft.getInstance().setScreen(null);
                     }
@@ -403,18 +456,18 @@ private Component unsavedDiscardLabel = Component.literal("Don’t Save");
         this.targetScrollOffset = Math.min(this.targetScrollOffset, this.maxScrollOffset);
 
         CustomButton applyButton = createAnimatedButton(this.contentLeft, footerY, 160, 20,
-                Component.literal("Apply & Save"), btn -> applyChangesFromUi(false), false);
+                Component.translatable("lc2h.config.button.apply_save"), btn -> applyChangesFromUi(false), false);
         addRenderableWidget(applyButton);
 
         CustomButton revertButton = createAnimatedButton(this.contentLeft + 172, footerY, 140, 20,
-                Component.literal("Revert"), btn -> Minecraft.getInstance().setScreen(new Lc2hConfigScreen(parent)), false);
+                Component.translatable("lc2h.config.button.revert"), btn -> Minecraft.getInstance().setScreen(new Lc2hConfigScreen(parent)), false);
         addRenderableWidget(revertButton);
 
         int rightPrimaryX = this.contentRight - 160;
         int rightSecondaryX = rightPrimaryX - 172;
 
         CustomButton openConfigButton = createAnimatedButton(rightSecondaryX, footerY, 160, 20,
-                Component.literal("Open Config File"), btn -> controller.openConfigFile(), false);
+                Component.translatable("lc2h.config.button.open_config_file"), btn -> controller.openConfigFile(), false);
         addRenderableWidget(openConfigButton);
 
         CustomButton doneButton = createAnimatedButton(rightPrimaryX, footerY, 160, 20,
@@ -431,26 +484,26 @@ private Component unsavedDiscardLabel = Component.literal("Don’t Save");
         layout.bumpAll(headerHeight);
     }
 
-    private void addToggle(LayoutHelper layout, String title, boolean initialValue, String description,
+    private void addToggle(LayoutHelper layout, Component title, boolean initialValue, Component description,
                            boolean requiresRestart, Consumer<Boolean> onChange) {
         EntryPlacement placement = prepareEntry(layout, title, description, requiresRestart, 150, 20);
         final boolean[] state = { initialValue };
         CustomButton button = createAnimatedButton(placement.controlX(), placement.controlY(), placement.controlWidth(), placement.controlHeight(),
-                Component.literal(state[0] ? "Enabled" : "Disabled"), b -> {
+                Component.translatable(state[0] ? "lc2h.ui.enabled" : "lc2h.ui.disabled"), b -> {
                     state[0] = !state[0];
                     onChange.accept(state[0]);
-                    b.setMessage(Component.literal(state[0] ? "Enabled" : "Disabled"));
+                    b.setMessage(Component.translatable(state[0] ? "lc2h.ui.enabled" : "lc2h.ui.disabled"));
                 });
         addRenderableWidget(button);
     }
 
-    private EditBox addNumberField(LayoutHelper layout, String title, String description, String value, boolean requiresRestart) {
+    private EditBox addNumberField(LayoutHelper layout, Component title, Component description, String value, boolean requiresRestart) {
         return addTextField(layout, title, description, value, requiresRestart, 12);
     }
 
-    private EditBox addTextField(LayoutHelper layout, String title, String description, String value, boolean requiresRestart, int maxLength) {
+    private EditBox addTextField(LayoutHelper layout, Component title, Component description, String value, boolean requiresRestart, int maxLength) {
         EntryPlacement placement = prepareEntry(layout, title, description, requiresRestart, 150, 18);
-        EditBox box = new EditBox(this.font, placement.controlX(), placement.controlY(), placement.controlWidth(), placement.controlHeight(), Component.literal(title));
+        EditBox box = new EditBox(this.font, placement.controlX(), placement.controlY(), placement.controlWidth(), placement.controlHeight(), title);
         box.setValue(value == null ? "" : value);
         if (maxLength > 0) {
             box.setMaxLength(maxLength);
@@ -462,7 +515,7 @@ private Component unsavedDiscardLabel = Component.literal("Don’t Save");
         return box;
     }
 
-    private CustomButton addActionButton(LayoutHelper layout, String title, String description, Component message, Button.OnPress onPress,
+    private CustomButton addActionButton(LayoutHelper layout, Component title, Component description, Component message, Button.OnPress onPress,
                                          boolean requiresRestart) {
         EntryPlacement placement = prepareEntry(layout, title, description, requiresRestart, 180, 20);
         CustomButton button = createAnimatedButton(placement.controlX(), placement.controlY(), placement.controlWidth(), placement.controlHeight(), message, onPress);
@@ -470,7 +523,7 @@ private Component unsavedDiscardLabel = Component.literal("Don’t Save");
         return button;
     }
 
-    private EntryPlacement prepareEntry(LayoutHelper layout, String title, String description, boolean requiresRestart,
+    private EntryPlacement prepareEntry(LayoutHelper layout, Component title, Component description, boolean requiresRestart,
                                         int preferredControlWidth, int controlHeight) {
         int columnWidth = layout.columnWidth();
         int controlWidth = Math.min(preferredControlWidth, columnWidth - 120);
@@ -482,22 +535,24 @@ private Component unsavedDiscardLabel = Component.literal("Don’t Save");
             textWidth = Math.max(140, columnWidth - 120);
             controlWidth = Math.max(96, columnWidth - textWidth - 12);
         }
-        String descText = requiresRestart && !description.toLowerCase().contains("(restart required)") ? description + " (Restart required)" : description;
+        Component descText = requiresRestart
+                ? Component.empty().append(description).append(Component.translatable("lc2h.ui.restart_required_suffix"))
+                : description;
         List<FormattedCharSequence> lines = wrapText(descText, textWidth);
         int descHeight = lines.size() * this.font.lineHeight;
         int totalHeight = this.font.lineHeight + descHeight + controlHeight + 8;
         LayoutHelper.Placement placement = layout.place(totalHeight);
-        addLabel(placement.x(), placement.y(), Component.literal(title), lines, requiresRestart);
+        addLabel(placement.x(), placement.y(), title, lines, requiresRestart);
         int controlX = placement.x() + placement.width() - controlWidth;
         int controlY = placement.y() + this.font.lineHeight + (descHeight > 0 ? descHeight + 6 : 6);
         return new EntryPlacement(controlX, controlY, controlWidth, controlHeight);
     }
 
-    private List<FormattedCharSequence> wrapText(String text, int width) {
-        if (text == null || text.isEmpty()) {
+    private List<FormattedCharSequence> wrapText(Component text, int width) {
+        if (text == null || text.getString().isEmpty()) {
             return List.of();
         }
-        return this.font.split(Component.literal(text), width);
+        return this.font.split(text, width);
     }
 
     private void addLabel(int x, int y, Component title, List<FormattedCharSequence> lines, boolean requiresRestart) {
@@ -725,9 +780,9 @@ private Component unsavedDiscardLabel = Component.literal("Don’t Save");
                 (0xFF << 24) | (accent & 0xFFFFFF),
                 (0x66 << 24) | (accent & 0xFFFFFF));
 
-        String subline = "Multithreading Engine for The Lost Cities. Made to deliver best performance. Powered by Quantified API";
-        renderCenteredTextWithGlow(graphics, this.font, Component.literal(subline), centerX, 44, 0x88FFFFFF, 0x33333333);
-        String highlight = "Quantified API";
+        String subline = Component.translatable("lc2h.config.header.subline").getString();
+        renderCenteredTextWithGlow(graphics, this.font, Component.translatable("lc2h.config.header.subline"), centerX, 44, 0x88FFFFFF, 0x33333333);
+        String highlight = Component.translatable("lc2h.config.header.subline.highlight").getString();
         int highlightIndex = subline.indexOf(highlight);
         if (highlightIndex >= 0) {
             int fullWidth = this.font.width(subline);
@@ -740,7 +795,7 @@ private Component unsavedDiscardLabel = Component.literal("Don’t Save");
         }
 
         renderCenteredTextWithGlow(graphics, this.font,
-                Component.literal("Includes bug fixes, general improvements, and... DUCKS :DDD. Fields marked in red require a server/client restart."),
+                Component.translatable("lc2h.config.subtitle"),
                 centerX, 62, 0x66FFFFFF, 0x22222222);
     }
 
@@ -1362,8 +1417,8 @@ private Component unsavedDiscardLabel = Component.literal("Don’t Save");
         }
         if (controller.isBenchmarkRunning()) {
             if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
-                controller.requestUserCancelFromClient("User pressed ESC");
-                controller.cancelBenchmarkFeedback(Component.literal("Benchmark cancelled by user"), 0xFF5555);
+                controller.requestUserCancelFromClient(Component.translatable("lc2h.benchmark.reason.user_pressed_esc").getString());
+                controller.cancelBenchmarkFeedback(Component.translatable("lc2h.benchmark.cancelled_by_user"), 0xFF5555);
             }
             return true;
         }
@@ -1404,17 +1459,16 @@ private Component unsavedDiscardLabel = Component.literal("Don’t Save");
         restartPrimaryLabel = restartWarningServer ? SERVER_RESTART_ACTION : RESTART_CLOSE_LABEL;
         if (restartWarningServer) {
             if (optionTitle == null || optionTitle.isBlank()) {
-                restartWarningSummary = Component.literal("Server restart required for these changes.");
+                restartWarningSummary = Component.translatable("lc2h.config.modal.restart_required.summary_server");
             } else {
-                restartWarningSummary = Component.literal(optionTitle + " needs a server restart to apply.");
+                restartWarningSummary = Component.translatable("lc2h.config.modal.restart_required.summary_server_option", optionTitle);
             }
-            restartWarningWarning = Component.literal(
-                    "Stopping the server will disconnect everyone. Save all progress and be ready to manually start the server again.");
+            restartWarningWarning = Component.translatable("lc2h.config.modal.server_restart_required.warning");
         } else if (optionTitle == null || optionTitle.isBlank()) {
-            restartWarningSummary = Component.literal("One or more changes need a restart to fully apply.");
+            restartWarningSummary = Component.translatable("lc2h.config.modal.restart_required.summary_client");
             restartWarningWarning = Component.empty();
         } else {
-            restartWarningSummary = Component.literal(optionTitle + " needs a restart to fully apply.");
+            restartWarningSummary = Component.translatable("lc2h.config.modal.restart_required.summary_client_option", optionTitle);
             restartWarningWarning = Component.empty();
         }
         restartWarningVisible = true;
@@ -1422,8 +1476,8 @@ private Component unsavedDiscardLabel = Component.literal("Don’t Save");
 
     private void showCacheCapWarning(Lc2hConfigController.FormValues values, Lc2hConfigController.CacheCapChange change) {
         cacheCapPendingValues = values;
-        cacheCapWarningSummary = Component.literal(change.summary());
-        cacheCapWarningWarning = Component.literal("This can increase RAM usage and cause instability on low-memory systems.");
+        cacheCapWarningSummary = change.summary();
+        cacheCapWarningWarning = Component.translatable("lc2h.config.modal.cache_budget.warning");
         cacheCapWarningVisible = true;
     }
 
@@ -1578,7 +1632,7 @@ private Component unsavedDiscardLabel = Component.literal("Don’t Save");
         if (!restartWarningWarning.getString().isEmpty()) {
             textY += 6;
             int warningColor = applyAlpha(0xFF4B4B, eased);
-            graphics.drawString(this.font, Component.literal("WARNING:"), drawX + 20, textY, warningColor);
+            graphics.drawString(this.font, Component.translatable("lc2h.ui.warning"), drawX + 20, textY, warningColor);
             textY += this.font.lineHeight + 2;
             List<FormattedCharSequence> warningLines = this.font.split(restartWarningWarning, textAreaWidth);
             int warningTextColor = applyAlpha(0xFFD25A, eased);
@@ -1670,7 +1724,7 @@ private Component unsavedDiscardLabel = Component.literal("Don’t Save");
         if (!cacheCapWarningWarning.getString().isEmpty()) {
             textY += 6;
             int warningColor = applyAlpha(0xFF4B4B, eased);
-            graphics.drawString(this.font, Component.literal("WARNING:"), drawX + 20, textY, warningColor);
+            graphics.drawString(this.font, Component.translatable("lc2h.ui.warning"), drawX + 20, textY, warningColor);
             textY += this.font.lineHeight + 2;
             List<FormattedCharSequence> warningLines = this.font.split(cacheCapWarningWarning, textAreaWidth);
             int warningTextColor = applyAlpha(0xFFD25A, eased);

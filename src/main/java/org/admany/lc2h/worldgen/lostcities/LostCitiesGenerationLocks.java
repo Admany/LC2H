@@ -1,6 +1,6 @@
 package org.admany.lc2h.worldgen.lostcities;
 
-import org.admany.lc2h.logging.config.ConfigManager;
+import org.admany.lc2h.config.ConfigManager;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 

@@ -3,7 +3,6 @@ package org.admany.lc2h.data.cache;
 import org.admany.lc2h.LC2H;
 
 import java.util.Comparator;
-import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
@@ -34,6 +33,9 @@ public final class LostCitiesCacheBudgetManager {
     private static final AtomicBoolean EVICTING = new AtomicBoolean(false);
     private static final AtomicLong LAST_TTL_SWEEP_MS = new AtomicLong(0);
 
+    private static final boolean EVICT_ON_CLIENT = Boolean.parseBoolean(
+        System.getProperty("lc2h.lostcities.cache.evictOnClient", "false"));
+
     private LostCitiesCacheBudgetManager() {
     }
 
@@ -48,8 +50,10 @@ public final class LostCitiesCacheBudgetManager {
             return;
         }
         group.recordPut(key, entryBytes, inserted);
-        maybeEvict();
-        CombinedCacheBudgetManager.maybeEvict();
+        if (shouldEnforceBudgetNow()) {
+            maybeEvict();
+            CombinedCacheBudgetManager.maybeEvict();
+        }
     }
 
     public static void recordAccess(CacheGroup group, Object key) {
@@ -57,8 +61,10 @@ public final class LostCitiesCacheBudgetManager {
             return;
         }
         group.recordAccess(key);
-        maybeEvict();
-        CombinedCacheBudgetManager.maybeEvict();
+        if (shouldEnforceBudgetNow()) {
+            maybeEvict();
+            CombinedCacheBudgetManager.maybeEvict();
+        }
     }
 
     public static void recordRemove(CacheGroup group, Object key) {
@@ -86,8 +92,21 @@ public final class LostCitiesCacheBudgetManager {
 
     public static void applyMaxBytes(long bytes) {
         MAX_BYTES.set(sanitizeMaxBytes(bytes));
-        maybeEvict();
-        CombinedCacheBudgetManager.maybeEvict();
+        if (shouldEnforceBudgetNow()) {
+            maybeEvict();
+            CombinedCacheBudgetManager.maybeEvict();
+        }
+    }
+
+    private static boolean shouldEnforceBudgetNow() {
+        if (EVICT_ON_CLIENT) {
+            return true;
+        }
+        String threadName = Thread.currentThread().getName();
+        if (threadName == null) {
+            return true;
+        }
+        return !"Render thread".equals(threadName) && !"Client thread".equals(threadName);
     }
 
     public static void applyTtlMinutes(long minutes) {

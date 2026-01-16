@@ -1,0 +1,24 @@
+name: Crowdin
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync translations with Crowdin
+        uses: crowdin/github-action@v2
+        with:
+          config: crowdin.yml
+          upload_sources: true
+          download_translations: true
+          create_pull_request: true
+          pull_request_title: "Update translations from Crowdin"
+          pull_request_body: "Automated pull of latest translations."
+          localization_branch_name: "crowdin/translations"
+        env:
+          CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
+          CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}

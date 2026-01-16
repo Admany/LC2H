@@ -230,7 +230,6 @@ public class DHCompat {
         private final Object generatorProxy;
         private final Map<BlockState, Object> blockWrapperCache = new ConcurrentHashMap<>();
         private final Map<Holder<Biome>, Object> biomeWrapperCache = new ConcurrentHashMap<>();
-        private final List<Object> reusableColumn = new ArrayList<>(2);
         private final Object defaultBiomeWrapper;
         private final Object defaultSolidWrapper;
         private final ResourceLocation plainsId = ResourceLocation.parse("minecraft:plains");

@@ -13,35 +13,52 @@ public final class ChatMessenger {
     private static final int COLOR_SUCCESS = 0x7CFC89;
     private static final int COLOR_WARN = 0xFFD166;
     private static final int COLOR_ERROR = 0xFF6F6A;
+    private static final String PREFIX_KEY = "lc2h.chat.prefix";
 
     private ChatMessenger() {
     }
 
-    private static MutableComponent prefix() {
-        return Component.literal("[LC2H] ").withStyle(style -> style.withColor(COLOR_PREFIX).withBold(true));
+    public static MutableComponent prefixComponent() {
+        return Component.translatable(PREFIX_KEY).withStyle(style -> style.withColor(COLOR_PREFIX).withBold(true));
     }
 
-    private static MutableComponent colored(String text, int color) {
-        return Component.literal(text).withStyle(Style.EMPTY.withColor(color));
+    private static MutableComponent colored(Component message, int color) {
+        return Component.empty().append(message).withStyle(Style.EMPTY.withColor(color));
     }
 
-    private static MutableComponent prefixed(String text, int color) {
-        return prefix().append(colored(text, color));
+    public static MutableComponent prefixedComponent(Component message, int color) {
+        return prefixComponent().append(colored(message, color));
+    }
+
+    public static void info(CommandSourceStack source, Component message) {
+        source.sendSuccess(() -> prefixedComponent(message, COLOR_PRIMARY), false);
     }
 
     public static void info(CommandSourceStack source, String message) {
-        source.sendSuccess(() -> prefixed(message, COLOR_PRIMARY), false);
+        info(source, Component.literal(message));
+    }
+
+    public static void success(CommandSourceStack source, Component message) {
+        source.sendSuccess(() -> prefixedComponent(message, COLOR_SUCCESS), false);
     }
 
     public static void success(CommandSourceStack source, String message) {
-        source.sendSuccess(() -> prefixed(message, COLOR_SUCCESS), false);
+        success(source, Component.literal(message));
+    }
+
+    public static void warn(CommandSourceStack source, Component message) {
+        source.sendSuccess(() -> prefixedComponent(message, COLOR_WARN), false);
     }
 
     public static void warn(CommandSourceStack source, String message) {
-        source.sendSuccess(() -> prefixed(message, COLOR_WARN), false);
+        warn(source, Component.literal(message));
+    }
+
+    public static void error(CommandSourceStack source, Component message) {
+        source.sendFailure(prefixedComponent(message, COLOR_ERROR));
     }
 
     public static void error(CommandSourceStack source, String message) {
-        source.sendFailure(prefixed(message, COLOR_ERROR));
+        error(source, Component.literal(message));
     }
 }

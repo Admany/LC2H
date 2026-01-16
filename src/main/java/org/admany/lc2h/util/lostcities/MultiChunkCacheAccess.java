@@ -67,9 +67,9 @@ public final class MultiChunkCacheAccess {
             return;
         }
         if (cache instanceof Map<?, ?> map) {
-            @SuppressWarnings("rawtypes")
-            Map raw = (Map) map;
-            raw.put(key, value);
+            @SuppressWarnings("unchecked")
+            Map<ChunkCoord, MultiChunk> typed = (Map<ChunkCoord, MultiChunk>) map;
+            typed.put(key, value);
             return;
         }
         invoke(cache, PUT_METHOD, "put", 2, key, value);

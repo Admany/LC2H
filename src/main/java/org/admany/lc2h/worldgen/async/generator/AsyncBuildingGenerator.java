@@ -1,10 +1,10 @@
 package org.admany.lc2h.worldgen.async.generator;
 
 import org.admany.lc2h.LC2H;
-import org.admany.lc2h.async.AsyncManager;
-import org.admany.lc2h.async.Priority;
+import org.admany.lc2h.concurrency.async.AsyncManager;
+import org.admany.lc2h.concurrency.async.Priority;
 import org.admany.lc2h.data.cache.FeatureCache;
-import org.admany.lc2h.frustum.ChunkPriorityManager;
+import org.admany.lc2h.client.frustum.ChunkPriorityManager;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 
 import java.lang.reflect.Field;

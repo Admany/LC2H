@@ -9,23 +9,21 @@ import mcjty.lostcities.worldgen.lost.MultiChunk;
 import mcjty.lostcities.worldgen.lost.Railway;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
-import org.admany.lc2h.frustum.ChunkPriorityManager;
-import org.admany.lc2h.mixin.accessor.MultiChunkAccessor;
-import org.admany.lc2h.mixin.accessor.MultiChunkInvoker;
-import org.admany.lc2h.parallel.AdaptiveBatchController;
-import org.admany.lc2h.parallel.AdaptiveConcurrencyLimiter;
-import org.admany.lc2h.parallel.ParallelWorkOptions;
-import org.admany.lc2h.parallel.ParallelWorkQueue;
+import org.admany.lc2h.client.frustum.ChunkPriorityManager;
+import org.admany.lc2h.mixin.accessor.lostcities.MultiChunkAccessor;
+import org.admany.lc2h.mixin.accessor.lostcities.MultiChunkInvoker;
+import org.admany.lc2h.concurrency.parallel.AdaptiveBatchController;
+import org.admany.lc2h.concurrency.parallel.AdaptiveConcurrencyLimiter;
+import org.admany.lc2h.concurrency.parallel.ParallelWorkOptions;
+import org.admany.lc2h.concurrency.parallel.ParallelWorkQueue;
 import org.admany.lc2h.util.lostcities.MultiChunkCacheAccess;
-import org.admany.lc2h.util.spawn.SpawnSearchGuard;
-import org.admany.lc2h.util.spawn.SpawnSearchScheduler;
 import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.lc2h.worldgen.async.snapshot.MultiChunkSnapshot;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
-import org.admany.lc2h.diagnostics.ChunkGenTracker;
-import org.admany.lc2h.diagnostics.ViewCullingStats;
+import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
+import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -53,8 +51,6 @@ public final class AsyncMultiChunkPlanner {
         Math.min(Integer.getInteger("lc2h.multichunk.precomputeParallelism", Math.max(2, MULTICHUNK_MAX)), MULTICHUNK_MAX));
     private static final java.util.concurrent.ExecutorService MULTICHUNK_PRECOMPUTE_POOL =
         MULTICHUNK_PRECOMPUTE_PARALLELISM > 1 ? new java.util.concurrent.ForkJoinPool(MULTICHUNK_PRECOMPUTE_PARALLELISM) : null;
-    private static final long MULTICHUNK_SLOW_LOG_MS = Math.max(0L,
-        Long.getLong("lc2h.multichunk.slowLogMs", 1500L));
 
     private static final LostCitiesCacheBudgetManager.CacheGroup MULTICHUNK_BUDGET =
         LostCitiesCacheBudgetManager.register("lc_multichunk", 4096, 256, MultiChunkCacheAccess::remove);
@@ -153,9 +149,6 @@ public final class AsyncMultiChunkPlanner {
                 if (!future.isCancelled() && !future.isCompletedExceptionally()) {
                     if (future.isDone()) {
                         prepared = future.getNow(null);
-                    } else if (SpawnSearchGuard.isActive()) {
-                        prepared = computeMultiChunkSync(provider, areaSize, multiCoord);
-                        future.cancel(false);
                     } else {
                         prepared = future.join();
                     }
@@ -309,7 +302,7 @@ public final class AsyncMultiChunkPlanner {
         long start = System.nanoTime();
         try {
             boolean trace = Boolean.parseBoolean(System.getProperty("lc2h.multichunkTrace", "false"));
-            if (trace || org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+            if (trace || org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                 try {
                     var settings = provider.getWorldStyle().getMultiSettings();
                     LC2H.LOGGER.debug("[AsyncMultiChunkPlanner] computeMultiChunk start coord={} areaSize={} min={} max={} attempts={} correctStyleFactor={}",
@@ -324,7 +317,7 @@ public final class AsyncMultiChunkPlanner {
             MultiChunk result = ((MultiChunkInvoker) multiChunk).lc2h$calculateBuildings(provider);
 
             long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
-            if (trace || org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+            if (trace || org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                 LC2H.LOGGER.debug("[AsyncMultiChunkPlanner] computeMultiChunk({}) finished in {} ms", multiCoord, elapsedMs);
             }
             return result;
@@ -336,10 +329,6 @@ public final class AsyncMultiChunkPlanner {
         if (provider == null || multiCoord == null || areaSize <= 0) {
             return;
         }
-        if (SpawnSearchGuard.isActive()) {
-            return;
-        }
-
         ChunkCoord topLeft = new ChunkCoord(multiCoord.dimension(), multiCoord.chunkX() * areaSize, multiCoord.chunkZ() * areaSize);
         LostCityProfile profile;
         try {
@@ -489,7 +478,7 @@ public final class AsyncMultiChunkPlanner {
         } catch (Throwable ignored) {
         }
         final byte[] finalSnapshot = snapshot;
-        org.admany.lc2h.core.MainThreadChunkApplier.enqueueChunkApplication(multiCoord, () -> {
+        org.admany.lc2h.worldgen.apply.MainThreadChunkApplier.enqueueChunkApplication(multiCoord, () -> {
             MultiChunk gameCompatible = prepared;
             if (finalSnapshot != null) {
                 try {
@@ -602,7 +591,7 @@ public final class AsyncMultiChunkPlanner {
             integrateResult(provider, multiCoord, computed);
         } catch (Throwable t) {
             boolean debugLogging = AsyncChunkWarmup.isWarmupDebugLoggingEnabled()
-                || org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING;
+                || org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING;
             if (debugLogging) {
                 LC2H.LOGGER.debug("Sync warmup failed for {}", coord, t);
             }
@@ -778,9 +767,6 @@ public final class AsyncMultiChunkPlanner {
         } catch (Throwable ignored) {
             return false;
         }
-        if (SpawnSearchScheduler.isSearchActive(server)) {
-            return false;
-        }
         return true;
     }
 
@@ -848,7 +834,7 @@ public final class AsyncMultiChunkPlanner {
             return;
         }
         long effectiveDelay = Math.max(0L, delayMs);
-        org.admany.lc2h.async.AsyncManager.runLater("multichunk-pending-flush", () -> {
+        org.admany.lc2h.concurrency.async.AsyncManager.runLater("multichunk-pending-flush", () -> {
             try {
                 if (PENDING_SIZE.get() > 0) {
                     submitBatch();
@@ -856,7 +842,7 @@ public final class AsyncMultiChunkPlanner {
             } finally {
                 PENDING_FLUSH_SCHEDULED.set(false);
             }
-        }, effectiveDelay, org.admany.lc2h.async.Priority.LOW);
+        }, effectiveDelay, org.admany.lc2h.concurrency.async.Priority.LOW);
     }
 
     private static boolean isLatencySensitiveThread() {
@@ -976,7 +962,7 @@ public final class AsyncMultiChunkPlanner {
             return;
         }
 
-        org.admany.lc2h.async.AsyncManager.submitTask("warmBuildingInfo", () -> warmBuildingInfo(provider, multiChunk), null, org.admany.lc2h.async.Priority.LOW)
+        org.admany.lc2h.concurrency.async.AsyncManager.submitTask("warmBuildingInfo", () -> warmBuildingInfo(provider, multiChunk), null, org.admany.lc2h.concurrency.async.Priority.LOW)
             .whenComplete((ignored, throwable) -> {
                 WARM_BUILDING_INFO_SUBMITTED.remove(multiCoord);
                 if (throwable != null) {

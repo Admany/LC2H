@@ -4,9 +4,9 @@ import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import net.minecraft.server.MinecraftServer;
 import org.admany.lc2h.LC2H;
-import org.admany.lc2h.async.AsyncManager;
-import org.admany.lc2h.async.Priority;
-import org.admany.lc2h.frustum.ChunkPriorityManager;
+import org.admany.lc2h.concurrency.async.AsyncManager;
+import org.admany.lc2h.concurrency.async.Priority;
+import org.admany.lc2h.client.frustum.ChunkPriorityManager;
 import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.util.log.RateLimitedLogger;
 import org.admany.lc2h.worldgen.async.generator.AsyncDebrisGenerator;
@@ -17,8 +17,7 @@ import org.admany.lc2h.worldgen.async.planner.AsyncTerrainCorrectionPlanner;
 import org.admany.lc2h.worldgen.async.planner.AsyncTerrainFeaturePlanner;
 import org.admany.lc2h.worldgen.coord.RegionCoord;
 import org.admany.lc2h.worldgen.gpu.RegionProcessingGPUTask;
-import org.admany.lc2h.util.spawn.SpawnSearchScheduler;
-import org.admany.lc2h.diagnostics.ViewCullingStats;
+import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
 import org.admany.quantified.api.opencl.QuantifiedOpenCL;
 import org.admany.quantified.core.common.opencl.core.OpenCLManager;
 import org.admany.quantified.core.common.util.TaskScheduler;
@@ -57,7 +56,7 @@ public final class AsyncChunkWarmup {
     private static final int MAX_CONCURRENT_BATCHES = Math.max(1, Math.min(4,
         Integer.getInteger("lc2h.warmup.maxConcurrentBatches", Math.max(1, Runtime.getRuntime().availableProcessors() / 4))));
 
-    // Encoded timestamps (sign bit indicates GPU-ready schedule).
+    // This encodes timestamps - the sign bit indicates GPU-ready schedule.
     private static final ConcurrentHashMap<RegionCoord, Long> PRE_SCHEDULE_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentLinkedQueue<RegionProviderPair> REGION_BUFFER = new ConcurrentLinkedQueue<>();
     private static final AtomicInteger REGION_BUFFER_SIZE = new AtomicInteger(0);
@@ -154,7 +153,7 @@ public final class AsyncChunkWarmup {
         if (isGpuReadyFlag(cached)) {
             return true;
         }
-        // If GPU is ready now and this region was only CPU-scheduled earlier, allow a GPU reschedule.
+        // If the GPU is ready now and this region was only CPU-scheduled earlier, we allow a GPU reschedule.
         return !isOpenClAvailable();
     }
 
@@ -258,7 +257,7 @@ public final class AsyncChunkWarmup {
         } else if (pendingBeforeFlush > 0) {
             if (VERBOSE_LOGGING) {
                 LC2H.LOGGER.info("LC2H warmup: submitting {} regions for background processing", pendingBeforeFlush);
-            } else if (org.admany.lc2h.logging.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+            } else if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
                 LC2H.LOGGER.info("LC2H warmup: submitting {} regions for background processing", pendingBeforeFlush);
             } else {
                 LC2H.LOGGER.debug("LC2H warmup: submitting {} regions for background processing", pendingBeforeFlush);
@@ -504,7 +503,7 @@ public final class AsyncChunkWarmup {
             OpenCLManager.initialize();
             openClProbeStarted.set(true);
         } catch (Throwable t) {
-            // If core isn't present or OpenCL init fails, we keep running CPU-only.
+            // If the core is not present or OpenCL initialization fails, we continue running CPU-only.
             if (VERBOSE_LOGGING) {
                 LC2H.LOGGER.debug("OpenCLManager.initialize() failed: {}", t.toString());
             }
@@ -516,7 +515,7 @@ public final class AsyncChunkWarmup {
         try {
             ClassLoader cl = AsyncChunkWarmup.class.getClassLoader();
             Class.forName("org.lwjgl.opencl.CL", false, cl);
-            // Quantified's current OpenCL probe may reference this; if it's missing, probing will throw.
+            // Quantified's current OpenCL probe may reference this - if it's missing, probing will throw.
             Class.forName("org.lwjgl.system.CustomBuffer", false, cl);
             return true;
         } catch (Throwable ignored) {
@@ -525,7 +524,7 @@ public final class AsyncChunkWarmup {
     }
 
     private static void logOpenClStatusMaybe(String source) {
-        // If OpenCL is now available, don't log stale status and allow future failures to be logged again.
+        // If OpenCL is now available, we avoid logging stale status and allow future failures to be logged again.
         if (isOpenClAvailable()) {
             gpuProbeWarningLogged.set(false);
             return;
@@ -545,7 +544,7 @@ public final class AsyncChunkWarmup {
                     || normalizedReason.contains("initialising")
                     || normalizedReason.contains("initializing");
 
-                // Log only when the status changes, and rate-limit repeat messages.
+                // We log only when the status changes, and rate-limit repeat messages.
                 String key = source + "|" + reason;
                 String prev = lastOpenClStatusKey.get();
                 boolean changed = !key.equals(prev);
@@ -558,7 +557,7 @@ public final class AsyncChunkWarmup {
                 lastOpenClStatusKey.set(key);
                 lastOpenClStatusLogMs.set(now);
 
-                // "Initialization in progress" is a transient state: don't spam INFO with "not available".
+                // "Initialization in progress" is a transient state - we avoid spamming INFO with "not available".
                 if (initInProgress) {
                     if (VERBOSE_LOGGING) {
                         LC2H.LOGGER.debug("LC2H: OpenCL initialization in progress ({}): {}", source, reason);
@@ -702,9 +701,6 @@ public final class AsyncChunkWarmup {
                 return false;
             }
         } catch (Throwable ignored) {
-            return false;
-        }
-        if (SpawnSearchScheduler.isSearchActive(server)) {
             return false;
         }
         return true;

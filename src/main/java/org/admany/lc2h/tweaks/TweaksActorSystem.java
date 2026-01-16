@@ -4,7 +4,7 @@ import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import mcjty.lostcities.worldgen.lost.MultiChunk;
-import org.admany.lc2h.mixin.accessor.MultiChunkAccessor;
+import org.admany.lc2h.mixin.accessor.lostcities.MultiChunkAccessor;
 
 import java.lang.reflect.Field;
 import java.util.Optional;
@@ -31,7 +31,7 @@ public final class TweaksActorSystem {
     public static CompletableFuture<ComputationResult> submit(ComputationRequest request, Supplier<Object> supplier) {
         ComputationRequestKey key = request.key();
         return IN_FLIGHT.computeIfAbsent(key, unused -> {
-            CompletableFuture<ComputationResult> future = org.admany.lc2h.async.AsyncManager.submitSupplier("actor", () -> execute(request, supplier), org.admany.lc2h.async.Priority.LOW)
+            CompletableFuture<ComputationResult> future = org.admany.lc2h.concurrency.async.AsyncManager.submitSupplier("actor", () -> execute(request, supplier), org.admany.lc2h.concurrency.async.Priority.LOW)
                     .thenApply(result -> {
                         if (!isResultLegit(result)) {
                             throw new IllegalStateException("Rejected async result for " + describe(key));

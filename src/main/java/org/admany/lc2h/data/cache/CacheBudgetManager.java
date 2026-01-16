@@ -3,7 +3,6 @@ package org.admany.lc2h.data.cache;
 import org.admany.lc2h.LC2H;
 
 import java.util.Comparator;
-import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
