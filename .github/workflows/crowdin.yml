@@ -55,20 +55,8 @@ jobs:
 
       - name: Create pull request
         uses: peter-evans/create-pull-request@v6
-        if: ${{ secrets.LC2H_GITHUB_TOKEN == '' }}
         with:
-          branch: crowdin/translations
-          title: "Update translations from Crowdin"
-          body: "Automated pull of latest translations."
-          commit-message: "Update translations from Crowdin"
-          committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
-          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
-
-      - name: Create pull request (PAT)
-        uses: peter-evans/create-pull-request@v6
-        if: ${{ secrets.LC2H_GITHUB_TOKEN != '' }}
-        with:
-          token: ${{ secrets.LC2H_GITHUB_TOKEN }}
+          token: ${{ secrets.LC2H_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           branch: crowdin/translations
           title: "Update translations from Crowdin"
           body: "Automated pull of latest translations."
