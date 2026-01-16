@@ -506,7 +506,7 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
             y = 0;
         }
         languageButton = createAnimatedButton(x, y, buttonW, buttonH, Component.literal("\uD83C\uDF10"), btn -> cycleLanguage(), false);
-        languageButton.active = eligibleLocales.size() > 1;
+        languageButton.active = true;
         updateLanguageButtonTooltip();
         addRenderableWidget(languageButton);
     }
@@ -533,6 +533,10 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         }
         eligibleLocales = computeEligibleLocales(minecraft);
         if (eligibleLocales.size() <= 1) {
+            minecraft.reloadResourcePacks().thenRun(() -> minecraft.execute(() -> {
+                eligibleLocales = computeEligibleLocales(minecraft);
+                updateLanguageButtonTooltip();
+            }));
             updateLanguageButtonTooltip();
             return;
         }
