@@ -27,6 +27,12 @@ jobs:
           CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
           CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}
 
+      - name: Fix workspace permissions
+        shell: bash
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" .git || true
+          sudo chmod -R u+rwX .git || true
+
       - name: Normalize locale filenames
         shell: bash
         run: |
