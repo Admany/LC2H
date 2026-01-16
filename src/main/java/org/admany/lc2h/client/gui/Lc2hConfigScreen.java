@@ -4,12 +4,24 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.narration.NarrationElementOutput;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.packs.resources.Resource;
+import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+import org.admany.lc2h.LC2H;
 import org.lwjgl.glfw.GLFW;
+
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.IdentityHashMap;
 import java.util.Map;
 
@@ -17,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 import net.minecraft.util.FormattedCharSequence;
 
@@ -143,6 +156,9 @@ public class Lc2hConfigScreen extends Screen {
     private final Map<EditBox, Float> textFieldAlpha = new IdentityHashMap<>();
     private final Map<EditBox, Float> textFieldOffsetY = new IdentityHashMap<>();
     private final Map<Button, Float> buttonPulse = new IdentityHashMap<>();
+    private CustomButton languageButton;
+    private List<String> eligibleLocales = List.of("en_us");
+    private static final double LOCALE_DIFF_THRESHOLD = 0.80;
     private boolean restartWarningVisible = false;
     private float restartWarningProgress = 0f;
     private Component restartWarningSummary = Component.empty();
@@ -473,6 +489,151 @@ private Component unsavedDiscardLabel = Component.translatable("lc2h.config.moda
         CustomButton doneButton = createAnimatedButton(rightPrimaryX, footerY, 160, 20,
                 Component.translatable("gui.done"), btn -> onClose(), false);
         addRenderableWidget(doneButton);
+
+        initLanguageButton();
+    }
+
+    private void initLanguageButton() {
+        Minecraft minecraft = Minecraft.getInstance();
+        eligibleLocales = computeEligibleLocales(minecraft);
+
+        int x = this.contentRight - 28;
+        int y = 8;
+        languageButton = createAnimatedButton(x, y, 24, 20, Component.literal("\uD83C\uDF10"), btn -> cycleLanguage(), false);
+        languageButton.active = eligibleLocales.size() > 1;
+        updateLanguageButtonTooltip();
+        addRenderableWidget(languageButton);
+    }
+
+    private void updateLanguageButtonTooltip() {
+        if (languageButton == null) {
+            return;
+        }
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null) {
+            return;
+        }
+        if (eligibleLocales.size() <= 1) {
+            languageButton.setTooltip(Tooltip.create(Component.translatable("lc2h.config.button.language.tooltip.none")));
+            return;
+        }
+        languageButton.setTooltip(Tooltip.create(Component.translatable("lc2h.config.button.language.tooltip", minecraft.options.languageCode)));
+    }
+
+    private void cycleLanguage() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null) {
+            return;
+        }
+        eligibleLocales = computeEligibleLocales(minecraft);
+        if (eligibleLocales.size() <= 1) {
+            updateLanguageButtonTooltip();
+            return;
+        }
+        String current = minecraft.options.languageCode;
+        int idx = eligibleLocales.indexOf(current);
+        if (idx < 0) {
+            idx = 0;
+        }
+        String next = eligibleLocales.get((idx + 1) % eligibleLocales.size());
+        if (next.equals(current)) {
+            updateLanguageButtonTooltip();
+            return;
+        }
+        try {
+            minecraft.getLanguageManager().setSelected(next);
+            minecraft.options.languageCode = next;
+            minecraft.options.save();
+            minecraft.reloadResourcePacks().thenRun(() -> minecraft.execute(() -> {
+                if (minecraft.screen == null) {
+                    minecraft.setScreen(this);
+                }
+                updateLanguageButtonTooltip();
+            }));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static List<String> computeEligibleLocales(Minecraft minecraft) {
+        if (minecraft == null) {
+            return List.of("en_us");
+        }
+        ResourceManager manager = minecraft.getResourceManager();
+        if (manager == null) {
+            return List.of("en_us");
+        }
+
+        ResourceLocation enLoc = ResourceLocation.fromNamespaceAndPath(LC2H.MODID, "lang/en_us.json");
+        JsonObject en = loadLangJson(manager, enLoc);
+        if (en == null || en.size() == 0) {
+            return List.of("en_us");
+        }
+        List<String> keys = en.keySet().stream().sorted().collect(Collectors.toList());
+
+        Map<ResourceLocation, Resource> resources;
+        try {
+            resources = manager.listResources("lang", loc -> loc.getNamespace().equals(LC2H.MODID) && loc.getPath().endsWith(".json"));
+        } catch (Throwable t) {
+            return List.of("en_us");
+        }
+
+        List<String> eligible = new ArrayList<>();
+        eligible.add("en_us");
+        for (ResourceLocation loc : resources.keySet()) {
+            String path = loc.getPath();
+            if (!path.startsWith("lang/") || !path.endsWith(".json")) {
+                continue;
+            }
+            String locale = path.substring("lang/".length(), path.length() - ".json".length());
+            if (locale.equals("en_us")) {
+                continue;
+            }
+
+            JsonObject candidate = loadLangJson(manager, loc);
+            if (candidate == null || candidate.size() == 0) {
+                continue;
+            }
+            int diff = 0;
+            for (String key : keys) {
+                JsonElement baseVal = en.get(key);
+                JsonElement candVal = candidate.get(key);
+                if (baseVal == null || candVal == null) {
+                    continue;
+                }
+                String base = baseVal.getAsString();
+                String cand = candVal.getAsString();
+                if (cand != null && !cand.equals(base)) {
+                    diff++;
+                }
+            }
+            double ratio = keys.isEmpty() ? 0.0 : (diff / (double) keys.size());
+            if (ratio >= LOCALE_DIFF_THRESHOLD) {
+                eligible.add(locale);
+            }
+        }
+
+        eligible.remove("en_us");
+        eligible.sort(String::compareToIgnoreCase);
+        eligible.add(0, "en_us");
+        return eligible;
+    }
+
+    private static JsonObject loadLangJson(ResourceManager manager, ResourceLocation location) {
+        if (manager == null || location == null) {
+            return null;
+        }
+        try {
+            Resource res = manager.getResourceOrThrow(location);
+            try (var reader = new InputStreamReader(res.open(), StandardCharsets.UTF_8)) {
+                JsonElement el = JsonParser.parseReader(reader);
+                if (el == null || !el.isJsonObject()) {
+                    return null;
+                }
+                return el.getAsJsonObject();
+            }
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private void addSectionHeader(LayoutHelper layout, Component title) {
