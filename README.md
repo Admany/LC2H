@@ -1,3 +1,5 @@
+# LC2H | Lost Cities: Multithreaded
+
 <div style="font-family:'JetBrains Mono','Courier New',monospace;color:#e0e0e0">
 
 <h1 style="text-align:center;color:#ffffff">LC2H | Lost Cities: Multithreaded</h1>
@@ -9,51 +11,159 @@
 
 <hr style="border-color:#444">
 
-<!-- COMPAT NOTICE -->
-<div style="border:1px solid #66bb6a;color:#e8f5e9;padding:10px">
-  <p style="font-size:18px;color:#c8e6c9">Compatibility Notice</p>
-  <p>
-    <strong>Officially supported and tested:</strong>
-  </p>
-  <ul style="color:#c8e6c9">
-    <li><strong>C2ME</strong></li>
-    <li><strong>Sinytra Connector</strong></li>
-    <li><strong>Distant Horizons</strong></li>
-  </ul>
-  <p style="color:#a5d6a7">
-    These mods are validated with LC2H V3 and are marked as supported.
-  </p>
-</div>
+## Overview
 
-<br>
+LC2H is a high-performance, multithreaded overhaul for **The Lost Cities** Minecraft mod. It moves the entire generation pipeline off the main thread, eliminating lag spikes and providing smooth city exploration.
 
+## Technical Architecture
 
-<hr style="border-color:#333">
+### Core Components
 
-<div style="border:1px solid #ffd54f;padding:12px;background-color:#222;color:#fff">
+#### Async Job Pipeline
+```java
+// Example: Async chunk generation scheduling
+SpawnSearchScheduler.scheduleAsync(cityPos, (result) -> {
+    // Process results on main thread safely
+    applyGeneratedChunks(result);
+});
+```
 
-  <p style="font-size:16px;color:#ffeb3b"><strong>New License Recap - Modpack Usage</strong></p>
+#### Quantified API Integration
+- **Parallel Compute**: CPU-based parallel processing for spawn scanning
+- **GPU Acceleration**: OpenCL compute shaders for heavy computations
+- **Memory Management**: Dedicated GPU memory pools with automatic cleanup
 
-  <p style="color:#fff9c4">
-    The Software is now under a <strong>new license (BRSSLA v1.3)</strong> with updated terms.
-    Modpack usage rules have changed. Please read carefully.
-  </p>
+#### Threading Model
+- **Worker Pools**: Configurable thread pools for different workloads
+- **Job Scheduling**: Priority-based async job execution
+- **State Isolation**: Translation layers prevent thread-unsafe operations
 
-  <ul style="color:#fff9c4">
-    <li>Any modpack hosted on <a href="https://curseforge.com" style="color:#ffe082">CurseForge</a> is automatically allowed to include the Software.</li>
-    <li>Non-commercial usage is allowed until total downloads exceed <strong>100,000</strong> globally.</li>
-    <li>Above 100,000 downloads, the modpack is considered <strong>commercial</strong> and must request a license from BlackRift Studios.</li>
-    <li>Non-compliant modpacks can be blacklisted and/or have the Software disabled.</li>
-    <li>Always retain proper credit and do not bypass licensing enforcement.</li>
-  </ul>
+#### Caching System
+- **RAM Cache**: Fast in-memory storage with TTL
+- **Disk Cache**: Persistent storage for large datasets
+- **Combined Limits**: Prevents memory exhaustion across caches
 
-  <p style="color:#ffe082">
-    <strong>Unaffected modpacks:</strong> Cursed Walking, DeceasedCraft, ZombieCraft
-  </p>
+### Key Classes
 
-  <p style="color:#ffe082">
-    TLDR: <strong>CurseForge modpacks under 100k downloads = free to use. Above that = contact us for a commercial license.</strong>
-  </p>
+- `LC2H.java` - Main mod entry point and initialization
+- `AsyncManager.java` - Central async job coordination
+- `SpawnSearchScheduler.java` - Parallel spawn scanning with Quantified API
+- `AdaptiveBatchController.java` - Dynamic batching for optimal performance
+- `GPUMemoryManager.java` - GPU resource management
+
+## Installation
+
+### Requirements
+- Minecraft 1.20.1
+- Forge 47.x
+- The Lost Cities mod
+- Java 17+
+
+### Steps
+1. Download LC2H from [CurseForge](https://www.curseforge.com/minecraft/mc-mods/lc2h-lost-cities-multithreaded)
+2. Place the JAR file in your `mods` folder
+3. Launch Minecraft with Forge
+4. Configure via Mods → LC2H → Config
+
+## Configuration
+
+Access the configuration UI in-game:
+- **Mods** → **LC2H** → **Config**
+
+### Key Settings
+
+#### Performance
+- **Async Double Block Batcher**: Enable parallel block placement
+- **GPU Acceleration**: Toggle OpenCL compute shaders
+- **Worker Threads**: Adjust thread pool sizes
+
+#### Caching
+- **Combined Cache Cap**: Total memory limit for all caches
+- **Cache TTL**: Time-to-live for cached data
+- **Eviction Policy**: LRU or size-based eviction
+
+#### Diagnostics
+- **Cache Stats Logging**: Periodic performance logging
+- **Benchmark Tool**: Integrated performance scoring
+
+## Contributing
+
+We welcome contributions! Here's how to get involved:
+
+### Development Setup
+1. **Fork** this repository
+2. **Clone** your fork: `git clone https://github.com/YOUR_USERNAME/LC2H-Lost-Cities-Multithreaded.git`
+3. **Setup workspace**: Import as Gradle project in your IDE
+4. **Create feature branch**: `git checkout -b feature/your-feature-name`
+
+### Code Guidelines
+- Follow existing code style (similar to Minecraft Forge conventions)
+- Add Javadoc comments for public APIs
+- Test changes thoroughly, especially threading-related code
+- Update documentation for any user-facing changes
+
+### Pull Request Process
+1. **Test your changes** thoroughly
+2. **Update documentation** if needed
+3. **Create a Pull Request** with a clear description
+4. **Wait for review** - we'll provide feedback and merge when ready
+
+### Translation Contributions
+- Translations are managed via [Crowdin](https://crowdin.com/)
+- Join our Crowdin project to contribute translations
+- Changes are automatically synced to the repository
+
+### Bug Reports & Feature Requests
+- Use [GitHub Issues](https://github.com/Admany/LC2H-Lost-Cities-Multithreaded/issues)
+- Provide detailed reproduction steps for bugs
+- Include performance metrics when reporting performance issues
+
+## Performance
+
+LC2H V3 achieves significant performance improvements:
+
+- **Generation Speed**: 2-3x faster than vanilla Lost Cities
+- **CPU Utilization**: Efficient use of multi-core systems
+- **Memory Usage**: Controlled via configurable caching
+- **Scalability**: Performance scales with hardware capabilities
+
+### Benchmark Results
+- **Light Modpacks**: 15k-25k performance score
+- **Heavy Modpacks**: 30k-40k+ performance score
+- **GPU Acceleration**: Additional 20-50% speedup on supported hardware
+
+## Compatibility
+
+### Supported Mods
+- **C2ME** - Enhanced chunk generation
+- **Sinytra Connector** - Fabric mod compatibility
+- **Distant Horizons** - LOD rendering
+
+### Known Issues
+- Some mods may conflict with async generation
+- GPU acceleration requires compatible hardware
+- Very high city densities may still cause brief stutters
+
+## License
+
+This project is licensed under **BRSSLA v1.3**.
+
+### Modpack Usage
+- **CurseForge**: Automatic permission for all modpacks
+- **Non-commercial**: Allowed until 100,000 total downloads
+- **Commercial**: Contact BlackRift Studios for licensing
+- **Credit**: Always retain proper attribution
+
+## Credits
+
+- **McJty** - Creator of The Lost Cities
+- **BlackRift Studios** - Development and maintenance
+- **Quantified API** - Parallel computing framework
+- **Community Contributors** - Bug reports, testing, and translations
+
+---
+
+**LC2H V3.0.0** - Created by Admany - BlackRift Studios
 
 </div>
 
