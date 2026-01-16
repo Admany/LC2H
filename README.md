@@ -1,5 +1,3 @@
-# LC2H | Lost Cities: Multithreaded
-
 <div style="font-family:'JetBrains Mono','Courier New',monospace;color:#e0e0e0">
 
 <h1 style="text-align:center;color:#ffffff">LC2H | Lost Cities: Multithreaded</h1>
