@@ -1,6 +1,11 @@
 name: Crowdin
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/main/resources/assets/lc2h/lang/en_us.json"
   workflow_dispatch:
   schedule:
     - cron: "0 */6 * * *"
@@ -8,7 +13,7 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    if: github.actor != 'github-actions[bot]'
+    if: github.event_name != 'push' || github.actor != 'github-actions[bot]'
     permissions:
       contents: write
     steps:
