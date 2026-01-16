@@ -48,6 +48,8 @@ jobs:
       - name: Configure git identity
         shell: bash
         run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -59,6 +61,8 @@ jobs:
           title: "Update translations from Crowdin"
           body: "Automated pull of latest translations."
           commit-message: "Update translations from Crowdin"
+          committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
 
       - name: Create pull request (PAT)
         uses: peter-evans/create-pull-request@v6
@@ -69,3 +73,5 @@ jobs:
           title: "Update translations from Crowdin"
           body: "Automated pull of latest translations."
           commit-message: "Update translations from Crowdin"
+          committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
