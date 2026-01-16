@@ -45,6 +45,12 @@ jobs:
             fi
           done
 
+      - name: Configure git identity
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Create pull request
         uses: peter-evans/create-pull-request@v6
         with:
