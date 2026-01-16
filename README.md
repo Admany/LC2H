@@ -1,9 +1,8 @@
 <div style="font-family:'JetBrains Mono','Courier New',monospace;color:#e0e0e0">
-
 <h1 style="text-align:center;color:#ffffff">LC2H | Lost Cities: Multithreaded</h1>
-
+  <a href="Nothing"><img src="https://i.imgur.com/LcQdegn.gif"></a><br>
+  
 <p style="text-align:center">
-  <a href="https://gravelhost.com/BlackRiftStudios"><img src="https://i.imghippo.com/files/XpJ5581voA.png"></a><br>
   <a href="https://github.com/Admany/Quantified-API"><img src="https://i.imghippo.com/files/k1781Ug.png"></a>
 </p>
 
