@@ -22,6 +22,9 @@ jobs:
           upload_sources: true
           download_translations: true
           create_pull_request: false
+          push_translations: false
+          push_sources: false
+          skip_ref_checkout: true
         env:
           GITHUB_TOKEN: ${{ secrets.LC2H_GITHUB_TOKEN || github.token }}
           CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
