@@ -31,6 +31,7 @@ public class ConfigManager {
     public static boolean ENABLE_DEBUG_LOGGING = false;
     public static String UI_ACCENT_COLOR = "3A86FF";
     public static int UI_ACCENT_COLOR_RGB = 0x3A86FF;
+    public static String UI_LOCALE = "en_us";
     public static int CACHE_MAX_MB = 384;
     public static long CACHE_MAX_BYTES = 10L * 1024L * 1024L;
     public static int LOSTCITIES_CACHE_MAX_MB = 384;
@@ -65,6 +66,7 @@ public class ConfigManager {
         public boolean hideExperimentalWarning = true;
         public boolean enableDebugLogging = false;
         public String uiAccentColor = "3A86FF";
+        public String uiLocale = "en_us";
         public int cacheMaxMB = 384;
         public int cacheLostCitiesMaxMB = 384;
         public int cacheCombinedMaxMB = 512;
@@ -158,6 +160,7 @@ public class ConfigManager {
         comments.put("hideExperimentalWarning", "Hide the experimental features warning screen");
         comments.put("enableDebugLogging", "Enable debug logging for memory management and warmup operations");
         comments.put("uiAccentColor", "UI accent color in hex (example: 3A86FF)");
+        comments.put("uiLocale", "Preferred LC2H config screen language (example: en_us, lt_lt).");
         comments.put("cacheMaxMB", "Max LC2H cache budget (MB).");
         comments.put("cacheLostCitiesMaxMB", "Max Lost Cities cache budget (MB).");
         comments.put("cacheCombinedMaxMB", "Max combined LC2H + Lost Cities cache budget (MB).");
@@ -299,6 +302,7 @@ public class ConfigManager {
         HIDE_EXPERIMENTAL_WARNING = CONFIG.hideExperimentalWarning;
         ENABLE_DEBUG_LOGGING = CONFIG.enableDebugLogging;
         UI_ACCENT_COLOR = CONFIG.uiAccentColor != null ? CONFIG.uiAccentColor : UI_ACCENT_COLOR;
+        UI_LOCALE = (CONFIG.uiLocale != null && !CONFIG.uiLocale.isBlank()) ? CONFIG.uiLocale : UI_LOCALE;
         UI_ACCENT_COLOR_RGB = parseHexColor(UI_ACCENT_COLOR, 0x3A86FF);
         CACHE_COMBINED_MAX_MB = Math.max(16, CONFIG.cacheCombinedMaxMB);
         CACHE_ENFORCE_COMBINED_MAX = CONFIG.cacheEnforceCombinedMax;

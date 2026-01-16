@@ -13,6 +13,7 @@ import org.admany.lc2h.config.sync.ConfigSyncNetwork;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 
 final class Lc2hConfigController {
     static final boolean RESTART_CITY_EDGE = true;
@@ -95,6 +96,30 @@ final class Lc2hConfigController {
 
     UiState getUiState() {
         return uiState;
+    }
+
+    String getPreferredUiLocale() {
+        ConfigManager.Config cfg = ConfigManager.CONFIG != null ? ConfigManager.CONFIG : initialConfig;
+        String locale = cfg != null ? cfg.uiLocale : null;
+        if (locale == null || locale.isBlank()) {
+            return "en_us";
+        }
+        return locale.toLowerCase(Locale.ROOT).replace('-', '_');
+    }
+
+    void setPreferredUiLocale(String locale) {
+        String normalized = (locale == null || locale.isBlank())
+                ? "en_us"
+                : locale.toLowerCase(Locale.ROOT).replace('-', '_');
+        ConfigManager.Config base = ConfigManager.CONFIG != null ? ConfigManager.CONFIG : initialConfig;
+        ConfigManager.Config updated = copyConfig(base);
+        updated.uiLocale = normalized;
+        ConfigManager.CONFIG = updated;
+        try {
+            ConfigManager.writePrettyJsonConfig(updated);
+            ConfigManager.initializeGlobals();
+        } catch (Throwable ignored) {
+        }
     }
 
     boolean hasUnsavedChanges() {
@@ -426,6 +451,7 @@ final class Lc2hConfigController {
         c.hideExperimentalWarning = src.hideExperimentalWarning;
         c.enableDebugLogging = src.enableDebugLogging;
         c.uiAccentColor = src.uiAccentColor;
+        c.uiLocale = src.uiLocale;
         c.cacheMaxMB = src.cacheMaxMB;
         c.cacheLostCitiesMaxMB = src.cacheLostCitiesMaxMB;
         c.cacheCombinedMaxMB = src.cacheCombinedMaxMB;

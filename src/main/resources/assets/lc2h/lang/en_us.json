@@ -69,7 +69,8 @@
   "lc2h.config.button.apply_save": "Apply & Save",
   "lc2h.config.button.revert": "Revert",
   "lc2h.config.button.open_config_file": "Open Config File",
-  "lc2h.config.button.language.tooltip": "Cycle game language. Current: %s",
+  "lc2h.config.button.done": "Done",
+  "lc2h.config.button.language.tooltip": "Cycle config language. Current: %s",
   "lc2h.config.button.language.tooltip.none": "No other LC2H translations are available yet.",
 
   "lc2h.config.modal.restart_required.title": "Restart Required",
