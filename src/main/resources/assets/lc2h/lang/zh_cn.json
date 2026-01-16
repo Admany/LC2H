@@ -1,23 +1,19 @@
-﻿{
+{
   "lc2h.chat.prefix": "[LC2H] ",
-
   "lc2h.ui.warning": "警告：",
   "lc2h.ui.enabled": "已启用",
   "lc2h.ui.disabled": "已禁用",
   "lc2h.ui.restart_required_suffix": " (需重启)",
-
   "lc2h.config.title": "《▓ LC²H | 失落之城多线程版 ▓》",
   "lc2h.config.header.subline": "《失落之城》多线程引擎。量化API驱动，成就巅峰性能",
   "lc2h.config.header.subline.highlight": "量化API",
   "lc2h.config.subtitle": "包含错误修复、整体优化及...小鸭子 :DDD。红色标记字段需重启服务器/客户端。",
-
   "lc2h.config.section.general": "通用设置",
   "lc2h.config.section.caching": "缓存设置",
   "lc2h.config.section.statistics": "统计数据",
   "lc2h.config.section.interface": "界面设置",
   "lc2h.config.section.city_edge": "城市边缘",
   "lc2h.config.section.benchmark": "基准测试 - 性能验证",
-
   "lc2h.config.option.async_double_block_batcher.title": "异步双块批处理器",
   "lc2h.config.option.async_double_block_batcher.desc": "为双块启用异步批处理。",
   "lc2h.config.option.floating_vegetation_removal.title": "清除漂浮植被",
@@ -28,7 +24,6 @@
   "lc2h.config.option.lostcities_gen_lock.desc": "减少失落之城罕见区块生成错误（区块重复/异常）。除非排查性能问题，否则请保持开启。",
   "lc2h.config.option.lostcities_part_safety.title": "部件安全检查（推荐）",
   "lc2h.config.option.lostcities_part_safety.desc": "防止插件包中损坏/无效的失落之城部件引发罕见崩溃。除非进行故障排查，否则请保持开启。",
-
   "lc2h.config.option.cache_enforce_combined.title": "强制合并缓存上限",
   "lc2h.config.option.cache_enforce_combined.desc": "启用后，当合并使用量超过上限时，将从最大缓存中驱逐内容。",
   "lc2h.config.option.cache_split_equal.title": "均分组合缓存上限",
@@ -43,17 +38,14 @@
   "lc2h.config.option.cache_lostcities_ttl_minutes.desc": "内存中失落之城缓存数据的生存周期（TTL）。",
   "lc2h.config.option.cache_lostcities_disk_ttl_hours.title": "失落之城磁盘TTL（小时）",
   "lc2h.config.option.cache_lostcities_disk_ttl_hours.desc": "失落之城磁盘缓存数据的生存周期。",
-
   "lc2h.config.option.cache_stats_logging.title": "启用缓存统计日志记录",
   "lc2h.config.option.cache_stats_logging.desc": "定期记录缓存内存使用情况及命中/未命中统计数据。",
-
   "lc2h.config.option.hide_experimental_warning.title": "隐藏实验性警告",
   "lc2h.config.option.hide_experimental_warning.desc": "隐藏实验性功能警告横幅。",
   "lc2h.config.option.debug_logging.title": "调试日志记录",
   "lc2h.config.option.debug_logging.desc": "启用额外调试日志记录（可能产生冗余日志）",
   "lc2h.config.option.ui_accent_color.title": "UI 强调色（十六进制）",
   "lc2h.config.option.ui_accent_color.desc": "LC2H 配置界面的强调色（十六进制，示例：3A86FF）。",
-
   "lc2h.config.option.city_blend_enabled.title": "启用城市融合 [实验性功能]",
   "lc2h.config.option.city_blend_enabled.desc": "将城市边缘与周边地形融合，减少生硬边界。",
   "lc2h.config.option.city_blend_clear_trees.title": "清理城市边界树木",
@@ -62,17 +54,15 @@
   "lc2h.config.option.city_blend_width.desc": "城市边缘融合向野外延伸的距离（以方块为单位）",
   "lc2h.config.option.city_blend_softness.title": "融合柔和度",
   "lc2h.config.option.city_blend_softness.desc": "数值越高，融合效果越平滑但范围越宽",
-
   "lc2h.config.option.benchmark.title": "自动吞吐量测试",
   "lc2h.config.option.benchmark.desc": "运行自动化基准测试以验证硬件上的世界生成性能。",
   "lc2h.config.button.launch_benchmark": "启动基准测试",
   "lc2h.config.button.apply_save": "应用并保存",
   "lc2h.config.button.revert": "还原",
   "lc2h.config.button.open_config_file": "打开配置文件",
-  "lc2h.config.button.done": "完成",
-  "lc2h.config.button.language.tooltip": "循环切换配置语言。当前语言：%s",
+  "lc2h.config.button.done": "Done",
+  "lc2h.config.button.language.tooltip": "Cycle config language. Current: %s",
   "lc2h.config.button.language.tooltip.none": "暂无其他LC2H语言版本可用。",
-
   "lc2h.config.modal.restart_required.title": "需要重启",
   "lc2h.config.modal.restart_required.close_game": "关闭游戏",
   "lc2h.config.modal.restart_required.do_later": "稍后处理",
@@ -84,17 +74,14 @@
   "lc2h.config.modal.restart_required.summary_client": "一项或多项更改需重启才能完全生效。",
   "lc2h.config.modal.restart_required.summary_client_option": "%s 需重启才能完全生效。",
   "lc2h.config.modal.restart_required.warning": "您现在可以关闭程序，或继续游戏稍后重启。部分设置可能需重启后才能完全生效。",
-
   "lc2h.config.modal.cache_budget.title": "缓存预算警告",
   "lc2h.config.modal.cache_budget.continue": "继续",
   "lc2h.config.modal.cache_budget.revert": "撤销",
   "lc2h.config.modal.cache_budget.warning": "此操作可能增加内存占用，导致低内存系统运行不稳定。",
-
   "lc2h.config.modal.unsaved.title": "请稍等！",
   "lc2h.config.modal.unsaved.summary": "您似乎进行了尚未保存的修改。是否在继续前保存？",
   "lc2h.config.modal.unsaved.save": "保存更改",
   "lc2h.config.modal.unsaved.discard": "不保存",
-
   "lc2h.config.status.need_world_for_benchmark": "运行基准测试需处于游戏世界中。",
   "lc2h.config.status.opened_config_file": "已在系统编辑器中打开配置文件",
   "lc2h.config.status.failed_open_config_file": "配置文件打开失败: %s",
@@ -102,7 +89,6 @@
   "lc2h.config.status.failed_send_config_to_server": "发送配置至服务器失败。请确保配置同步服务可达。",
   "lc2h.config.status.saved_restart_required": "已保存。一项或多项变更需重启服务器方可生效。",
   "lc2h.config.status.saved_applied": "已保存并应用。",
-
   "lc2h.config.cache_change.combined": "合并缓存：%s -> %s MB",
   "lc2h.config.cache_change.lc2h": "LC2H缓存：%s -> %s MB",
   "lc2h.config.cache_change.lostcities": "失落之城：%s -> %s MB",
@@ -110,7 +96,6 @@
   "lc2h.config.cache_change.split_evenly": "平均分配：%s -> %s",
   "lc2h.config.cache_change.lostcities_ram_ttl": "失落之城内存TTL：%s -> %s 分钟",
   "lc2h.config.cache_change.lostcities_disk_ttl": "失落之城磁盘TTL：%s -> %s 小时",
-
   "lc2h.command.diagnostics.dump_triggered": "LC2H 诊断转储已触发",
   "lc2h.command.gpu.stats": "内存统计：%s",
   "lc2h.command.gpu.cleanup_done": "全面清理完成。统计信息：%s",
@@ -151,7 +136,6 @@
   "lc2h.command.chunkinfo.events_header": "事件（最新 %s）：",
   "lc2h.command.chunkinfo.event_line": "- [%s, %ss 前] %s",
   "lc2h.command.chunkinfo.thread": "线程=%s",
-
   "lc2h.dev.cache.entries_local": "缓存条目：本地 %s",
   "lc2h.dev.cache.entries_total": "缓存条目：总计 %s (本地 %s, 分布式 %s)",
   "lc2h.dev.cache.memory_line": "内存：%sMB | 压力：%s",
@@ -162,16 +146,13 @@
   "lc2h.dev.cache.cleared_disk": "清除磁盘缓存：已刷新本地%s",
   "lc2h.dev.cache.cleared_disk_with_distributed": "清除磁盘缓存：已刷新本地%s，分布式%s",
   "lc2h.dev.cache.cleanup_triggered": "触发内存压力清理",
-
   "lc2h.dev.chunk_debug.enabled": "启用块调试。使用标记棒：右键设置起始点，左键设置终点。",
   "lc2h.dev.chunk_debug.disabled": "块调试已禁用。",
   "lc2h.dev.chunk_debug.selection_cleared": "块调试选择已清除。",
   "lc2h.dev.chunk_debug.primary_set": "块调试主集设置为块 %s, %s。",
   "lc2h.dev.chunk_debug.secondary_set": "块调试次集设置为块 %s, %s。",
-
   "lc2h.dev.frustum_debug.enabled": "视锥体调试已启用。黄色=视点优先级，蓝色=背景。",
   "lc2h.dev.frustum_debug.disabled": "视锥体调试已禁用。",
-
   "lc2h.benchmark.not_supported_dedicated": "专用服务器不支持基准测试。",
   "lc2h.benchmark.client_unavailable": "Minecraft客户端不可用。",
   "lc2h.benchmark.already_running": "基准测试正在运行。",
@@ -182,7 +163,7 @@
   "lc2h.benchmark.countdown_short": "基准测试将在 %ss 后启动",
   "lc2h.benchmark.preparing_environment": "基准测试正在准备环境...",
   "lc2h.benchmark.starting_soon": "基准测试即将开始。请勿触碰控制装置。",
-  "lc2h.benchmark.running_for_duration": "基准测试运行时长为 %ss..." ,
+  "lc2h.benchmark.running_for_duration": "基准测试运行时长为 %ss...",
   "lc2h.benchmark.running_gathering_metrics": "基准测试运行中。正在收集指标...",
   "lc2h.benchmark.cancelled": "基准测试已取消：%s",
   "lc2h.benchmark.cancelled_short": "基准测试取消",
@@ -190,17 +171,14 @@
   "lc2h.benchmark.finished": "基准测试完成。CPM %s，冻结 %s",
   "lc2h.benchmark.complete": "基准测试完成。CPM %s，通用TPS %s",
   "lc2h.benchmark.upload_saved_file": "结果已保存至文件（网站上传功能已禁用）",
-
   "lc2h.benchmark.reason.user_pressed_esc": "用户按下ESC键",
   "lc2h.benchmark.reason.esc_during_countdown": "倒计时期间按下ESC键",
   "lc2h.benchmark.reason.server_stopping": "服务器停止运行",
-
   "lc2h.benchmark.hud.running": "正在运行",
   "lc2h.benchmark.hud.benchmark": "基准测试",
   "lc2h.benchmark.hud.time_remaining": "剩余时间: %ss",
   "lc2h.benchmark.hud.press_esc": "按ESC取消",
   "lc2h.benchmark.hud.separator": ". ",
-
   "lc2h.benchmark.chat.complete": "基准测试完成！",
   "lc2h.benchmark.chat.cpm": "CPM: %s",
   "lc2h.benchmark.chat.tps": "TPS: %s",
@@ -219,7 +197,6 @@
   "lc2h.benchmark.chat.freeze_detection": "卡顿检测：任何持续3秒以上的帧计为卡顿。",
   "lc2h.benchmark.chat.freeze_example": "示例：5秒延迟峰值 = 1次卡顿（扣分5000分）。",
   "lc2h.benchmark.chat.tip": "更高CPM值 + 更少卡顿 = 更优世界生成性能！",
-  
   "lc2h.benchmark.results.title": "LC2H 基准测试结果",
   "lc2h.benchmark.results.copy": "复制文本",
   "lc2h.benchmark.results.section.summary": "摘要",
@@ -245,8 +222,3 @@
   "lc2h.benchmark.results.label.aborted": "中止",
   "lc2h.benchmark.results.clipboard.title": "LC2H 基准测试结果"
 }
-  
-
-
-
-
