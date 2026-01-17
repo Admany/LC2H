@@ -24,6 +24,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 @Mod.EventBusSubscriber(modid = LC2H.MODID)
@@ -31,10 +32,14 @@ public class AsyncManager {
 
     private static final Queue<Runnable> mainThreadQueue = new ConcurrentLinkedQueue<>();
     private static final AtomicBoolean drainScheduled = new AtomicBoolean(false);
+    private static final AtomicLong lastFastpathScheduleNs = new AtomicLong(0L);
     private static volatile MinecraftServer serverRef;
     private static boolean initialized = true;
     private static final boolean quantifiedBypass = false;
     private static final boolean quantifiedAvailable;
+    private static final int FASTPATH_MIN_QUEUE = Math.max(1, Integer.getInteger("lc2h.mainqueue.fastpath_min_size", 32));
+    private static final long FASTPATH_MIN_INTERVAL_NS =
+        TimeUnit.MICROSECONDS.toNanos(Long.getLong("lc2h.mainqueue.fastpath_min_interval_us", 250L));
 
     private static final ExecutorService FALLBACK_EXECUTOR = Executors.newFixedThreadPool(
         Math.max(2, Integer.getInteger("lc2h.async.fallbackThreads", Math.max(2, Runtime.getRuntime().availableProcessors() / 2))),
@@ -123,7 +128,7 @@ public class AsyncManager {
                 }
                 CompletableFuture<T> future = QuantifiedAPI.submit(builder);
                 LC2H.LOGGER.debug("Task '{}' submitted to Quantified API", taskName);
-                return future;
+                return wrapTaskFuture(taskName, future);
             } catch (Throwable t) {
                 LC2H.LOGGER.error("Quantified API submit failed for task '{}': {}", taskName, t.toString());
                 LC2H.LOGGER.debug("Quantified submit error", t);
@@ -131,7 +136,7 @@ public class AsyncManager {
         }
 
         LC2H.LOGGER.debug("Running async task '{}' on LC2H fallback executor", taskName);
-        return CompletableFuture.supplyAsync(supplier, FALLBACK_EXECUTOR);
+        return wrapTaskFuture(taskName, CompletableFuture.supplyAsync(supplier, FALLBACK_EXECUTOR));
     }
 
     public static <T> CompletableFuture<List<T>> submitBatch(String batchName, List<Supplier<T>> suppliers, Priority priority) {
@@ -145,7 +150,7 @@ public class AsyncManager {
             java.util.List<CompletableFuture<T>> futures = new java.util.ArrayList<>(suppliers.size());
             for (int i = 0; i < suppliers.size(); i++) {
                 String taskName = batchName + "-" + i;
-                futures.add(submitCallable(taskName, suppliers.get(i), priority, gpuPreferred));
+                futures.add(wrapBatchFuture(batchName, i, submitCallable(taskName, suppliers.get(i), priority, gpuPreferred)));
             }
             return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
                 .thenApply(v -> futures.stream().map(CompletableFuture::join).toList());
@@ -154,10 +159,39 @@ public class AsyncManager {
         java.util.List<CompletableFuture<T>> futures = new java.util.ArrayList<>(suppliers.size());
         for (int i = 0; i < suppliers.size(); i++) {
             String taskName = batchName + "-" + i;
-            futures.add(submitCallable(taskName, suppliers.get(i), priority, gpuPreferred));
+            futures.add(wrapBatchFuture(batchName, i, submitCallable(taskName, suppliers.get(i), priority, gpuPreferred)));
         }
         return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
             .thenApply(v -> futures.stream().map(CompletableFuture::join).toList());
+    }
+
+    private static <T> CompletableFuture<T> wrapBatchFuture(String batchName, int index, CompletableFuture<T> future) {
+        if (future == null) {
+            CompletableFuture<T> failed = new CompletableFuture<>();
+            failed.completeExceptionally(new IllegalStateException("LC2H batch future was null"));
+            return failed;
+        }
+        return future.whenComplete((result, throwable) -> {
+            if (throwable != null) {
+                String name = batchName + "-" + index;
+                LC2H.LOGGER.error("Async batch task '{}' failed: {}", name, throwable.toString());
+                LC2H.LOGGER.debug("Async batch task error", throwable);
+            }
+        });
+    }
+
+    private static <T> CompletableFuture<T> wrapTaskFuture(String taskName, CompletableFuture<T> future) {
+        if (future == null) {
+            CompletableFuture<T> failed = new CompletableFuture<>();
+            failed.completeExceptionally(new IllegalStateException("LC2H task future was null"));
+            return failed;
+        }
+        return future.whenComplete((result, throwable) -> {
+            if (throwable != null) {
+                LC2H.LOGGER.error("Async task '{}' failed: {}", taskName, throwable.toString());
+                LC2H.LOGGER.debug("Async task error", throwable);
+            }
+        });
     }
 
     public static CompletableFuture<Void> runLater(String taskName, Runnable task, long delayMs, Priority priority) {
@@ -258,7 +292,18 @@ public class AsyncManager {
         // This reduces reliance on tick END draining (which can become a throughput ceiling
         // when async producers outpace the per-tick budget), while still keeping all work on
         // the main thread and respecting the same lag guard and budgets.
-        if (server != null) {
+        if (server != null && mainThreadQueue.size() >= FASTPATH_MIN_QUEUE) {
+            maybeScheduleBudgetedDrain(server);
+        }
+    }
+
+    private static void maybeScheduleBudgetedDrain(MinecraftServer server) {
+        long now = System.nanoTime();
+        long last = lastFastpathScheduleNs.get();
+        if ((now - last) < FASTPATH_MIN_INTERVAL_NS) {
+            return;
+        }
+        if (lastFastpathScheduleNs.compareAndSet(last, now)) {
             scheduleBudgetedDrain(server);
         }
     }
@@ -277,9 +322,9 @@ public class AsyncManager {
                 drainBudgeted(server);
 
                 // If producers raced ahead, schedule another pass. This stays coalesced and
-                // still obeys the same budgets always.
-                if (!mainThreadQueue.isEmpty()) {
-                    scheduleBudgetedDrain(server);
+                // still obeys the same budgets always, but avoid hammering the server executor.
+                if (!mainThreadQueue.isEmpty() && mainThreadQueue.size() >= FASTPATH_MIN_QUEUE) {
+                    maybeScheduleBudgetedDrain(server);
                 }
             });
         } catch (Throwable ignored) {

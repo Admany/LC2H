@@ -4,10 +4,12 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.core.QuartPos;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.fml.ModList;
@@ -338,6 +340,9 @@ public class DHCompat {
             BlockPos.MutableBlockPos mutable = new BlockPos.MutableBlockPos();
             int minY = level.getMinBuildHeight();
             int maxY = level.getMaxBuildHeight();
+            int lastChunkX = Integer.MIN_VALUE;
+            int lastChunkZ = Integer.MIN_VALUE;
+            LevelChunk chunk = null;
 
             for (int x = 0; x < width; x++) {
                 int worldX = baseBlockX + x * scale + (scale >> 1);
@@ -345,14 +350,33 @@ public class DHCompat {
                     int worldZ = baseBlockZ + z * scale + (scale >> 1);
                     int index = x * width + z;
 
-                    int height = level.getHeight(Heightmap.Types.WORLD_SURFACE, worldX, worldZ);
+                    int chunkX = worldX >> 4;
+                    int chunkZ = worldZ >> 4;
+                    if (chunkX != lastChunkX || chunkZ != lastChunkZ) {
+                        chunk = level.getChunkSource().getChunkNow(chunkX, chunkZ);
+                        lastChunkX = chunkX;
+                        lastChunkZ = chunkZ;
+                    }
+
+                    if (chunk == null) {
+                        heights[index] = minY;
+                        blockSamples[index] = Blocks.AIR.defaultBlockState();
+                        biomeSamples[index] = null;
+                        continue;
+                    }
+
+                    int height = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, worldX, worldZ);
                     height = Math.max(minY, Math.min(height, maxY));
                     heights[index] = height;
 
                     int sampleY = Math.max(minY, height - 1);
                     mutable.set(worldX, sampleY, worldZ);
-                    blockSamples[index] = level.getBlockState(mutable);
-                    biomeSamples[index] = level.getBiome(mutable);
+                    blockSamples[index] = chunk.getBlockState(mutable);
+                    biomeSamples[index] = chunk.getNoiseBiome(
+                        QuartPos.fromBlock(worldX),
+                        QuartPos.fromBlock(sampleY),
+                        QuartPos.fromBlock(worldZ)
+                    );
                 }
             }
         }
