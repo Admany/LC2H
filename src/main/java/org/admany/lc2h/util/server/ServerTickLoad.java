@@ -5,6 +5,7 @@ import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.compat.ChunkyCompat;
 
 @Mod.EventBusSubscriber(modid = LC2H.MODID)
 public final class ServerTickLoad {
@@ -72,6 +73,10 @@ public final class ServerTickLoad {
 
     public static boolean shouldPauseNonCritical(MinecraftServer server) {
         refreshConfigIfNeeded();
+
+        if (ChunkyCompat.shouldPauseForChunky()) {
+            return true;
+        }
 
         double elapsed = getElapsedMsInCurrentTick();
         if (elapsedLimitMs > 0.0D && elapsed >= elapsedLimitMs) {
