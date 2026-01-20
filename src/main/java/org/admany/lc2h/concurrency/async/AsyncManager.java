@@ -10,6 +10,7 @@ import org.admany.lc2h.LC2H;
 import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.lc2h.dev.diagnostics.AsyncIssueMonitor;
 import org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner;
+import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
 import org.admany.quantified.api.QuantifiedAPI;
 import org.admany.quantified.api.model.QuantifiedTask;
 import net.minecraftforge.server.ServerLifecycleHooks;
@@ -252,13 +253,14 @@ public class AsyncManager {
             return;
         }
 
+        MinecraftServer server = event.getServer();
         AsyncBuildingInfoPlanner.drainReadyResults();
+        AsyncBuildingInfoPlanner.drainLimiterRetries(server);
+        AsyncMultiChunkPlanner.drainWarmRetries(server);
 
         if (mainThreadQueue.isEmpty()) {
             return;
         }
-
-        MinecraftServer server = event.getServer();
         if (ServerTickLoad.shouldPauseNonCritical(server)) {
             return;
         }

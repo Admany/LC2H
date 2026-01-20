@@ -33,9 +33,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.ThreadLocalRandom;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.MinecraftServer;
 
 public final class AsyncMultiChunkPlanner {
 
@@ -47,6 +51,35 @@ public final class AsyncMultiChunkPlanner {
     private static final long WARM_BUILDING_INFO_TTL_MS = Math.max(30_000L,
         Long.getLong("lc2h.multichunk.warmup_ttl_ms", java.util.concurrent.TimeUnit.MINUTES.toMillis(10)));
     private static final Semaphore WARM_SEMAPHORE = new Semaphore(2);
+    private static final long WARM_RETRY_BASE_MS = Math.max(5L, Long.getLong("lc2h.multichunk.warmupRetryMs", 50L));
+    private static final int WARM_RETRY_JITTER_MS = Math.max(0, Integer.getInteger("lc2h.multichunk.warmupRetryJitterMs", 25));
+    private static final int WARM_RETRY_MAX_ATTEMPTS = Math.max(1,
+        Integer.getInteger("lc2h.multichunk.warmupRetryMaxAttempts", 32));
+    private static final long WARM_RETRY_TTL_MS = Math.max(1_000L,
+        Long.getLong("lc2h.multichunk.warmupRetryTtlMs", TimeUnit.MINUTES.toMillis(2)));
+    private static final long WARM_RETRY_DRAIN_BUDGET_NS = TimeUnit.MICROSECONDS.toNanos(
+        Math.max(50L, Long.getLong("lc2h.multichunk.warmupRetryBudgetUs", 500L)));
+    private static final int WARM_RETRY_DRAIN_MAX = Math.max(8,
+        Integer.getInteger("lc2h.multichunk.warmupRetryDrainMax", 128));
+    private static final ConcurrentHashMap<ChunkCoord, WarmRetryEntry> WARM_RETRY_ENTRIES = new ConcurrentHashMap<>();
+    private static final ConcurrentLinkedQueue<ChunkCoord> WARM_RETRY_QUEUE = new ConcurrentLinkedQueue<>();
+    private static final AtomicLong WARM_RETRY_TOTAL = new AtomicLong(0L);
+    private static final AtomicLong LAST_WARM_RETRY_MS = new AtomicLong(0L);
+
+    private static final class WarmRetryEntry {
+        private final IDimensionInfo provider;
+        private final ChunkCoord multiCoord;
+        private final long firstEnqueuedMs;
+        private volatile long nextRetryMs;
+        private final AtomicInteger attempts = new AtomicInteger(0);
+
+        private WarmRetryEntry(IDimensionInfo provider, ChunkCoord multiCoord, long firstEnqueuedMs, long nextRetryMs) {
+            this.provider = provider;
+            this.multiCoord = multiCoord;
+            this.firstEnqueuedMs = firstEnqueuedMs;
+            this.nextRetryMs = nextRetryMs;
+        }
+    }
 
     private static final int MULTICHUNK_PARALLELISM_OVERRIDE = Integer.getInteger("lc2h.multichunk.parallelism", -1);
     private static final int MULTICHUNK_MAX = Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors()));
@@ -957,6 +990,110 @@ public final class AsyncMultiChunkPlanner {
         return value.replace(':', '_').replace('|', '_').replace(' ', '_');
     }
 
+    private static long computeWarmRetryDelayMs() {
+        long delay = WARM_RETRY_BASE_MS;
+        if (WARM_RETRY_JITTER_MS > 0) {
+            delay += ThreadLocalRandom.current().nextInt(WARM_RETRY_JITTER_MS + 1);
+        }
+        return delay;
+    }
+
+    private static void enqueueWarmRetry(IDimensionInfo provider, ChunkCoord multiCoord, long delayMs) {
+        if (provider == null || multiCoord == null) {
+            return;
+        }
+        long nowMs = System.currentTimeMillis();
+        long delay = Math.max(1L, delayMs);
+        WarmRetryEntry entry = WARM_RETRY_ENTRIES.compute(multiCoord, (key, existing) -> {
+            if (existing == null) {
+                return new WarmRetryEntry(provider, multiCoord, nowMs, nowMs + delay);
+            }
+            if (nowMs + delay < existing.nextRetryMs) {
+                existing.nextRetryMs = nowMs + delay;
+            }
+            return existing;
+        });
+        if (entry != null) {
+            entry.attempts.incrementAndGet();
+            WARM_RETRY_QUEUE.add(multiCoord);
+            WARM_RETRY_TOTAL.incrementAndGet();
+            LAST_WARM_RETRY_MS.set(nowMs);
+        }
+    }
+
+    private static void requeueWarmRetry(WarmRetryEntry entry, long nextRetryMs) {
+        if (entry == null) {
+            return;
+        }
+        entry.nextRetryMs = nextRetryMs;
+        WARM_RETRY_QUEUE.add(entry.multiCoord);
+    }
+
+    public static void drainWarmRetries(MinecraftServer server) {
+        if (WARM_RETRY_QUEUE.isEmpty()) {
+            return;
+        }
+        if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+            return;
+        }
+
+        double scale = ServerTickLoad.getBudgetScale(server);
+        long budgetNs = Math.max(1L, (long) (WARM_RETRY_DRAIN_BUDGET_NS * scale));
+        int maxDrain = Math.max(1, (int) Math.round(WARM_RETRY_DRAIN_MAX * scale));
+
+        long startNs = System.nanoTime();
+        int drained = 0;
+        long nowMs = System.currentTimeMillis();
+        ChunkCoord key;
+        while (drained < maxDrain && (key = WARM_RETRY_QUEUE.poll()) != null) {
+            WarmRetryEntry entry = WARM_RETRY_ENTRIES.get(key);
+            if (entry == null) {
+                continue;
+            }
+            if ((nowMs - entry.firstEnqueuedMs) > WARM_RETRY_TTL_MS
+                || entry.attempts.get() > WARM_RETRY_MAX_ATTEMPTS) {
+                WARM_RETRY_ENTRIES.remove(key);
+                drained++;
+                continue;
+            }
+            Long lastDone = WARM_BUILDING_INFO_DONE.get(key);
+            if (lastDone != null && (nowMs - lastDone) <= WARM_BUILDING_INFO_TTL_MS) {
+                WARM_RETRY_ENTRIES.remove(key);
+                drained++;
+                continue;
+            }
+            if (WARM_BUILDING_INFO_SUBMITTED.containsKey(key)) {
+                requeueWarmRetry(entry, nowMs + computeWarmRetryDelayMs());
+                drained++;
+            } else if (nowMs < entry.nextRetryMs) {
+                requeueWarmRetry(entry, entry.nextRetryMs);
+                drained++;
+            } else {
+                MultiChunk cached = getCachedMultiChunk(entry.multiCoord);
+                if (cached == null) {
+                    WARM_RETRY_ENTRIES.remove(key);
+                } else {
+                    WARM_RETRY_ENTRIES.remove(key);
+                    scheduleWarmBuildingInfo(entry.provider, cached, entry.multiCoord);
+                }
+                drained++;
+            }
+            if ((System.nanoTime() - startNs) >= budgetNs) {
+                break;
+            }
+            if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+                break;
+            }
+        }
+    }
+
+    private static MultiChunk getCachedMultiChunk(ChunkCoord multiCoord) {
+        Object cacheLock = MultiChunkCacheAccess.lock();
+        synchronized (cacheLock) {
+            return MultiChunkCacheAccess.get(multiCoord);
+        }
+    }
+
     private static void scheduleWarmBuildingInfo(IDimensionInfo provider, MultiChunk multiChunk, ChunkCoord multiCoord) {
         if (provider == null || multiChunk == null || multiCoord == null) {
             return;
@@ -974,12 +1111,7 @@ public final class AsyncMultiChunkPlanner {
 
         if (!WARM_SEMAPHORE.tryAcquire()) {
             WARM_BUILDING_INFO_SUBMITTED.remove(multiCoord);
-            org.admany.lc2h.concurrency.async.AsyncManager.runLater(
-                "warmBuildingInfo-retry",
-                () -> scheduleWarmBuildingInfo(provider, multiChunk, multiCoord),
-                50L,
-                org.admany.lc2h.concurrency.async.Priority.LOW
-            );
+            enqueueWarmRetry(provider, multiCoord, computeWarmRetryDelayMs());
             return;
         }
 
@@ -994,6 +1126,8 @@ public final class AsyncMultiChunkPlanner {
                 WARM_BUILDING_INFO_SUBMITTED.remove(multiCoord);
                 if (throwable == null) {
                     WARM_BUILDING_INFO_DONE.put(multiCoord, System.currentTimeMillis());
+                } else {
+                    enqueueWarmRetry(provider, multiCoord, computeWarmRetryDelayMs());
                 }
                 if (throwable != null) {
                     LC2H.LOGGER.error("Warm building info failed for {}: {}", multiCoord, throwable.getMessage());
