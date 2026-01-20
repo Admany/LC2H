@@ -2,6 +2,7 @@ package org.admany.lc2h.worldgen.async.planner;
 
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
+import net.minecraft.server.MinecraftServer;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.concurrency.async.AsyncManager;
 import org.admany.lc2h.data.cache.CacheBudgetManager;
@@ -43,6 +44,46 @@ public final class AsyncBuildingInfoPlanner {
     private static final AtomicLong SPAWN_RETRY_TOTAL = new AtomicLong(0L);
     private static final AtomicLong LAST_LIMITER_RETRY_MS = new AtomicLong(0L);
     private static final AtomicLong LAST_SPAWN_RETRY_MS = new AtomicLong(0L);
+    private static final int LIMITER_RETRY_MAX_ATTEMPTS = Math.max(1,
+        Integer.getInteger("lc2h.buildinginfo.limiterRetryMaxAttempts", 32));
+    private static final long LIMITER_RETRY_TTL_MS = Math.max(1_000L,
+        Long.getLong("lc2h.buildinginfo.limiterRetryTtlMs", TimeUnit.MINUTES.toMillis(2)));
+    private static final long LIMITER_RETRY_DRAIN_BUDGET_NS = TimeUnit.MICROSECONDS.toNanos(
+        Math.max(50L, Long.getLong("lc2h.buildinginfo.limiterRetryBudgetUs", 500L)));
+    private static final int LIMITER_RETRY_DRAIN_MAX = Math.max(8,
+        Integer.getInteger("lc2h.buildinginfo.limiterRetryDrainMax", 128));
+
+    private record RetryKey(ChunkCoord coord, boolean highPriority) {}
+
+    private static final class RetryEntry {
+        private final IDimensionInfo provider;
+        private final ChunkCoord coord;
+        private final boolean debugLogging;
+        private final long startTime;
+        private final boolean highPriority;
+        private final long firstEnqueuedMs;
+        private volatile long nextRetryMs;
+        private final AtomicInteger attempts = new AtomicInteger(0);
+
+        private RetryEntry(IDimensionInfo provider,
+                           ChunkCoord coord,
+                           boolean debugLogging,
+                           long startTime,
+                           boolean highPriority,
+                           long firstEnqueuedMs,
+                           long nextRetryMs) {
+            this.provider = provider;
+            this.coord = coord;
+            this.debugLogging = debugLogging;
+            this.startTime = startTime;
+            this.highPriority = highPriority;
+            this.firstEnqueuedMs = firstEnqueuedMs;
+            this.nextRetryMs = nextRetryMs;
+        }
+    }
+
+    private static final ConcurrentHashMap<RetryKey, RetryEntry> LIMITER_RETRY_ENTRIES = new ConcurrentHashMap<>();
+    private static final ConcurrentLinkedQueue<RetryKey> LIMITER_RETRY_QUEUE = new ConcurrentLinkedQueue<>();
 
     private static final class InFlightMarker {
         private InFlightMarker() {
@@ -506,18 +547,91 @@ public final class AsyncBuildingInfoPlanner {
         if (debugLogging) {
             LC2H.LOGGER.debug("BuildingInfo limiter saturated; retrying {} in {} ms", coord, delayMs);
         }
-        if (highPriority) {
-            AsyncManager.runLater("spawn-buildinginfo-retry",
-                () -> runBuildingInfo(provider, coord, debugLogging, startTime, true),
-                delayMs,
-                org.admany.lc2h.concurrency.async.Priority.HIGH);
+        enqueueLimiterRetry(provider, coord, debugLogging, startTime, highPriority, nowMs + delayMs);
+    }
+
+    private static void enqueueLimiterRetry(IDimensionInfo provider,
+                                            ChunkCoord coord,
+                                            boolean debugLogging,
+                                            long startTime,
+                                            boolean highPriority,
+                                            long nextRetryMs) {
+        RetryKey key = new RetryKey(coord, highPriority);
+        RetryEntry entry = LIMITER_RETRY_ENTRIES.compute(key, (k, existing) -> {
+            if (existing == null) {
+                return new RetryEntry(provider, coord, debugLogging, startTime, highPriority, System.currentTimeMillis(), nextRetryMs);
+            }
+            if (nextRetryMs < existing.nextRetryMs) {
+                existing.nextRetryMs = nextRetryMs;
+            }
+            return existing;
+        });
+        if (entry != null) {
+            entry.attempts.incrementAndGet();
+            LIMITER_RETRY_QUEUE.add(key);
+        }
+    }
+
+    public static void drainLimiterRetries(MinecraftServer server) {
+        if (LIMITER_RETRY_QUEUE.isEmpty()) {
             return;
         }
-        AsyncManager.runLater("buildinginfo-limiter-retry",
-            () -> PlannerBatchQueue.enqueue(provider, coord, PlannerTaskKind.BUILDING_INFO,
-                () -> runBuildingInfo(provider, coord, debugLogging, startTime, false)),
-            delayMs,
-            org.admany.lc2h.concurrency.async.Priority.LOW);
+        if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+            return;
+        }
+
+        double scale = ServerTickLoad.getBudgetScale(server);
+        long budgetNs = Math.max(1L, (long) (LIMITER_RETRY_DRAIN_BUDGET_NS * scale));
+        int maxDrain = Math.max(1, (int) Math.round(LIMITER_RETRY_DRAIN_MAX * scale));
+
+        long startNs = System.nanoTime();
+        int drained = 0;
+        long nowMs = System.currentTimeMillis();
+        RetryKey key;
+        while (drained < maxDrain && (key = LIMITER_RETRY_QUEUE.poll()) != null) {
+            RetryEntry entry = LIMITER_RETRY_ENTRIES.get(key);
+            if (entry == null) {
+                continue;
+            }
+            if ((nowMs - entry.firstEnqueuedMs) > LIMITER_RETRY_TTL_MS
+                || entry.attempts.get() > LIMITER_RETRY_MAX_ATTEMPTS) {
+                dropLimiterRetry(entry);
+                drained++;
+            } else if (nowMs < entry.nextRetryMs) {
+                LIMITER_RETRY_QUEUE.add(key);
+            } else {
+                LIMITER_RETRY_ENTRIES.remove(key);
+                if (entry.highPriority) {
+                    runBuildingInfo(entry.provider, entry.coord, entry.debugLogging, entry.startTime, true);
+                } else {
+                    PlannerBatchQueue.enqueue(entry.provider, entry.coord, PlannerTaskKind.BUILDING_INFO,
+                        () -> runBuildingInfo(entry.provider, entry.coord, entry.debugLogging, entry.startTime, false));
+                }
+                drained++;
+            }
+            if ((System.nanoTime() - startNs) >= budgetNs) {
+                break;
+            }
+            if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+                break;
+            }
+        }
+    }
+
+    private static void dropLimiterRetry(RetryEntry entry) {
+        LIMITER_RETRY_ENTRIES.remove(new RetryKey(entry.coord, entry.highPriority));
+        Object cached = BUILDING_INFO_CACHE.get(entry.coord);
+        if (cached instanceof InFlightMarker) {
+            acceptBuildingInfoResult(entry.coord,
+                new FailureMarker(System.nanoTime() + FAILURE_RETRY_DELAY_NS),
+                System.currentTimeMillis());
+        } else {
+            removeCachedEntry(entry.coord, cached);
+        }
+        if (entry.highPriority) {
+            SPAWN_PREFETCH.remove(entry.coord);
+            SPAWN_PREFETCH_COUNT.decrementAndGet();
+        }
     }
 
     private static void acceptBuildingInfoResult(ChunkCoord coord, Object value, long nowMs) {
