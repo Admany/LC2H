@@ -41,17 +41,16 @@ public class MainThreadChunkApplier {
 
     private static volatile PriorityAnchors PRIORITY_ANCHORS = new PriorityAnchors(0.0, 0.0, new double[0], new double[0]);
 
-    private record ChunkApplicationTask(
+    private record ChunkQueueEntry(
         ChunkCoord chunk,
-        Runnable applicationTask,
         double priorityDistanceSq
     ) {}
 
-    private static final PriorityBlockingQueue<ChunkApplicationTask> APPLICATION_QUEUE =
-        new PriorityBlockingQueue<>(256, Comparator.comparingDouble(ChunkApplicationTask::priorityDistanceSq));
+    private static final PriorityBlockingQueue<ChunkQueueEntry> APPLICATION_QUEUE =
+        new PriorityBlockingQueue<>(256, Comparator.comparingDouble(ChunkQueueEntry::priorityDistanceSq));
 
     private static final ConcurrentHashMap<ChunkCoord, Boolean> APPLIED_CHUNKS = new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<ChunkCoord, Boolean> ENQUEUED_CHUNKS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<ChunkCoord, Runnable> PENDING_TASKS = new ConcurrentHashMap<>();
 
     private static final AtomicBoolean DRAIN_SCHEDULED = new AtomicBoolean(false);
 
@@ -80,19 +79,19 @@ public class MainThreadChunkApplier {
                 LC2H.LOGGER.error("[LC2H] Failed to apply chunk {} on client thread: {}", chunk, t.getMessage());
                 LC2H.LOGGER.debug("[LC2H] Apply error", t);
             } finally {
-                ENQUEUED_CHUNKS.remove(chunk);
+                PENDING_TASKS.remove(chunk);
             }
             return;
         }
 
-        // This prevents unbounded queue growth if the same chunk gets scheduled repeatedly.
-        if (ENQUEUED_CHUNKS.putIfAbsent(chunk, Boolean.TRUE) != null) {
+        // Coalesce by chunk: keep only the latest task per chunk and queue each chunk once.
+        if (PENDING_TASKS.putIfAbsent(chunk, applicationTask) != null) {
+            PENDING_TASKS.put(chunk, applicationTask);
             return;
         }
 
         double priorityDistanceSq = calculatePriorityDistanceSq(chunk);
-        ChunkApplicationTask task = new ChunkApplicationTask(chunk, applicationTask, priorityDistanceSq);
-        APPLICATION_QUEUE.offer(task);
+        APPLICATION_QUEUE.offer(new ChunkQueueEntry(chunk, priorityDistanceSq));
 
         // Fast path - we apply prepared work ASAP on the server thread instead of waiting for tick END.
         // This still uses the same drain() budget logic, and remains main-thread only for better performance.
@@ -226,7 +225,7 @@ public class MainThreadChunkApplier {
         }
         ChunkCoord coord = new ChunkCoord(level.dimension(), chunk.getPos().x, chunk.getPos().z);
         APPLIED_CHUNKS.remove(coord);
-        ENQUEUED_CHUNKS.remove(coord);
+        PENDING_TASKS.remove(coord);
     }
 
     private static void drain(MinecraftServer server) {
@@ -286,23 +285,27 @@ public class MainThreadChunkApplier {
         long start = System.nanoTime();
         int applied = 0;
         while (applied < maxTasks) {
-            ChunkApplicationTask task = APPLICATION_QUEUE.poll();
-            if (task == null) {
+            ChunkQueueEntry entry = APPLICATION_QUEUE.poll();
+            if (entry == null) {
                 break;
             }
-            ENQUEUED_CHUNKS.remove(task.chunk);
-            if (cullOutOfView && task.chunk != null && task.chunk.dimension() != null) {
-                if (!ChunkPriorityManager.isChunkWithinViewDistance(task.chunk.dimension().location(), task.chunk.chunkX(), task.chunk.chunkZ())) {
+            ChunkCoord chunk = entry.chunk;
+            Runnable task = chunk == null ? null : PENDING_TASKS.remove(chunk);
+            if (task == null) {
+                continue;
+            }
+            if (cullOutOfView && chunk != null && chunk.dimension() != null) {
+                if (!ChunkPriorityManager.isChunkWithinViewDistance(chunk.dimension().location(), chunk.chunkX(), chunk.chunkZ())) {
                     ViewCullingStats.recordMainThreadApply(1);
                     continue;
                 }
             }
 
             try {
-                task.applicationTask.run();
-                APPLIED_CHUNKS.put(task.chunk, Boolean.TRUE);
+                task.run();
+                APPLIED_CHUNKS.put(chunk, Boolean.TRUE);
             } catch (Throwable t) {
-                LC2H.LOGGER.error("[LC2H] Failed to apply chunk {} on main thread: {}", task.chunk, t.getMessage());
+                LC2H.LOGGER.error("[LC2H] Failed to apply chunk {} on main thread: {}", chunk, t.getMessage());
                 LC2H.LOGGER.debug("[LC2H] Apply error", t);
             }
 

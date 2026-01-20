@@ -6,6 +6,7 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.minecraftforge.event.server.ServerStartingEvent;
+import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.event.server.ServerStoppedEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
@@ -22,6 +23,7 @@ import java.util.logging.Level;
 import java.util.concurrent.atomic.AtomicLong;
 import org.admany.lc2h.dev.diagnostics.DiagnosticsReporter;
 import org.admany.lc2h.dev.diagnostics.StallDetector;
+import org.admany.lc2h.dev.diagnostics.AsyncIssueMonitor;
 import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
 import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
@@ -184,6 +186,15 @@ public class LC2H {
     }
 
     @SubscribeEvent
+    public void onServerStarted(ServerStartedEvent event) {
+        try {
+            org.admany.lc2h.util.spawn.SpawnAssetIndex.refresh(event.getServer().overworld());
+        } catch (Throwable t) {
+            LOGGER.warn("[LC2H] Failed to refresh Lost Cities asset index on server start", t);
+        }
+    }
+
+    @SubscribeEvent
     public void onServerStarting(ServerStartingEvent event) {
         SHUTDOWN_FINALIZED.set(false);
         initializeAsyncDelay(event.getServer());
@@ -232,6 +243,11 @@ public class LC2H {
             StallDetector.start(event.getServer());
         } catch (Throwable t) {
             LOGGER.warn("[LC2H] Failed to start StallDetector: {}", t.getMessage());
+        }
+        try {
+            AsyncIssueMonitor.start(event.getServer());
+        } catch (Throwable t) {
+            LOGGER.warn("[LC2H] Failed to start AsyncIssueMonitor: {}", t.getMessage());
         }
 
         try {
@@ -395,6 +411,11 @@ public class LC2H {
             StallDetector.stop();
         } catch (Throwable t) {
             LOGGER.warn("[LC2H] Failed to stop StallDetector: {}", t.getMessage());
+        }
+        try {
+            AsyncIssueMonitor.stop();
+        } catch (Throwable t) {
+            LOGGER.warn("[LC2H] Failed to stop AsyncIssueMonitor: {}", t.getMessage());
         }
 
         try {

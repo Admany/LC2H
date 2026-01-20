@@ -4,7 +4,6 @@ import net.minecraftforge.fml.ModList;
 import org.admany.lc2h.LC2H;
 
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class ChunkyCompat {

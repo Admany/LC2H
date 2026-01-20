@@ -26,6 +26,9 @@ import java.lang.management.ThreadMXBean;
 public final class StallDetector {
     private static final long DEFAULT_THRESHOLD_MS = 10_000L;
     private static final long WATCHER_PERIOD_MS = 1_000L;
+    private static final long STALL_TTL_MS = Math.max(60_000L,
+        Long.getLong("lc2h.stall.ttl_ms", TimeUnit.HOURS.toMillis(1)));
+    private static final String STALL_PREFIX = "lc2h-stall-";
 
     private final ScheduledExecutorService watchdog;
     private final AtomicLong lastHeartbeat = new AtomicLong(System.currentTimeMillis());
@@ -78,6 +81,7 @@ public final class StallDetector {
         MinecraftForge.EVENT_BUS.register(this);
 
         watchdog.scheduleAtFixedRate(this::checkForStall, WATCHER_PERIOD_MS, WATCHER_PERIOD_MS, TimeUnit.MILLISECONDS);
+        cleanupOldStallDumps();
 
         if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
             LC2H.LOGGER.info("[LC2H] StallDetector started (threshold {} ms)", thresholdMs);
@@ -137,14 +141,11 @@ public final class StallDetector {
     }
 
     private void writeStallDump(long now, long diffMs) throws IOException {
-        Path logDir = net.minecraftforge.fml.loading.FMLPaths.GAMEDIR.get().resolve("logs");
-        try { Files.createDirectories(logDir); } catch (Throwable t) {
-
-            logDir = Path.of(".").toAbsolutePath().normalize();
-        }
+        Path logDir = getStallLogDir();
+        cleanupOldStallDumps();
 
         String ts = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneOffset.UTC).format(Instant.ofEpochMilli(now));
-        Path out = logDir.resolve("lc2h-stall-" + ts + ".log");
+        Path out = logDir.resolve(STALL_PREFIX + ts + ".log");
         if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
             LC2H.LOGGER.info("[LC2H] Attempting to write stall dump to: {}", out.toAbsolutePath());
         } else {
@@ -210,6 +211,48 @@ public final class StallDetector {
         // Safe write
         Files.writeString(out, sb.toString(), StandardCharsets.UTF_8);
         LC2H.LOGGER.warn("[LC2H] Wrote LC2H stall diagnostics to {}", out.toAbsolutePath());
+    }
+
+    private static Path getStallLogDir() {
+        Path logDir = net.minecraftforge.fml.loading.FMLPaths.GAMEDIR.get()
+            .resolve("logs").resolve("lc2h").resolve("stalls");
+        try {
+            Files.createDirectories(logDir);
+            return logDir;
+        } catch (Throwable ignored) {
+            return Path.of(".").toAbsolutePath().normalize();
+        }
+    }
+
+    private static void cleanupOldStallDumps() {
+        cleanupOldDumps(getStallLogDir(), STALL_PREFIX, STALL_TTL_MS);
+    }
+
+    private static void cleanupOldDumps(Path dir, String prefix, long ttlMs) {
+        if (dir == null || ttlMs <= 0L) {
+            return;
+        }
+        long cutoff = System.currentTimeMillis() - ttlMs;
+        try (var stream = Files.list(dir)) {
+            stream.filter(path -> {
+                    try {
+                        String name = path.getFileName().toString();
+                        return name.startsWith(prefix) && name.endsWith(".log");
+                    } catch (Throwable ignored) {
+                        return false;
+                    }
+                })
+                .forEach(path -> {
+                    try {
+                        long modified = Files.getLastModifiedTime(path).toMillis();
+                        if (modified < cutoff) {
+                            Files.deleteIfExists(path);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                });
+        } catch (Throwable ignored) {
+        }
     }
 
     private static void appendStallAnalysis(StringBuilder sb,

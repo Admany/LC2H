@@ -18,6 +18,9 @@ public final class ServerTickLoad {
     private static volatile double smoothedTickMs = 0.0D;
     private static volatile double elapsedLimitMs = readDouble("lc2h.lag_guard.elapsed_ms", 18.0D);
     private static volatile double avgLimitMs = readDouble("lc2h.lag_guard.avg_ms", 40.0D);
+    private static volatile double budgetTargetMs = readDouble("lc2h.budget.target_ms", 75.0D);
+    private static volatile double budgetMinScale = readDouble("lc2h.budget.min_scale", 0.5D);
+    private static volatile double budgetMaxScale = readDouble("lc2h.budget.max_scale", 1.5D);
     private static volatile long lastConfigRefreshNs = 0L;
 
     private ServerTickLoad() {
@@ -71,6 +74,25 @@ public final class ServerTickLoad {
         }
     }
 
+    public static double getBudgetScale(MinecraftServer server) {
+        double avg = getAverageTickMs(server, 50.0D);
+        if (avg <= 0.0D) {
+            return 1.0D;
+        }
+        refreshConfigIfNeeded();
+        double target = budgetTargetMs > 0.0D ? budgetTargetMs : 75.0D;
+        double minScale = budgetMinScale > 0.0D ? budgetMinScale : 0.5D;
+        double maxScale = budgetMaxScale > 0.0D ? budgetMaxScale : 1.5D;
+        double scale = target / avg;
+        if (scale < minScale) {
+            return minScale;
+        }
+        if (scale > maxScale) {
+            return maxScale;
+        }
+        return scale;
+    }
+
     public static boolean shouldPauseNonCritical(MinecraftServer server) {
         refreshConfigIfNeeded();
 
@@ -96,6 +118,9 @@ public final class ServerTickLoad {
         lastConfigRefreshNs = now;
         elapsedLimitMs = readDouble("lc2h.lag_guard.elapsed_ms", elapsedLimitMs);
         avgLimitMs = readDouble("lc2h.lag_guard.avg_ms", avgLimitMs);
+        budgetTargetMs = readDouble("lc2h.budget.target_ms", budgetTargetMs);
+        budgetMinScale = readDouble("lc2h.budget.min_scale", budgetMinScale);
+        budgetMaxScale = readDouble("lc2h.budget.max_scale", budgetMaxScale);
     }
 
     private static double readDouble(String key, double fallback) {
