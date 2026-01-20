@@ -20,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public final class AsyncBuildingInfoPlanner {
 
@@ -38,6 +39,10 @@ public final class AsyncBuildingInfoPlanner {
     private static final long FAILURE_RETRY_DELAY_NS = TimeUnit.SECONDS.toNanos(5);
     private static final long LIMITER_RETRY_BASE_MS = Math.max(2L, Long.getLong("lc2h.buildinginfo.limiterRetryMs", 8L));
     private static final int LIMITER_RETRY_JITTER_MS = Math.max(0, Integer.getInteger("lc2h.buildinginfo.limiterRetryJitterMs", 4));
+    private static final AtomicLong LIMITER_RETRY_TOTAL = new AtomicLong(0L);
+    private static final AtomicLong SPAWN_RETRY_TOTAL = new AtomicLong(0L);
+    private static final AtomicLong LAST_LIMITER_RETRY_MS = new AtomicLong(0L);
+    private static final AtomicLong LAST_SPAWN_RETRY_MS = new AtomicLong(0L);
 
     private static final class InFlightMarker {
         private InFlightMarker() {
@@ -63,6 +68,18 @@ public final class AsyncBuildingInfoPlanner {
 
     private static final AtomicLong EWMA_NANOS_PER_TASK = new AtomicLong(0L);
     private static volatile long lastTuneNs = 0L;
+
+    private record ReadyResult(ChunkCoord coord, Object value, long nowMs) {}
+    private static final ConcurrentHashMap<ChunkCoord, ReadyResult> READY_RESULTS = new ConcurrentHashMap<>();
+    private static final ConcurrentLinkedQueue<ChunkCoord> READY_QUEUE = new ConcurrentLinkedQueue<>();
+    private static final int READY_MAX = Math.max(1024,
+        Integer.getInteger("lc2h.buildinginfo.readyMax", 8192));
+    private static final long READY_TTL_MS = Math.max(10_000L,
+        Long.getLong("lc2h.buildinginfo.readyTtlMs", TimeUnit.MINUTES.toMillis(10)));
+    private static final long READY_DRAIN_BUDGET_NS = TimeUnit.MILLISECONDS.toNanos(
+        Math.max(1L, Long.getLong("lc2h.buildinginfo.readyDrainBudgetMs", 1L)));
+    private static final int READY_DRAIN_MAX = Math.max(32,
+        Integer.getInteger("lc2h.buildinginfo.readyDrainMax", 512));
 
     public static final ConcurrentHashMap<ChunkCoord, float[]> GPU_DATA_CACHE = new ConcurrentHashMap<>();
     private static final int SPAWN_PREFETCH_LIMIT = Math.max(32,
@@ -174,12 +191,65 @@ public final class AsyncBuildingInfoPlanner {
             null, org.admany.lc2h.concurrency.async.Priority.HIGH)
             .whenComplete((ignored, throwable) -> {
                 SPAWN_PREFETCH.remove(coord);
+            SPAWN_PREFETCH_COUNT.decrementAndGet();
+        });
+    }
+
+    public static void preSchedulePriorityBatch(IDimensionInfo provider, java.util.List<ChunkCoord> coords) {
+        if (provider == null || coords == null || coords.isEmpty()) {
+            return;
+        }
+        java.util.ArrayList<ChunkCoord> batch = new java.util.ArrayList<>(coords.size());
+        long now = System.currentTimeMillis();
+        for (ChunkCoord coord : coords) {
+            if (coord == null) {
+                continue;
+            }
+            Object existing = getCachedEntry(coord, now);
+            if (existing != null) {
+                if (existing instanceof FailureMarker fm) {
+                    long nowNs = System.nanoTime();
+                    if (fm.canRetry(nowNs)) {
+                        removeCachedEntry(coord, existing);
+                    } else {
+                        continue;
+                    }
+                } else if (existing instanceof InFlightMarker) {
+                    continue;
+                } else {
+                    continue;
+                }
+            }
+            if (SPAWN_PREFETCH_COUNT.get() >= SPAWN_PREFETCH_LIMIT) {
+                break;
+            }
+            if (SPAWN_PREFETCH.putIfAbsent(coord, Boolean.TRUE) != null) {
+                continue;
+            }
+            SPAWN_PREFETCH_COUNT.incrementAndGet();
+            if (BUILDING_INFO_CACHE.putIfAbsent(coord, new InFlightMarker()) != null) {
+                SPAWN_PREFETCH.remove(coord);
                 SPAWN_PREFETCH_COUNT.decrementAndGet();
-            });
+                continue;
+            }
+            BUILDING_INFO_CACHE_TS.put(coord, now);
+            CacheBudgetManager.recordPut(BUILDING_INFO_BUDGET, coord, 64L, true);
+            batch.add(coord);
+        }
+
+        if (batch.isEmpty()) {
+            return;
+        }
+
+        AsyncManager.submitTask("spawn-buildinginfo-batch",
+            () -> runBuildingInfoBatch(provider, batch),
+            null,
+            org.admany.lc2h.concurrency.async.Priority.HIGH);
     }
 
     public static Object getIfReady(ChunkCoord coord) {
         long now = System.currentTimeMillis();
+        consumeReady(coord, now);
         Object cached = getCachedEntry(coord, now);
         if (cached == null) {
             return null;
@@ -310,6 +380,38 @@ public final class AsyncBuildingInfoPlanner {
         }
     }
 
+    public record BuildingInfoPressureSnapshot(int cacheSize,
+                                               int spawnPrefetch,
+                                               int pendingBuildingInfo,
+                                               int limiterLimit,
+                                               int limiterAvailable,
+                                               long limiterRetryTotal,
+                                               long lastLimiterRetryMs,
+                                               long spawnRetryTotal,
+                                               long lastSpawnRetryMs) {
+    }
+
+    public static BuildingInfoPressureSnapshot snapshotPressure() {
+        int pendingBuilding = 0;
+        try {
+            PlannerBatchQueue.PlannerBatchStats stats = PlannerBatchQueue.snapshotStats();
+            Integer pending = stats.pendingByKind().get(PlannerTaskKind.BUILDING_INFO);
+            pendingBuilding = pending != null ? pending : 0;
+        } catch (Throwable ignored) {
+        }
+        return new BuildingInfoPressureSnapshot(
+            BUILDING_INFO_CACHE.size(),
+            SPAWN_PREFETCH_COUNT.get(),
+            pendingBuilding,
+            LIMITER.getLimit(),
+            LIMITER.availableSlots(),
+            LIMITER_RETRY_TOTAL.get(),
+            LAST_LIMITER_RETRY_MS.get(),
+            SPAWN_RETRY_TOTAL.get(),
+            LAST_SPAWN_RETRY_MS.get()
+        );
+    }
+
     private static void runBuildingInfo(IDimensionInfo provider,
                                         ChunkCoord coord,
                                         boolean debugLogging,
@@ -344,6 +446,37 @@ public final class AsyncBuildingInfoPlanner {
         }
     }
 
+    private static void runBuildingInfoBatch(IDimensionInfo provider, java.util.List<ChunkCoord> coords) {
+        if (provider == null || coords == null || coords.isEmpty()) {
+            return;
+        }
+        long startTime = System.nanoTime();
+        for (ChunkCoord coord : coords) {
+            try {
+                AdaptiveConcurrencyLimiter.Token token = LIMITER.tryEnter();
+                if (token == null) {
+                    rescheduleLimiterBlocked(provider, coord, false, startTime, true);
+                    continue;
+                }
+                try {
+                    INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() + 1);
+                    mcjty.lostcities.worldgen.lost.BuildingInfo.getChunkCharacteristics(coord, provider);
+                    Object buildingInfo = mcjty.lostcities.worldgen.lost.BuildingInfo.getBuildingInfo(coord, provider);
+                    acceptBuildingInfoResult(coord, buildingInfo, System.currentTimeMillis());
+                } catch (Throwable t) {
+                    acceptBuildingInfoResult(coord, new FailureMarker(System.nanoTime() + FAILURE_RETRY_DELAY_NS), System.currentTimeMillis());
+                } finally {
+                    INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() - 1);
+                    recordTiming(System.nanoTime() - startTime);
+                    token.close();
+                }
+            } finally {
+                SPAWN_PREFETCH.remove(coord);
+                SPAWN_PREFETCH_COUNT.decrementAndGet();
+            }
+        }
+    }
+
     private static void rescheduleLimiterBlocked(IDimensionInfo provider,
                                                  ChunkCoord coord,
                                                  boolean debugLogging,
@@ -356,14 +489,19 @@ public final class AsyncBuildingInfoPlanner {
         if (!(cached instanceof InFlightMarker)) {
             return;
         }
+        long nowMs = System.currentTimeMillis();
         long delayMs;
         if (highPriority) {
             delayMs = 1L;
+            SPAWN_RETRY_TOTAL.incrementAndGet();
+            LAST_SPAWN_RETRY_MS.set(nowMs);
         } else {
             delayMs = LIMITER_RETRY_BASE_MS;
             if (LIMITER_RETRY_JITTER_MS > 0) {
                 delayMs += ThreadLocalRandom.current().nextInt(LIMITER_RETRY_JITTER_MS + 1);
             }
+            LIMITER_RETRY_TOTAL.incrementAndGet();
+            LAST_LIMITER_RETRY_MS.set(nowMs);
         }
         if (debugLogging) {
             LC2H.LOGGER.debug("BuildingInfo limiter saturated; retrying {} in {} ms", coord, delayMs);
@@ -386,12 +524,11 @@ public final class AsyncBuildingInfoPlanner {
         if (coord == null) {
             return;
         }
-        Runnable applier = () -> putCachedEntry(coord, value, nowMs);
         if ("Server thread".equals(Thread.currentThread().getName())) {
-            applier.run();
-        } else {
-            AsyncManager.syncToMain(applier);
+            putCachedEntry(coord, value, nowMs);
+            return;
         }
+        enqueueReady(coord, value, nowMs);
     }
 
     private static void ensureMultiChunkReady(IDimensionInfo provider, ChunkCoord coord) {
@@ -399,6 +536,9 @@ public final class AsyncBuildingInfoPlanner {
             return;
         }
         if (AsyncMultiChunkPlanner.isInternalComputation()) {
+            return;
+        }
+        if (AsyncMultiChunkPlanner.isWarmupInProgress()) {
             return;
         }
         try {
@@ -595,5 +735,69 @@ public final class AsyncBuildingInfoPlanner {
             return 8192L;
         }
         return 128L;
+    }
+
+    public static void drainReadyResults() {
+        long now = System.currentTimeMillis();
+        long start = System.nanoTime();
+        int drained = 0;
+        ChunkCoord coord;
+        while (drained < READY_DRAIN_MAX && (coord = READY_QUEUE.poll()) != null) {
+            ReadyResult result = READY_RESULTS.remove(coord);
+            if (result == null) {
+                continue;
+            }
+            if ((now - result.nowMs) > READY_TTL_MS) {
+                continue;
+            }
+            putCachedEntry(result.coord, result.value, result.nowMs);
+            drained++;
+            if ((System.nanoTime() - start) >= READY_DRAIN_BUDGET_NS) {
+                break;
+            }
+        }
+    }
+
+    private static void enqueueReady(ChunkCoord coord, Object value, long nowMs) {
+        if (coord == null) {
+            return;
+        }
+        if (value == null) {
+            removeCachedEntry(coord, null);
+            return;
+        }
+        if (READY_RESULTS.size() >= READY_MAX) {
+            trimReadyQueue();
+        }
+        ReadyResult prev = READY_RESULTS.put(coord, new ReadyResult(coord, value, nowMs));
+        if (prev == null) {
+            READY_QUEUE.add(coord);
+        }
+    }
+
+    private static void consumeReady(ChunkCoord coord, long nowMs) {
+        if (coord == null) {
+            return;
+        }
+        ReadyResult ready = READY_RESULTS.remove(coord);
+        if (ready == null) {
+            return;
+        }
+        if ((nowMs - ready.nowMs) > READY_TTL_MS) {
+            return;
+        }
+        putCachedEntry(ready.coord, ready.value, ready.nowMs);
+    }
+
+    private static void trimReadyQueue() {
+        int attempts = 0;
+        while (READY_RESULTS.size() >= READY_MAX && attempts < 256) {
+            ChunkCoord coord = READY_QUEUE.poll();
+            if (coord == null) {
+                break;
+            }
+            READY_RESULTS.remove(coord);
+            attempts++;
+        }
     }
 }

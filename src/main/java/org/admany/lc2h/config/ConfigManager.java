@@ -212,7 +212,8 @@ public class ConfigManager {
                 "cacheLostCitiesDiskTtlHours",
             });
             groups.put("Interface", new String[]{
-                "uiAccentColor"
+                "uiAccentColor",
+                "uiLocale"
             });
             groups.put("City Edge", new String[]{
                 "cityBlendEnabled",

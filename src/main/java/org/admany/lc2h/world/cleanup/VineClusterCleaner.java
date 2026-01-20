@@ -1,5 +1,9 @@
 package org.admany.lc2h.world.cleanup;
 
+import mcjty.lostcities.setup.Registration;
+import mcjty.lostcities.varia.ChunkCoord;
+import mcjty.lostcities.worldgen.IDimensionInfo;
+import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
@@ -7,6 +11,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.level.ChunkEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -24,6 +29,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -47,6 +53,12 @@ public final class VineClusterCleaner {
     private static final long SNAPSHOT_TTL_NS = TimeUnit.SECONDS.toNanos(Long.getLong("lc2h.vine.snapshot_ttl_seconds", 5L));
     private static final int MAX_IN_FLIGHT = Math.max(1, Integer.getInteger("lc2h.vine.max_in_flight", 16));
     private static final AtomicInteger IN_FLIGHT = new AtomicInteger(0);
+    private static final AtomicBoolean SCAN_REQUESTED = new AtomicBoolean(false);
+    private static volatile MinecraftServer LAST_SERVER;
+
+    private record RemovalTask(ServerLevel level, BlockPos pos) {}
+    private static final ConcurrentLinkedQueue<RemovalTask> REMOVAL_QUEUE = new ConcurrentLinkedQueue<>();
+    private static final AtomicBoolean REMOVAL_DRAIN_SCHEDULED = new AtomicBoolean(false);
 
     private static final class LevelChunkIndex {
         final ConcurrentHashMap<Long, Boolean> loaded = new ConcurrentHashMap<>();
@@ -131,6 +143,11 @@ public final class VineClusterCleaner {
             return;
         }
 
+        IDimensionInfo dimInfo = getDimensionInfo(level);
+        if (dimInfo == null) {
+            return;
+        }
+
         MinecraftServer server = level.getServer();
         if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
             return;
@@ -152,8 +169,18 @@ public final class VineClusterCleaner {
             return;
         }
 
-        String cacheKey = "vine_scan_" + chunkPos.x + "_" + chunkPos.z;
+        String cacheKey = vineScanKey(level.dimension(), chunkPos.x, chunkPos.z);
         if (FeatureCache.get(cacheKey) != null) {
+            return;
+        }
+
+        String skipKey = vineSkipKey(level.dimension(), chunkPos.x, chunkPos.z);
+        if (FeatureCache.get(skipKey) != null) {
+            return;
+        }
+
+        if (!isCityChunk(dimInfo, level.dimension(), chunkPos.x, chunkPos.z)) {
+            FeatureCache.put(skipKey, Boolean.TRUE);
             return;
         }
 
@@ -170,8 +197,27 @@ public final class VineClusterCleaner {
     }
 
     private static void runTurboScan(MinecraftServer server) {
+        LAST_SERVER = server;
+        SCAN_REQUESTED.set(true);
+    }
+
+    @SubscribeEvent
+    public static void onServerTick(TickEvent.ServerTickEvent event) {
+        if (shutdown || event.phase != TickEvent.Phase.END) {
+            return;
+        }
+        if (!SCAN_REQUESTED.compareAndSet(true, false)) {
+            return;
+        }
+        MinecraftServer server = event.getServer();
+        if (server == null) {
+            server = LAST_SERVER;
+        }
+        if (server == null) {
+            return;
+        }
         try {
-            AsyncManager.syncToMain(() -> runTurboScanOnServerThread(server));
+            runTurboScanOnServerThread(server);
         } catch (Throwable t) {
             LC2H.LOGGER.error("[LC2H] Failed to submit VineClusterCleaner scan", t);
         }
@@ -222,6 +268,10 @@ public final class VineClusterCleaner {
             }
 
             for (ServerLevel level : server.getAllLevels()) {
+                IDimensionInfo dimInfo = getDimensionInfo(level);
+                if (dimInfo == null) {
+                    continue;
+                }
                 if (ServerTickLoad.shouldPauseNonCritical(server)) {
                     break;
                 }
@@ -269,6 +319,18 @@ public final class VineClusterCleaner {
                     }
 
                     try {
+                        String cacheKey = vineScanKey(level.dimension(), cx, cz);
+                        if (FeatureCache.get(cacheKey) != null) {
+                            continue;
+                        }
+                        String skipKey = vineSkipKey(level.dimension(), cx, cz);
+                        if (FeatureCache.get(skipKey) != null) {
+                            continue;
+                        }
+                        if (!isCityChunk(dimInfo, level.dimension(), cx, cz)) {
+                            FeatureCache.put(skipKey, Boolean.TRUE);
+                            continue;
+                        }
                         if (scanChunkForVinesAsync(level, chunk)) {
                             processed++;
                             lastScanForLevel.put(chunkKey, now);
@@ -358,10 +420,21 @@ public final class VineClusterCleaner {
     private static void performVineScan(ServerLevel level, LevelChunk chunk) {
         try {
             ChunkPos chunkPos = chunk.getPos();
-            String cacheKey = "vine_scan_" + chunkPos.x + "_" + chunkPos.z;
+            String cacheKey = vineScanKey(level.dimension(), chunkPos.x, chunkPos.z);
 
             if (FeatureCache.get(cacheKey) != null) {
                 return; 
+            }
+
+            String skipKey = vineSkipKey(level.dimension(), chunkPos.x, chunkPos.z);
+            if (FeatureCache.get(skipKey) != null) {
+                return;
+            }
+
+            IDimensionInfo dimInfo = getDimensionInfo(level);
+            if (dimInfo == null || !isCityChunk(dimInfo, level.dimension(), chunkPos.x, chunkPos.z)) {
+                FeatureCache.put(skipKey, Boolean.TRUE);
+                return;
             }
 
             int baseX = chunkPos.getMinBlockX();
@@ -493,53 +566,73 @@ public final class VineClusterCleaner {
         if (component == null || component.isEmpty() || level == null || shutdown) {
             return;
         }
-        java.util.ArrayDeque<BlockPos> pending = new java.util.ArrayDeque<>(component);
-        scheduleRemovalBatch(level, pending);
+        enqueueRemoval(level, component);
     }
 
-    private static void scheduleRemovalBatch(ServerLevel level, java.util.ArrayDeque<BlockPos> pending) {
-        if (shutdown || pending == null || pending.isEmpty() || level == null) {
+    private static void enqueueRemoval(ServerLevel level, java.util.List<BlockPos> component) {
+        if (shutdown || level == null || component == null || component.isEmpty()) {
+            return;
+        }
+        for (BlockPos pos : component) {
+            if (pos != null) {
+                REMOVAL_QUEUE.add(new RemovalTask(level, pos));
+            }
+        }
+        scheduleRemovalDrain(level);
+    }
+
+    private static void scheduleRemovalDrain(ServerLevel level) {
+        if (shutdown || level == null) {
+            return;
+        }
+        if (!REMOVAL_DRAIN_SCHEDULED.compareAndSet(false, true)) {
+            return;
+        }
+        AsyncManager.syncToMain(() -> drainRemovalQueue(level));
+    }
+
+    private static void drainRemovalQueue(ServerLevel fallbackLevel) {
+        REMOVAL_DRAIN_SCHEDULED.set(false);
+        if (shutdown) {
             return;
         }
 
-        AsyncManager.syncToMain(() -> {
-            if (shutdown) {
-                return;
-            }
+        MinecraftServer server = fallbackLevel != null ? fallbackLevel.getServer() : null;
+        if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+            AsyncManager.runLater("vine-removal-drain", () -> scheduleRemovalDrain(fallbackLevel), 50L, Priority.LOW);
+            return;
+        }
 
-            MinecraftServer server = level.getServer();
-            if (ServerTickLoad.shouldPauseNonCritical(server)) {
-                scheduleRemovalBatch(level, pending);
-                return;
-            }
+        int budget = MAX_REMOVALS_PER_TICK;
+        if (ServerTickLoad.getElapsedMsInCurrentTick() >= 12.0D) {
+            budget = Math.min(budget, 8);
+        }
 
-            int budget = MAX_REMOVALS_PER_TICK;
-            if (ServerTickLoad.getElapsedMsInCurrentTick() >= 12.0D) {
-                budget = Math.min(budget, 8);
+        int processed = 0;
+        while (processed < budget) {
+            RemovalTask task = REMOVAL_QUEUE.poll();
+            if (task == null) {
+                break;
             }
-
-            int processed = 0;
-            while (processed < budget && !pending.isEmpty()) {
-                BlockPos pos = pending.pollFirst();
-                if (pos == null) {
-                    break;
-                }
-                try {
-                    level.removeBlockEntity(pos);
-                    level.setBlock(pos, Blocks.AIR.defaultBlockState(), 3);
-                } catch (Throwable ignored) {
-                }
-                processed++;
-
-                if (ServerTickLoad.shouldPauseNonCritical(server)) {
-                    break;
-                }
+            ServerLevel level = task.level != null ? task.level : fallbackLevel;
+            if (level == null) {
+                continue;
             }
-
-            if (!pending.isEmpty()) {
-                scheduleRemovalBatch(level, pending);
+            try {
+                level.removeBlockEntity(task.pos);
+                level.setBlock(task.pos, Blocks.AIR.defaultBlockState(), 3);
+            } catch (Throwable ignored) {
             }
-        });
+            processed++;
+
+            if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+                break;
+            }
+        }
+
+        if (!REMOVAL_QUEUE.isEmpty()) {
+            scheduleRemovalDrain(fallbackLevel);
+        }
     }
 
     private static long[] snapshotLoadedChunkKeys(ServerLevel level) {
@@ -576,5 +669,37 @@ public final class VineClusterCleaner {
         CHUNK_CURSOR.clear();
         LAST_SCAN.clear();
         LOADED_CHUNKS.clear();
+    }
+
+    private static IDimensionInfo getDimensionInfo(ServerLevel level) {
+        try {
+            return Registration.LOSTCITY_FEATURE.get().getDimensionInfo(level);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static boolean isCityChunk(IDimensionInfo dimInfo, ResourceKey<net.minecraft.world.level.Level> dim, int cx, int cz) {
+        try {
+            return BuildingInfo.isCity(new ChunkCoord(dim, cx, cz), dimInfo);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static String vineScanKey(ResourceKey<net.minecraft.world.level.Level> dim, int cx, int cz) {
+        return "vine_scan_" + dimKey(dim) + "_" + cx + "_" + cz;
+    }
+
+    private static String vineSkipKey(ResourceKey<net.minecraft.world.level.Level> dim, int cx, int cz) {
+        return "vine_scan_skip_" + dimKey(dim) + "_" + cx + "_" + cz;
+    }
+
+    private static String dimKey(ResourceKey<net.minecraft.world.level.Level> dim) {
+        if (dim == null) {
+            return "unknown";
+        }
+        String raw = String.valueOf(dim.location());
+        return raw.replace(':', '_').replace('/', '_');
     }
 }

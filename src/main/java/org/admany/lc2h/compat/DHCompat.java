@@ -3,6 +3,7 @@ package org.admany.lc2h.compat;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.core.QuartPos;
 import net.minecraft.world.level.biome.Biome;
@@ -14,7 +15,7 @@ import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.fml.ModList;
 import org.admany.lc2h.LC2H;
-import org.admany.lc2h.util.server.ServerRescheduler;
+import org.admany.lc2h.util.server.ServerTickLoad;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
@@ -30,6 +31,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.Arrays;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 public class DHCompat {
@@ -60,6 +64,15 @@ public class DHCompat {
     private static Class<?> worldGeneratorInterface;
 
     private static final Map<Object, LevelIntegration> ACTIVE_LEVELS = Collections.synchronizedMap(new IdentityHashMap<>());
+    private static final Queue<DhSampleTask> SAMPLE_QUEUE = new ConcurrentLinkedQueue<>();
+    private static final int SAMPLE_BATCHES_PER_TICK =
+        Math.max(1, Integer.getInteger("lc2h.dh.sample_batches_per_tick", 8));
+    private static final long SAMPLE_BUDGET_NS =
+        TimeUnit.MICROSECONDS.toNanos(Long.getLong("lc2h.dh.sample_budget_us", 500L));
+
+    private interface DhSampleTask {
+        boolean runSlice();
+    }
 
     public static void init() {
         isLoaded = ModList.get().isLoaded("distanthorizons");
@@ -148,6 +161,9 @@ public class DHCompat {
         } catch (ClassNotFoundException | NoSuchMethodException | NoSuchFieldException | IllegalAccessException e) {
             LC2H.LOGGER.warn("Unable to resolve Distant Horizons API: {}", e.getMessage());
             return false;
+        } catch (Throwable t) {
+            LC2H.LOGGER.warn("Unable to resolve Distant Horizons API due to linkage error: {}", t.toString());
+            return false;
         }
     }
 
@@ -196,8 +212,45 @@ public class DHCompat {
                     return false;
                 });
             }
+
+            drainSampleQueue(event.getServer());
         } catch (Throwable t) {
             LC2H.LOGGER.debug("Failed to process Distant Horizons tick: {}", t.getMessage());
+        }
+    }
+
+    private static void drainSampleQueue(MinecraftServer server) {
+        if (SAMPLE_QUEUE.isEmpty()) {
+            return;
+        }
+        if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+            return;
+        }
+
+        double scale = ServerTickLoad.getBudgetScale(server);
+        long budgetNs = Math.max(1L, (long) (SAMPLE_BUDGET_NS * scale));
+        int maxBatches = Math.max(1, (int) Math.round(SAMPLE_BATCHES_PER_TICK * scale));
+
+        long start = System.nanoTime();
+        int batches = 0;
+        DhSampleTask task;
+        while (batches < maxBatches && (task = SAMPLE_QUEUE.poll()) != null) {
+            boolean done = true;
+            try {
+                done = task.runSlice();
+            } catch (Throwable t) {
+                LC2H.LOGGER.debug("Distant Horizons sampling slice failed: {}", t.getMessage());
+            }
+            if (!done) {
+                SAMPLE_QUEUE.add(task);
+            }
+            batches++;
+            if ((System.nanoTime() - start) >= budgetNs) {
+                break;
+            }
+            if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+                break;
+            }
         }
     }
 
@@ -224,6 +277,8 @@ public class DHCompat {
     }
 
     private static final class LevelIntegration {
+        private static final int SAMPLE_BATCH_SIZE = 512;
+
         private final Object levelWrapper;
         private final Object wrapperFactory;
         private final ServerLevel level;
@@ -302,14 +357,7 @@ public class DHCompat {
                 int[] heights = new int[width * width];
 
                 CompletableFuture<Void> serverWork = new CompletableFuture<>();
-                ServerRescheduler.runOnServer(() -> {
-                    try {
-                        collectSamples(baseBlockX, baseBlockZ, lodPosX, lodPosZ, scale, width, blockSamples, biomeSamples, heights);
-                        serverWork.complete(null);
-                    } catch (Throwable t) {
-                        serverWork.completeExceptionally(t);
-                    }
-                });
+                enqueueSampleCollection(baseBlockX, baseBlockZ, scale, width, blockSamples, biomeSamples, heights, serverWork);
 
                 serverWork.whenComplete((ok, err) -> {
                     if (err != null) {
@@ -331,52 +379,100 @@ public class DHCompat {
             }
         }
 
-        private void collectSamples(int baseBlockX, int baseBlockZ, int lodPosX, int lodPosZ, int scale, int width,
-                                    BlockState[] blockSamples, Holder<Biome>[] biomeSamples, int[] heights) {
-            if (level == null) {
-                throw new IllegalStateException("Server level is not available for Distant Horizons integration");
+        private void enqueueSampleCollection(int baseBlockX, int baseBlockZ, int scale, int width,
+                                             BlockState[] blockSamples, Holder<Biome>[] biomeSamples, int[] heights,
+                                             CompletableFuture<Void> serverWork) {
+            SampleCollector collector = new SampleCollector(baseBlockX, baseBlockZ, scale, width, blockSamples, biomeSamples, heights, serverWork);
+            SAMPLE_QUEUE.add(collector);
+        }
+
+        private final class SampleCollector implements DhSampleTask {
+            private final int baseBlockX;
+            private final int baseBlockZ;
+            private final int scale;
+            private final int width;
+            private final BlockState[] blockSamples;
+            private final Holder<Biome>[] biomeSamples;
+            private final int[] heights;
+            private final CompletableFuture<Void> serverWork;
+            private final BlockPos.MutableBlockPos mutable = new BlockPos.MutableBlockPos();
+            private final int minY;
+            private final int maxY;
+            private int x;
+            private int z;
+            private int lastChunkX = Integer.MIN_VALUE;
+            private int lastChunkZ = Integer.MIN_VALUE;
+            private LevelChunk chunk;
+
+            private SampleCollector(int baseBlockX, int baseBlockZ, int scale, int width,
+                                    BlockState[] blockSamples, Holder<Biome>[] biomeSamples, int[] heights,
+                                    CompletableFuture<Void> serverWork) {
+                this.baseBlockX = baseBlockX;
+                this.baseBlockZ = baseBlockZ;
+                this.scale = scale;
+                this.width = width;
+                this.blockSamples = blockSamples;
+                this.biomeSamples = biomeSamples;
+                this.heights = heights;
+                this.serverWork = serverWork;
+                this.minY = level.getMinBuildHeight();
+                this.maxY = level.getMaxBuildHeight();
             }
 
-            BlockPos.MutableBlockPos mutable = new BlockPos.MutableBlockPos();
-            int minY = level.getMinBuildHeight();
-            int maxY = level.getMaxBuildHeight();
-            int lastChunkX = Integer.MIN_VALUE;
-            int lastChunkZ = Integer.MIN_VALUE;
-            LevelChunk chunk = null;
+            public boolean runSlice() {
+                if (serverWork.isDone()) {
+                    return true;
+                }
+                try {
+                    int processed = 0;
+                    while (x < width) {
+                        int worldX = baseBlockX + x * scale + (scale >> 1);
+                        while (z < width) {
+                            int worldZ = baseBlockZ + z * scale + (scale >> 1);
+                            int index = x * width + z;
 
-            for (int x = 0; x < width; x++) {
-                int worldX = baseBlockX + x * scale + (scale >> 1);
-                for (int z = 0; z < width; z++) {
-                    int worldZ = baseBlockZ + z * scale + (scale >> 1);
-                    int index = x * width + z;
+                            int chunkX = worldX >> 4;
+                            int chunkZ = worldZ >> 4;
+                            if (chunkX != lastChunkX || chunkZ != lastChunkZ) {
+                                chunk = level.getChunkSource().getChunkNow(chunkX, chunkZ);
+                                lastChunkX = chunkX;
+                                lastChunkZ = chunkZ;
+                            }
 
-                    int chunkX = worldX >> 4;
-                    int chunkZ = worldZ >> 4;
-                    if (chunkX != lastChunkX || chunkZ != lastChunkZ) {
-                        chunk = level.getChunkSource().getChunkNow(chunkX, chunkZ);
-                        lastChunkX = chunkX;
-                        lastChunkZ = chunkZ;
+                            if (chunk == null) {
+                                heights[index] = minY;
+                                blockSamples[index] = Blocks.AIR.defaultBlockState();
+                                biomeSamples[index] = null;
+                            } else {
+                                int height = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, worldX, worldZ);
+                                height = Math.max(minY, Math.min(height, maxY));
+                                heights[index] = height;
+
+                                int sampleY = Math.max(minY, height - 1);
+                                mutable.set(worldX, sampleY, worldZ);
+                                blockSamples[index] = chunk.getBlockState(mutable);
+                                biomeSamples[index] = chunk.getNoiseBiome(
+                                    QuartPos.fromBlock(worldX),
+                                    QuartPos.fromBlock(sampleY),
+                                    QuartPos.fromBlock(worldZ)
+                                );
+                            }
+
+                            z++;
+                            processed++;
+                            if (processed >= SAMPLE_BATCH_SIZE) {
+                                return false;
+                            }
+                        }
+                        z = 0;
+                        x++;
                     }
 
-                    if (chunk == null) {
-                        heights[index] = minY;
-                        blockSamples[index] = Blocks.AIR.defaultBlockState();
-                        biomeSamples[index] = null;
-                        continue;
-                    }
-
-                    int height = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, worldX, worldZ);
-                    height = Math.max(minY, Math.min(height, maxY));
-                    heights[index] = height;
-
-                    int sampleY = Math.max(minY, height - 1);
-                    mutable.set(worldX, sampleY, worldZ);
-                    blockSamples[index] = chunk.getBlockState(mutable);
-                    biomeSamples[index] = chunk.getNoiseBiome(
-                        QuartPos.fromBlock(worldX),
-                        QuartPos.fromBlock(sampleY),
-                        QuartPos.fromBlock(worldZ)
-                    );
+                    serverWork.complete(null);
+                    return true;
+                } catch (Throwable t) {
+                    serverWork.completeExceptionally(t);
+                    return true;
                 }
             }
         }

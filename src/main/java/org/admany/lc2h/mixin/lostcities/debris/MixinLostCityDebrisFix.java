@@ -6,7 +6,9 @@ import mcjty.lostcities.worldgen.LostCityTerrainFeature;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import mcjty.lostcities.worldgen.lost.DamageArea;
 import mcjty.lostcities.worldgen.lost.cityassets.CompiledPalette;
+import net.minecraft.core.BlockPos;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.util.RandomSource;
@@ -123,6 +125,9 @@ public abstract class MixinLostCityDebrisFix {
         if (state.is(BlockTags.LOGS)) return false;
         if (state.is(BlockTags.FLOWERS)) return false;
         if (state.is(BlockTags.SAPLINGS)) return false;
+        if (!state.isCollisionShapeFullBlock(EmptyBlockGetter.INSTANCE, BlockPos.ZERO)) {
+            return false;
+        }
         return !state.canBeReplaced();
     }
 }

@@ -65,7 +65,7 @@ public class AsyncBuildingGenerator {
         }, buildingInfo, priority).thenAccept(result -> {
             try {
                 FeatureCache.put(cacheKey, result, true);
-                AsyncManager.syncToMain(() -> LC2H.LOGGER.debug("Building generation completed for " + cacheKey));
+                LC2H.LOGGER.debug("Building generation completed for {}", cacheKey);
             } catch (Exception e) {
                 LC2H.LOGGER.error("Error applying building result: " + e.getMessage(), e);
             }

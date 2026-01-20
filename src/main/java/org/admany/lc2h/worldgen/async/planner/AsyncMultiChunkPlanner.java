@@ -41,7 +41,11 @@ public final class AsyncMultiChunkPlanner {
 
     private static final ConcurrentHashMap<ChunkCoord, CompletableFuture<MultiChunk>> PLANNED = new ConcurrentHashMap<>();
     private static final ThreadLocal<Integer> INTERNAL_CALL_DEPTH = ThreadLocal.withInitial(() -> 0);
+    private static final ThreadLocal<Integer> WARMUP_CALL_DEPTH = ThreadLocal.withInitial(() -> 0);
     private static final ConcurrentHashMap<ChunkCoord, Boolean> WARM_BUILDING_INFO_SUBMITTED = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<ChunkCoord, Long> WARM_BUILDING_INFO_DONE = new ConcurrentHashMap<>();
+    private static final long WARM_BUILDING_INFO_TTL_MS = Math.max(30_000L,
+        Long.getLong("lc2h.multichunk.warmup_ttl_ms", java.util.concurrent.TimeUnit.MINUTES.toMillis(10)));
     private static final Semaphore WARM_SEMAPHORE = new Semaphore(2);
 
     private static final int MULTICHUNK_PARALLELISM_OVERRIDE = Integer.getInteger("lc2h.multichunk.parallelism", -1);
@@ -66,6 +70,10 @@ public final class AsyncMultiChunkPlanner {
     private static final long PENDING_FLUSH_DELAY_LATENCY_SENSITIVE_MS = 15;
 
     private AsyncMultiChunkPlanner() {
+    }
+
+    public static boolean isWarmupInProgress() {
+        return WARMUP_CALL_DEPTH.get() > 0;
     }
 
     public static MultiChunk tryConsumePrepared(IDimensionInfo provider, ChunkCoord coord) {
@@ -541,10 +549,8 @@ public final class AsyncMultiChunkPlanner {
     }
 
     private static void warmBuildingInfo(IDimensionInfo provider, MultiChunk prepared) {
-        boolean acquired = false;
+        WARMUP_CALL_DEPTH.set(WARMUP_CALL_DEPTH.get() + 1);
         try {
-            WARM_SEMAPHORE.acquireUninterruptibly();
-            acquired = true;
             MultiChunkAccessor accessor = (MultiChunkAccessor) prepared;
             ChunkCoord topLeft = accessor.lc2h$getTopLeft();
             int areaSize = accessor.lc2h$getAreaSize();
@@ -552,13 +558,11 @@ public final class AsyncMultiChunkPlanner {
             for (int dx = 0; dx < areaSize; dx++) {
                 for (int dz = 0; dz < areaSize; dz++) {
                     ChunkCoord target = new ChunkCoord(topLeft.dimension(), topLeft.chunkX() + dx, topLeft.chunkZ() + dz);
-                    AsyncBuildingInfoPlanner.syncWarmup(provider, target);
+                    AsyncBuildingInfoPlanner.preSchedule(provider, target);
                 }
             }
         } finally {
-            if (acquired) {
-                WARM_SEMAPHORE.release();
-            }
+            WARMUP_CALL_DEPTH.set(WARMUP_CALL_DEPTH.get() - 1);
         }
     }
 
@@ -958,13 +962,39 @@ public final class AsyncMultiChunkPlanner {
             return;
         }
 
+        Long lastDone = WARM_BUILDING_INFO_DONE.get(multiCoord);
+        long nowMs = System.currentTimeMillis();
+        if (lastDone != null && (nowMs - lastDone) <= WARM_BUILDING_INFO_TTL_MS) {
+            return;
+        }
+
         if (WARM_BUILDING_INFO_SUBMITTED.putIfAbsent(multiCoord, Boolean.TRUE) != null) {
             return;
         }
 
-        org.admany.lc2h.concurrency.async.AsyncManager.submitTask("warmBuildingInfo", () -> warmBuildingInfo(provider, multiChunk), null, org.admany.lc2h.concurrency.async.Priority.LOW)
+        if (!WARM_SEMAPHORE.tryAcquire()) {
+            WARM_BUILDING_INFO_SUBMITTED.remove(multiCoord);
+            org.admany.lc2h.concurrency.async.AsyncManager.runLater(
+                "warmBuildingInfo-retry",
+                () -> scheduleWarmBuildingInfo(provider, multiChunk, multiCoord),
+                50L,
+                org.admany.lc2h.concurrency.async.Priority.LOW
+            );
+            return;
+        }
+
+        org.admany.lc2h.concurrency.async.AsyncManager.submitTask("warmBuildingInfo", () -> {
+                try {
+                    warmBuildingInfo(provider, multiChunk);
+                } finally {
+                    WARM_SEMAPHORE.release();
+                }
+            }, null, org.admany.lc2h.concurrency.async.Priority.LOW)
             .whenComplete((ignored, throwable) -> {
                 WARM_BUILDING_INFO_SUBMITTED.remove(multiCoord);
+                if (throwable == null) {
+                    WARM_BUILDING_INFO_DONE.put(multiCoord, System.currentTimeMillis());
+                }
                 if (throwable != null) {
                     LC2H.LOGGER.error("Warm building info failed for {}: {}", multiCoord, throwable.getMessage());
                 }

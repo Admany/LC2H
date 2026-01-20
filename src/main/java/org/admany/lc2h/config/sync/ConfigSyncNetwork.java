@@ -16,6 +16,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.UUID;
+import java.nio.charset.StandardCharsets;
 import java.util.function.Supplier;
 
 
@@ -46,9 +47,9 @@ public final class ConfigSyncNetwork {
                 ctx.setPacketHandled(true);
                 return;
             }
-            ctx.enqueueWork(() -> handleApplyOnServer(sender.server, sender, new String(msg.data)));
+            ctx.enqueueWork(() -> handleApplyOnServer(sender.server, sender, new String(msg.data, StandardCharsets.UTF_8)));
         } else {
-            ctx.enqueueWork(() -> handleSnapshotOnClient(new String(msg.data)));
+            ctx.enqueueWork(() -> handleSnapshotOnClient(new String(msg.data, StandardCharsets.UTF_8)));
         }
         ctx.setPacketHandled(true);
     }
@@ -133,14 +134,14 @@ public final class ConfigSyncNetwork {
         obj.addProperty("type", APPLY_TYPE);
         obj.addProperty("config", ConfigManager.GSON.toJson(cfg));
         obj.addProperty("player", player.toString());
-        return obj.toString().getBytes();
+        return obj.toString().getBytes(StandardCharsets.UTF_8);
     }
 
     private static byte[] buildSnapshotPayload(byte[] cfgBytes) {
         JsonObject obj = new JsonObject();
         obj.addProperty("type", SNAPSHOT_TYPE);
-        obj.addProperty("config", new String(cfgBytes));
-        return obj.toString().getBytes();
+        obj.addProperty("config", new String(cfgBytes, StandardCharsets.UTF_8));
+        return obj.toString().getBytes(StandardCharsets.UTF_8);
     }
 
     public static boolean sendApplyRequest(ConfigManager.Config cfg) {
@@ -158,6 +159,7 @@ public final class ConfigSyncNetwork {
             return false;
         }
     }
+
 
     public record Payload(byte[] data) {
         public static void encode(Payload msg, net.minecraft.network.FriendlyByteBuf buf) {
