@@ -48,6 +48,7 @@ public final class AsyncMultiChunkPlanner {
     private static final ThreadLocal<Integer> WARMUP_CALL_DEPTH = ThreadLocal.withInitial(() -> 0);
     private static final ConcurrentHashMap<ChunkCoord, Boolean> WARM_BUILDING_INFO_SUBMITTED = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<ChunkCoord, Long> WARM_BUILDING_INFO_DONE = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<ChunkCoord, WarmupPlan> WARM_PLANS = new ConcurrentHashMap<>();
     private static final long WARM_BUILDING_INFO_TTL_MS = Math.max(30_000L,
         Long.getLong("lc2h.multichunk.warmup_ttl_ms", java.util.concurrent.TimeUnit.MINUTES.toMillis(10)));
     private static final Semaphore WARM_SEMAPHORE = new Semaphore(2);
@@ -65,6 +66,66 @@ public final class AsyncMultiChunkPlanner {
     private static final ConcurrentLinkedQueue<ChunkCoord> WARM_RETRY_QUEUE = new ConcurrentLinkedQueue<>();
     private static final AtomicLong WARM_RETRY_TOTAL = new AtomicLong(0L);
     private static final AtomicLong LAST_WARM_RETRY_MS = new AtomicLong(0L);
+
+    private static final int RECENT_MULTI_MAX = 256;
+    private static final long RECENT_MULTI_TTL_MS = TimeUnit.MINUTES.toMillis(3);
+    private static final ConcurrentHashMap<ChunkCoord, RecentMulti> RECENT_MULTI = new ConcurrentHashMap<>();
+    private static final ConcurrentLinkedQueue<ChunkCoord> RECENT_MULTI_ORDER = new ConcurrentLinkedQueue<>();
+
+    private static final class RecentMulti {
+        private final byte[] snapshot;
+        private final long timestampMs;
+
+        private RecentMulti(byte[] snapshot, long timestampMs) {
+            this.snapshot = snapshot;
+            this.timestampMs = timestampMs;
+        }
+    }
+
+    private static final class WarmupPlan {
+        private final int areaSize;
+        private final int[] dx;
+        private final int[] dz;
+        private final AtomicInteger cursor = new AtomicInteger(0);
+
+        private WarmupPlan(ChunkCoord topLeft, int areaSize) {
+            this.areaSize = areaSize;
+            int total = areaSize * areaSize;
+            this.dx = new int[total];
+            this.dz = new int[total];
+            int center = (areaSize - 1) / 2;
+            int index = 0;
+            int maxRing = Math.max(center, areaSize - 1 - center);
+            for (int ring = 0; ring <= maxRing; ring++) {
+                for (int ox = -ring; ox <= ring; ox++) {
+                    for (int oz = -ring; oz <= ring; oz++) {
+                        if (Math.max(Math.abs(ox), Math.abs(oz)) != ring) {
+                            continue;
+                        }
+                        int x = center + ox;
+                        int z = center + oz;
+                        if (x < 0 || x >= areaSize || z < 0 || z >= areaSize) {
+                            continue;
+                        }
+                        if (index >= total) {
+                            break;
+                        }
+                        dx[index] = x;
+                        dz[index] = z;
+                        index++;
+                    }
+                }
+            }
+        }
+
+        private int nextIndex() {
+            return cursor.getAndIncrement();
+        }
+
+        private int total() {
+            return areaSize * areaSize;
+        }
+    }
 
     private static final class WarmRetryEntry {
         private final IDimensionInfo provider;
@@ -130,6 +191,10 @@ public final class AsyncMultiChunkPlanner {
                 return integrateResult(provider, multiCoord, prepared);
             }
         }
+        MultiChunk recent = loadRecentMulti(provider, multiCoord);
+        if (recent != null) {
+            return integrateResult(provider, multiCoord, recent);
+        }
         return null;
     }
 
@@ -162,6 +227,11 @@ public final class AsyncMultiChunkPlanner {
                 }
             } catch (Throwable ignored) {
             }
+        }
+
+        MultiChunk recent = loadRecentMulti(provider, multiCoord);
+        if (recent != null) {
+            return integrateResult(provider, multiCoord, recent);
         }
 
         MultiChunk computed = executeInternal(() -> computeMultiChunk(provider, areaSize, multiCoord));
@@ -198,6 +268,11 @@ public final class AsyncMultiChunkPlanner {
             }
         }
         if (prepared == null) {
+            MultiChunk recent = loadRecentMulti(provider, multiCoord);
+            if (recent != null) {
+                integrateResult(provider, multiCoord, recent, Runnable::run);
+                return;
+            }
             prepared = computeMultiChunkSync(provider, areaSize, multiCoord);
         }
         if (prepared != null) {
@@ -560,7 +635,64 @@ public final class AsyncMultiChunkPlanner {
         }
 
         PLANNED.remove(multiCoord);
+        cacheRecentMulti(multiCoord, gameCompatible);
         scheduleWarmBuildingInfo(provider, gameCompatible, multiCoord);
+    }
+
+    private static void cacheRecentMulti(ChunkCoord multiCoord, MultiChunk multiChunk) {
+        if (multiCoord == null || multiChunk == null) {
+            return;
+        }
+        byte[] snapshot;
+        try {
+            snapshot = MultiChunkSnapshot.encode(multiChunk);
+        } catch (Throwable t) {
+            return;
+        }
+        if (snapshot == null || snapshot.length == 0) {
+            return;
+        }
+        RECENT_MULTI.put(multiCoord, new RecentMulti(snapshot, System.currentTimeMillis()));
+        RECENT_MULTI_ORDER.add(multiCoord);
+        pruneRecentMulti();
+    }
+
+    private static MultiChunk loadRecentMulti(IDimensionInfo provider, ChunkCoord multiCoord) {
+        if (multiCoord == null) {
+            return null;
+        }
+        RecentMulti cached = RECENT_MULTI.get(multiCoord);
+        if (cached == null) {
+            return null;
+        }
+        long now = System.currentTimeMillis();
+        if ((now - cached.timestampMs) > RECENT_MULTI_TTL_MS) {
+            RECENT_MULTI.remove(multiCoord, cached);
+            return null;
+        }
+        try {
+            MultiChunk decoded = MultiChunkSnapshot.decode(cached.snapshot);
+            if (decoded != null) {
+                return decoded;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static void pruneRecentMulti() {
+        if (RECENT_MULTI.size() <= RECENT_MULTI_MAX) {
+            return;
+        }
+        int attempts = 0;
+        while (RECENT_MULTI.size() > RECENT_MULTI_MAX && attempts < RECENT_MULTI_MAX * 2) {
+            ChunkCoord coord = RECENT_MULTI_ORDER.poll();
+            if (coord == null) {
+                break;
+            }
+            RECENT_MULTI.remove(coord);
+            attempts++;
+        }
     }
 
     private static MultiChunk translateToGameCompatible(MultiChunk asyncResult, IDimensionInfo provider) {
@@ -581,19 +713,68 @@ public final class AsyncMultiChunkPlanner {
         return asyncResult;
     }
 
-    private static void warmBuildingInfo(IDimensionInfo provider, MultiChunk prepared) {
+    private static boolean warmBuildingInfo(IDimensionInfo provider, MultiChunk prepared, ChunkCoord multiCoord) {
         WARMUP_CALL_DEPTH.set(WARMUP_CALL_DEPTH.get() + 1);
         try {
             MultiChunkAccessor accessor = (MultiChunkAccessor) prepared;
             ChunkCoord topLeft = accessor.lc2h$getTopLeft();
             int areaSize = accessor.lc2h$getAreaSize();
 
-            for (int dx = 0; dx < areaSize; dx++) {
-                for (int dz = 0; dz < areaSize; dz++) {
-                    ChunkCoord target = new ChunkCoord(topLeft.dimension(), topLeft.chunkX() + dx, topLeft.chunkZ() + dz);
-                    AsyncBuildingInfoPlanner.preSchedule(provider, target);
-                }
+            if (multiCoord == null) {
+                multiCoord = toMultiCoord(topLeft, areaSize);
             }
+            WarmupPlan plan = WARM_PLANS.computeIfAbsent(multiCoord, key -> new WarmupPlan(topLeft, areaSize));
+            int total = plan.total();
+            int remaining = total - plan.cursor.get();
+            if (remaining <= 0) {
+                WARM_PLANS.remove(multiCoord);
+                return true;
+            }
+
+            MinecraftServer server = ServerRescheduler.getServer();
+            if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+                return false;
+            }
+
+            double scale = ServerTickLoad.getBudgetScale(server);
+            int pending = 0;
+            int availableSlots = 0;
+            try {
+                AsyncBuildingInfoPlanner.BuildingInfoPressureSnapshot snapshot = AsyncBuildingInfoPlanner.snapshotPressure();
+                pending = snapshot.pendingBuildingInfo();
+                availableSlots = snapshot.limiterAvailable();
+            } catch (Throwable ignored) {
+            }
+            double pressure = pending <= 0 ? 0.0 : Math.min(1.0, pending / 4096.0);
+            int maxPerRun = (int) Math.round(4 + (32 - 4) * scale * (1.0 - pressure));
+            if (availableSlots > 0) {
+                maxPerRun = Math.min(maxPerRun, Math.max(2, availableSlots * 4));
+            }
+            maxPerRun = Math.max(2, Math.min(32, maxPerRun));
+            maxPerRun = Math.min(maxPerRun, remaining);
+
+            boolean cullForView = shouldCullQueue();
+            int scheduled = 0;
+            while (scheduled < maxPerRun) {
+                int index = plan.nextIndex();
+                if (index >= total) {
+                    break;
+                }
+                int dx = plan.dx[index];
+                int dz = plan.dz[index];
+                ChunkCoord target = new ChunkCoord(topLeft.dimension(), topLeft.chunkX() + dx, topLeft.chunkZ() + dz);
+                if (cullForView && !isChunkInView(target)) {
+                    continue;
+                }
+                AsyncBuildingInfoPlanner.preSchedule(provider, target);
+                scheduled++;
+            }
+
+            if (plan.cursor.get() >= total) {
+                WARM_PLANS.remove(multiCoord);
+                return true;
+            }
+            return false;
         } finally {
             WARMUP_CALL_DEPTH.set(WARMUP_CALL_DEPTH.get() - 1);
         }
@@ -1115,17 +1296,20 @@ public final class AsyncMultiChunkPlanner {
             return;
         }
 
-        org.admany.lc2h.concurrency.async.AsyncManager.submitTask("warmBuildingInfo", () -> {
+        org.admany.lc2h.concurrency.async.AsyncManager.submitSupplier("warmBuildingInfo", () -> {
+                boolean completed = false;
                 try {
-                    warmBuildingInfo(provider, multiChunk);
+                    completed = warmBuildingInfo(provider, multiChunk, multiCoord);
                 } finally {
                     WARM_SEMAPHORE.release();
                 }
-            }, null, org.admany.lc2h.concurrency.async.Priority.LOW)
-            .whenComplete((ignored, throwable) -> {
+                return completed;
+            }, org.admany.lc2h.concurrency.async.Priority.LOW)
+            .whenComplete((completed, throwable) -> {
                 WARM_BUILDING_INFO_SUBMITTED.remove(multiCoord);
-                if (throwable == null) {
+                if (throwable == null && Boolean.TRUE.equals(completed)) {
                     WARM_BUILDING_INFO_DONE.put(multiCoord, System.currentTimeMillis());
+                    WARM_PLANS.remove(multiCoord);
                 } else {
                     enqueueWarmRetry(provider, multiCoord, computeWarmRetryDelayMs());
                 }

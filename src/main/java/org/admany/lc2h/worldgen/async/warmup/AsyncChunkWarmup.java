@@ -18,6 +18,7 @@ import org.admany.lc2h.worldgen.async.planner.AsyncTerrainFeaturePlanner;
 import org.admany.lc2h.worldgen.coord.RegionCoord;
 import org.admany.lc2h.worldgen.gpu.RegionProcessingGPUTask;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
+import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.quantified.api.opencl.QuantifiedOpenCL;
 import org.admany.quantified.core.common.opencl.core.OpenCLManager;
 import org.admany.quantified.core.common.util.TaskScheduler;
@@ -55,6 +56,8 @@ public final class AsyncChunkWarmup {
     private static final int PREFETCH_RADIUS = Math.max(1, Integer.getInteger("lc2h.warmup.prefetchRadius", 2));
     private static final int MAX_CONCURRENT_BATCHES = Math.max(1, Math.min(4,
         Integer.getInteger("lc2h.warmup.maxConcurrentBatches", Math.max(1, Runtime.getRuntime().availableProcessors() / 4))));
+    private static final long PLAYER_GRACE_MS = Math.max(0L, Long.getLong("lc2h.warmup.playerGraceMs", 60_000L));
+    private static final double MAX_TICK_MS = Math.max(5.0D, Double.parseDouble(System.getProperty("lc2h.warmup.maxTickMs", "35")));
 
     // This encodes timestamps - the sign bit indicates GPU-ready schedule.
     private static final ConcurrentHashMap<RegionCoord, Long> PRE_SCHEDULE_CACHE = new ConcurrentHashMap<>();
@@ -83,6 +86,7 @@ public final class AsyncChunkWarmup {
     private static final AtomicInteger preScheduleOps = new AtomicInteger(0);
     private static final long GPU_READY_FLAG = Long.MIN_VALUE;
     private static final AtomicLong lastFlushKickMs = new AtomicLong(0);
+    private static final AtomicLong LAST_PLAYER_JOIN_MS = new AtomicLong(-1L);
 
     private AsyncChunkWarmup() {
     }
@@ -169,7 +173,7 @@ public final class AsyncChunkWarmup {
             }
 
             var server = org.admany.lc2h.util.server.ServerRescheduler.getServer();
-            if (server != null && server.getPlayerList().getPlayerCount() == 0) {
+            if (server != null && !canWarmup(server)) {
                 return;
             }
         } catch (Throwable ignored) {}
@@ -246,6 +250,56 @@ public final class AsyncChunkWarmup {
         return System.currentTimeMillis() - f >= STARTUP_DELAY_MS;
     }
 
+    public static void notifyPlayerJoin() {
+        LAST_PLAYER_JOIN_MS.set(System.currentTimeMillis());
+    }
+
+    public static void notifyPlayerLeave(MinecraftServer server) {
+        if (server == null) {
+            return;
+        }
+        try {
+            if (server.getPlayerList() == null || server.getPlayerList().getPlayerCount() == 0) {
+                LAST_PLAYER_JOIN_MS.set(-1L);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static boolean canWarmup(MinecraftServer server) {
+        if (server == null) {
+            return false;
+        }
+        try {
+            if (ServerTickLoad.shouldPauseNonCritical(server)) {
+                return false;
+            }
+        } catch (Throwable ignored) {
+        }
+        int playerCount = 0;
+        try {
+            if (server.getPlayerList() != null) {
+                playerCount = server.getPlayerList().getPlayerCount();
+            }
+        } catch (Throwable ignored) {
+        }
+        if (playerCount <= 0) {
+            return true;
+        }
+        long lastJoin = LAST_PLAYER_JOIN_MS.get();
+        long now = System.currentTimeMillis();
+        if (lastJoin > 0 && (now - lastJoin) < PLAYER_GRACE_MS) {
+            return false;
+        }
+        try {
+            if (server.getAverageTickTime() > MAX_TICK_MS) {
+                return false;
+            }
+        } catch (Throwable ignored) {
+        }
+        return true;
+    }
+
     private static void flushRegionBatch() {
         if (REGION_BUFFER_SIZE.get() == 0) {
             return;
@@ -256,9 +310,9 @@ public final class AsyncChunkWarmup {
             LC2H.LOGGER.debug("Flushing region warmup queue (pending={})", pendingBeforeFlush);
         } else if (pendingBeforeFlush > 0) {
             if (VERBOSE_LOGGING) {
-                LC2H.LOGGER.info("LC2H warmup: submitting {} regions for background processing", pendingBeforeFlush);
+                LC2H.LOGGER.debug("LC2H warmup: submitting {} regions for background processing", pendingBeforeFlush);
             } else if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
-                LC2H.LOGGER.info("LC2H warmup: submitting {} regions for background processing", pendingBeforeFlush);
+                LC2H.LOGGER.debug("LC2H warmup: submitting {} regions for background processing", pendingBeforeFlush);
             } else {
                 LC2H.LOGGER.debug("LC2H warmup: submitting {} regions for background processing", pendingBeforeFlush);
             }
@@ -267,10 +321,11 @@ public final class AsyncChunkWarmup {
 
         try {
             List<TaskBatchItem<Boolean>> regionBatchTasks = new ArrayList<>();
+            int maxRegions = effectiveRegionBatchSize();
             List<RegionProviderPair> regionsToProcess;
-            regionsToProcess = new ArrayList<>();
+            regionsToProcess = new ArrayList<>(Math.min(maxRegions, pendingBeforeFlush));
             RegionProviderPair next;
-            while ((next = REGION_BUFFER.poll()) != null) {
+            while (regionsToProcess.size() < maxRegions && (next = REGION_BUFFER.poll()) != null) {
                 regionsToProcess.add(next);
             }
             int drained = regionsToProcess.size();
@@ -303,9 +358,10 @@ public final class AsyncChunkWarmup {
             }
             if (!regionBatchTasks.isEmpty()) {
                 activeBatches.incrementAndGet();
+                boolean gpuReady = isOpenClAvailable();
                 CompletableFuture<List<Boolean>> regionBatchFuture = TaskScheduler.submitBatch(
                     "lc2h", "region-warmup", regionBatchTasks,
-                    task -> task.gpuTask() != null ? ResourceHint.GPU : ResourceHint.CPU
+                    task -> (gpuReady && task.gpuTask() != null) ? ResourceHint.GPU : ResourceHint.CPU
                 );
 
                 regionBatchFuture.whenComplete((results, throwable) -> {
@@ -319,14 +375,14 @@ public final class AsyncChunkWarmup {
                             LC2H.LOGGER.debug("Completed region batch warmup for {} regions in {} ms",
                                 regionsToProcess.size(), (endTime - startTime) / 1_000_000);
                         } else {
-                            LC2H.LOGGER.info("LC2H warmup: processed {} regions in {} ms",
+                            LC2H.LOGGER.debug("LC2H warmup: processed {} regions in {} ms",
                                 regionsToProcess.size(), (endTime - startTime) / 1_000_000);
                         }
 
                         if (regionsProcessed.get() % 10 == 0) {
                             long total = cacheHits.get() + cacheMisses.get();
                             double hitRate = total > 0 ? (cacheHits.get() * 100.0) / total : 0.0;
-                            LC2H.LOGGER.info("Region Warmup Stats - Cache hit rate: {}%, Regions: {}, Active: {}",
+                            LC2H.LOGGER.debug("Region Warmup Stats - Cache hit rate: {}%, Regions: {}, Active: {}",
                                 String.format(java.util.Locale.ROOT, "%.1f", hitRate), regionsProcessed.get(), activeBatches.get());
                         }
                     }
@@ -343,7 +399,7 @@ public final class AsyncChunkWarmup {
         }
 
         Runnable dispatcher = () -> {
-            if (activeBatches.get() >= MAX_CONCURRENT_BATCHES) {
+            if (activeBatches.get() >= effectiveMaxConcurrentBatches()) {
                 if (VERBOSE_LOGGING) {
                     LC2H.LOGGER.debug("Deferring region warmup flush; active batches={}", activeBatches.get());
                 }
@@ -376,6 +432,34 @@ public final class AsyncChunkWarmup {
             }
             AsyncManager.runLater("region-warmup-flush", dispatcher, 50L, Priority.LOW);
         }
+    }
+
+    private static int effectiveRegionBatchSize() {
+        int base = REGION_BATCH_SIZE;
+        if (isOpenClAvailable()) {
+            base = Math.min(8, Math.max(base, base * 2));
+        }
+        double tickMs = ServerTickLoad.getSmoothedTickMs();
+        if (tickMs >= 45.0D) {
+            base = Math.max(1, base / 2);
+        } else if (tickMs >= 35.0D) {
+            base = Math.max(1, (int) Math.round(base * 0.75));
+        }
+        return Math.max(1, base);
+    }
+
+    private static int effectiveMaxConcurrentBatches() {
+        int base = MAX_CONCURRENT_BATCHES;
+        if (isOpenClAvailable()) {
+            base = Math.min(8, Math.max(base, base * 2));
+        }
+        double tickMs = ServerTickLoad.getSmoothedTickMs();
+        if (tickMs >= 45.0D) {
+            base = Math.max(1, base / 2);
+        } else if (tickMs >= 35.0D) {
+            base = Math.max(1, (int) Math.round(base * 0.75));
+        }
+        return Math.max(1, base);
     }
 
     public static void kickFlushMaybe() {

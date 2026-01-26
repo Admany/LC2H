@@ -5,7 +5,6 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.decoration.HangingEntity;
 import net.minecraft.world.level.Level;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -21,9 +20,6 @@ public abstract class MixinHangingEntityInvalidPos extends Entity {
         super(entityType, level);
     }
 
-    @Shadow
-    public abstract boolean survives();
-
     @Inject(method = "tick", at = @At("HEAD"), cancellable = true, require = 0)
     private void lc2h$skipInvalidHangingEntityLog(CallbackInfo ci) {
         handleInvalidHangingEntity(ci);
@@ -36,7 +32,13 @@ public abstract class MixinHangingEntityInvalidPos extends Entity {
 
     private void handleInvalidHangingEntity(CallbackInfo ci) {
         Level level = this.level();
-        if (level != null && !level.isClientSide && !this.survives()) {
+        boolean survives;
+        try {
+            survives = ((HangingEntity) (Object) this).survives();
+        } catch (Throwable ignored) {
+            return;
+        }
+        if (level != null && !level.isClientSide && !survives) {
             // Vanilla would log an error and then discard; we keep the discard
             // to clean up bad entities but suppress the error log.
             this.discard();

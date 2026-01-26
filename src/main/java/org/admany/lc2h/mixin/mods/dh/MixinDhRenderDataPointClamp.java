@@ -10,11 +10,12 @@ import org.spongepowered.asm.mixin.injection.Redirect;
 public abstract class MixinDhRenderDataPointClamp {
 
     @Redirect(
-        method = "addRenderDataPointToBuilder",
+        method = {"addRenderDataPointToBuilder", "addRenderDataPoint"},
         at = @At(
             value = "INVOKE",
             target = "Lcom/seibel/distanthorizons/core/util/RenderDataPointUtil;getYMin(J)S"
-        )
+        ),
+        require = 0
     )
     private static short lc2h$correctSignedYMin(long packed) {
         int yMin = (int) ((packed >> 8) & 4095L);

@@ -10,6 +10,7 @@ import org.admany.lc2h.client.frustum.ChunkPriorityManager;
 import org.admany.lc2h.concurrency.parallel.AdaptiveBatchController;
 import org.admany.lc2h.concurrency.parallel.ParallelWorkQueue;
 import org.admany.lc2h.util.server.ServerRescheduler;
+import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.lc2h.util.log.RateLimitedLogger;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
@@ -34,6 +35,8 @@ public final class PlannerBatchQueue {
     private static final AtomicBoolean DEFERRED_FLUSH_SCHEDULED = new AtomicBoolean(false);
     private static final AtomicInteger PENDING_TASKS = new AtomicInteger();
     private static final AtomicIntegerArray PENDING_BY_KIND = new AtomicIntegerArray(PlannerTaskKind.values().length);
+    private static final java.util.concurrent.atomic.AtomicLong DROPPED_PRESSURE = new java.util.concurrent.atomic.AtomicLong(0L);
+    private static final java.util.concurrent.atomic.AtomicLong DROPPED_DUPLICATE = new java.util.concurrent.atomic.AtomicLong(0L);
 
     private PlannerBatchQueue() {
     }
@@ -66,22 +69,30 @@ public final class PlannerBatchQueue {
             }
         }
         int pending = PENDING_TASKS.incrementAndGet();
-        if (pending > MAX_PENDING_TASKS) {
+        int dynamicMax = dynamicMaxPending();
+        if (pending > dynamicMax) {
             PENDING_TASKS.decrementAndGet();
+            DROPPED_PRESSURE.incrementAndGet();
             RateLimitedLogger.warn(
                 "lc2h-planner-queue-full",
                 "LC2H planner queue full ({} >= {}). Dropping {} at {}",
                 pending,
-                MAX_PENDING_TASKS,
+                dynamicMax,
                 kind.displayName(),
                 describe(coord)
             );
             return;
         }
-        PENDING_BY_KIND.incrementAndGet(kind.ordinal());
         PlannerBatchKey key = new PlannerBatchKey(provider);
         PendingBatch batch = BATCHES.computeIfAbsent(key, PlannerBatchQueue::createBatch);
-        List<PlannerExecutable> ready = batch.add(new PlannerExecutable(kind, coord, action));
+        AddResult addResult = batch.add(new PlannerExecutable(kind, coord, action));
+        if (!addResult.accepted) {
+            adjustPending(-1);
+            DROPPED_DUPLICATE.incrementAndGet();
+            return;
+        }
+        PENDING_BY_KIND.incrementAndGet(kind.ordinal());
+        List<PlannerExecutable> ready = addResult.ready;
         if (ready != null && !ready.isEmpty()) {
             dispatch(key, ready);
             return;
@@ -256,18 +267,25 @@ public final class PlannerBatchQueue {
 
     private static final class PendingBatch {
         private final ConcurrentLinkedQueue<PlannerExecutable> tasks = new ConcurrentLinkedQueue<>();
+        private final ConcurrentHashMap<PlannerTaskKey, PlannerExecutable> unique = new ConcurrentHashMap<>();
         private final AtomicInteger size = new AtomicInteger();
         private final AtomicBoolean draining = new AtomicBoolean(false);
 
-        List<PlannerExecutable> add(PlannerExecutable exec) {
+        AddResult add(PlannerExecutable exec) {
             Objects.requireNonNull(exec, "exec");
+            if (exec.kind != null && exec.coord != null) {
+                PlannerTaskKey key = new PlannerTaskKey(exec.kind, exec.coord);
+                if (unique.putIfAbsent(key, exec) != null) {
+                    return AddResult.createRejected();
+                }
+            }
             tasks.add(exec);
             int threshold = AdaptiveBatchController.plannerFlushThreshold();
             int current = size.incrementAndGet();
             if (current >= threshold && draining.compareAndSet(false, true)) {
-                return drainAllLocked();
+                return new AddResult(true, drainAllLocked());
             }
-            return List.of();
+            return AddResult.createAccepted();
         }
 
         List<PlannerExecutable> drainAll() {
@@ -292,6 +310,9 @@ public final class PlannerBatchQueue {
                 } else {
                     keep.add(next);
                 }
+                if (next.kind != null && next.coord != null) {
+                    unique.remove(new PlannerTaskKey(next.kind, next.coord), next);
+                }
             }
             if (removed > 0) {
                 size.addAndGet(-removed);
@@ -306,6 +327,11 @@ public final class PlannerBatchQueue {
             }
             if (!keep.isEmpty()) {
                 adjustPending(keep.size());
+            }
+            for (PlannerExecutable exec : keep) {
+                if (exec.kind != null && exec.coord != null) {
+                    unique.putIfAbsent(new PlannerTaskKey(exec.kind, exec.coord), exec);
+                }
             }
             draining.set(false);
             return drained;
@@ -325,6 +351,9 @@ public final class PlannerBatchQueue {
                 if (next.kind != null) {
                     kindCounts[next.kind.ordinal()]++;
                 }
+                if (next.kind != null && next.coord != null) {
+                    unique.remove(new PlannerTaskKey(next.kind, next.coord), next);
+                }
             }
             if (removed > 0) {
                 size.addAndGet(-removed);
@@ -342,6 +371,27 @@ public final class PlannerBatchQueue {
             draining.set(false);
             return drained;
         }
+    }
+
+    private record AddResult(boolean accepted, List<PlannerExecutable> ready) {
+        private static AddResult createAccepted() {
+            return new AddResult(true, List.of());
+        }
+
+        private static AddResult createRejected() {
+            return new AddResult(false, List.of());
+        }
+    }
+
+    private record PlannerTaskKey(PlannerTaskKind kind, ChunkCoord coord) {
+    }
+
+    public static long getPressureDropCount() {
+        return DROPPED_PRESSURE.get();
+    }
+
+    public static long getDuplicateDropCount() {
+        return DROPPED_DUPLICATE.get();
     }
 
     private static final class PlannerExecutable {
@@ -387,6 +437,26 @@ public final class PlannerBatchQueue {
             return false;
         }
         return true;
+    }
+
+    private static int dynamicMaxPending() {
+        MinecraftServer server = ServerRescheduler.getServer();
+        if (server == null) {
+            return MAX_PENDING_TASKS;
+        }
+        double scale = ServerTickLoad.getBudgetScale(server);
+        if (scale <= 0) {
+            return Math.max(256, MAX_PENDING_TASKS / 4);
+        }
+        double tickMs = ServerTickLoad.getSmoothedTickMs();
+        int base = MAX_PENDING_TASKS;
+        if (tickMs >= 45.0D) {
+            base = Math.max(256, base / 4);
+        } else if (tickMs >= 35.0D) {
+            base = Math.max(256, base / 2);
+        }
+        int scaled = (int) Math.round(base * Math.min(1.0, Math.max(0.25, scale)));
+        return Math.max(256, scaled);
     }
 
     private static List<PlannerExecutable> filterBatchForView(List<PlannerExecutable> batch) {

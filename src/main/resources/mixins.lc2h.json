@@ -2,7 +2,6 @@
   "required": true,
   "minVersion": "0.8",
   "package": "org.admany.lc2h.mixin",
-  "plugin": "org.admany.lc2h.mixin.plugin.LC2HMixinPlugin",
   "compatibilityLevel": "JAVA_13",
   "mixins": [
     "lostcities.worldgen.feature.MixinLostCityFeature",
@@ -22,6 +21,7 @@
     "lostcities.cache.MixinCitySphereCacheBudget",
     "lostcities.cache.MixinLostCityTerrainFeatureHeightmapCache",
     "lostcities.terrain.MixinLostCityTerrainFeatureThreadSafeRandoms",
+    "lostcities.damage.MixinDamageAreaDisable",
     "lostcities.debris.MixinLostCityDebrisFix",
     "lostcities.debris.MixinLostCityRubble",
     "lostcities.city.MixinCity",
@@ -56,8 +56,10 @@
   ],
   "client": [
     "minecraft.client.MixinHideExperimentalWarning",
-    "minecraft.client.MixinAutoConfirmExperimentalWarningScreen",
-    "minecraft.client.MixinConfirmExperimentalFeaturesScreen",
+    "minecraft.client.MixinLevelSummaryExperimentalWarning",
+    "minecraft.client.MixinServerWorldInfoLifecycle",
+    "minecraft.client.MixinWorldDimensionsExperimentalWarning",
+    "minecraft.client.MixinWorldOpenFlowsExperimentalWarning",
     "forge.client.MixinForgeHooksClient",
     "mods.dh.MixinDhRenderDataPointClamp"
   ],

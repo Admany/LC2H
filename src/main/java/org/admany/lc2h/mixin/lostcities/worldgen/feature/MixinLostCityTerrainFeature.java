@@ -14,6 +14,8 @@ import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.ServerLevelAccessor;
 import net.minecraft.world.level.chunk.ChunkAccess;
+import org.admany.lc2h.config.ConfigManager;
+import org.admany.lc2h.mixin.accessor.lostcities.BuildingInfoAccessor;
 import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.worldgen.lostcities.LostCitiesGenerationLocks;
@@ -51,6 +53,9 @@ public class MixinLostCityTerrainFeature {
     private static final ThreadLocal<List<double[]>> LC2H_DAMAGE_CONTEXT_PATHS = new ThreadLocal<>();
 
     @Unique
+    private static final ThreadLocal<Integer> LC2H_DAMAGE_BASE_Y = new ThreadLocal<>();
+
+    @Unique
     private static final ConcurrentHashMap<ChunkCoord, List<Explosion>> LC2H_SHARED_DAMAGE = new ConcurrentHashMap<>();
 
     @Unique
@@ -59,6 +64,10 @@ public class MixinLostCityTerrainFeature {
     @Unique
     private static final long LC2H_DAMAGE_CACHE_TTL_MS = Math.max(30_000L,
         Long.getLong("lc2h.damage.cacheTtlMs", TimeUnit.MINUTES.toMillis(10)));
+
+    @Unique
+    private static final int LC2H_DAMAGE_MIN_CITY_DEPTH = Math.max(0,
+        Integer.getInteger("lc2h.damage.minCityOffset", 0));
 
 	    @Unique
 	    private static final ThreadLocal<LostCitiesGenerationLocks.LockToken> LC2H_GENERATE_LOCK =
@@ -152,12 +161,16 @@ public class MixinLostCityTerrainFeature {
         releaseGenerateLock();
 	    }
 
-	    @Inject(method = "breakBlocksForDamageNew", at = @At("HEAD"), remap = false)
-	    private void lc2h$initDeterministicDamageSeed(int chunkX, int chunkZ, BuildingInfo info, CallbackInfo ci) {
-	        long seed = 0L;
-	        try {
-	            if (provider != null) {
-	                seed = provider.getSeed();
+    @Inject(method = "breakBlocksForDamageNew", at = @At("HEAD"), cancellable = true, remap = false)
+    private void lc2h$initDeterministicDamageSeed(int chunkX, int chunkZ, BuildingInfo info, CallbackInfo ci) {
+        if (!ConfigManager.ENABLE_EXPLOSION_DEBRIS) {
+            ci.cancel();
+            return;
+        }
+        long seed = 0L;
+        try {
+            if (provider != null) {
+                seed = provider.getSeed();
 	                if (provider.getType() != null) {
 	                    seed ^= (long) provider.getType().location().hashCode() * 0x9E3779B97F4A7C15L;
 	                }
@@ -182,6 +195,25 @@ public class MixinLostCityTerrainFeature {
         List<double[]> paths = lc2h$buildMeteorPaths(baseExplosions, seed);
         LC2H_DAMAGE_CONTEXT_POS.set(new int[] { chunkX, chunkZ });
         LC2H_DAMAGE_CONTEXT_PATHS.set(paths);
+        int baseY = Integer.MIN_VALUE;
+        if (info != null) {
+            try {
+                int ground = info.getCityGroundLevel();
+                if (ground > 0) {
+                    baseY = ground;
+                } else if (provider != null && provider.getProfile() != null && provider.getProfile().GROUNDLEVEL > 0) {
+                    baseY = provider.getProfile().GROUNDLEVEL;
+                } else {
+                    baseY = ((BuildingInfoAccessor) info).lc2h$getCityLevel();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (baseY != Integer.MIN_VALUE) {
+            LC2H_DAMAGE_BASE_Y.set(baseY);
+        } else {
+            LC2H_DAMAGE_BASE_Y.remove();
+        }
     }
 
     @Inject(method = "breakBlocksForDamageNew", at = @At("RETURN"), remap = false)
@@ -189,6 +221,7 @@ public class MixinLostCityTerrainFeature {
         LC2H_DAMAGE_SEED.remove();
         LC2H_DAMAGE_CONTEXT_POS.remove();
         LC2H_DAMAGE_CONTEXT_PATHS.remove();
+        LC2H_DAMAGE_BASE_Y.remove();
     }
 
     @Redirect(
@@ -200,10 +233,21 @@ public class MixinLostCityTerrainFeature {
         remap = false
     )
     private boolean lc2h$sharedHasExplosions(DamageArea area, int y) {
+        if (!ConfigManager.ENABLE_EXPLOSION_DEBRIS) {
+            return false;
+        }
         int[] pos = LC2H_DAMAGE_CONTEXT_POS.get();
         List<double[]> paths = LC2H_DAMAGE_CONTEXT_PATHS.get();
         if (pos == null || paths == null) {
             return area.hasExplosions(y);
+        }
+        Integer baseY = LC2H_DAMAGE_BASE_Y.get();
+        if (baseY != null && baseY != Integer.MIN_VALUE && LC2H_DAMAGE_MIN_CITY_DEPTH > 0) {
+            int minY = baseY - LC2H_DAMAGE_MIN_CITY_DEPTH;
+            int sectionMaxY = (y << 4) + 15;
+            if (sectionMaxY < minY) {
+                return false;
+            }
         }
         return lc2h$hasExplosions(paths, pos[0], pos[1], y);
     }
@@ -217,9 +261,18 @@ public class MixinLostCityTerrainFeature {
         remap = false
     )
     private float lc2h$sharedGetDamage(DamageArea area, int x, int y, int z) {
+        if (!ConfigManager.ENABLE_EXPLOSION_DEBRIS) {
+            return 0.0f;
+        }
         List<double[]> paths = LC2H_DAMAGE_CONTEXT_PATHS.get();
         if (paths == null) {
             return area.getDamage(x, y, z);
+        }
+        Integer baseY = LC2H_DAMAGE_BASE_Y.get();
+        if (baseY != null && baseY != Integer.MIN_VALUE && LC2H_DAMAGE_MIN_CITY_DEPTH > 0) {
+            if (y < (baseY - LC2H_DAMAGE_MIN_CITY_DEPTH)) {
+                return 0.0f;
+            }
         }
         return lc2h$getDamage(paths, x, y, z);
     }
@@ -232,19 +285,28 @@ public class MixinLostCityTerrainFeature {
         ),
 	        remap = false
 	    )
-	    private BlockState lc2h$deterministicDamageBlock(DamageArea area,
-	                                                     BlockState state,
-	                                                     IDimensionInfo provider,
-	                                                     int y,
-	                                                     float damage,
-	                                                     CompiledPalette palette,
-	                                                     BlockState liquidState) {
-	        if (state == null) {
-	            return state;
-	        }
-	        if (Tools.hasTag(state.getBlock(), LostTags.NOT_BREAKABLE_TAG)) {
-	            return state;
-	        }
+    private BlockState lc2h$deterministicDamageBlock(DamageArea area,
+                                                     BlockState state,
+                                                     IDimensionInfo provider,
+                                                     int y,
+                                                     float damage,
+                                                     CompiledPalette palette,
+                                                     BlockState liquidState) {
+        if (state == null) {
+            return state;
+        }
+        if (!ConfigManager.ENABLE_EXPLOSION_DEBRIS) {
+            return state;
+        }
+        Integer baseY = LC2H_DAMAGE_BASE_Y.get();
+        if (baseY != null && baseY != Integer.MIN_VALUE && LC2H_DAMAGE_MIN_CITY_DEPTH > 0) {
+            if (y < (baseY - LC2H_DAMAGE_MIN_CITY_DEPTH)) {
+                return state;
+            }
+        }
+        if (Tools.hasTag(state.getBlock(), LostTags.NOT_BREAKABLE_TAG)) {
+            return state;
+        }
 
 	        if (Tools.hasTag(state.getBlock(), LostTags.EASY_BREAKABLE_TAG)) {
 	            damage *= 2.5f;

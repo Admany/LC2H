@@ -8,6 +8,7 @@ import org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner;
 import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
 import org.admany.lc2h.worldgen.async.planner.AsyncTerrainCorrectionPlanner;
 import org.admany.lc2h.worldgen.async.planner.AsyncTerrainFeaturePlanner;
+import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.quantified.core.common.cache.CacheManager;
 import org.admany.quantified.core.common.opencl.core.OpenCLManager;
 import org.admany.quantified.core.common.opencl.core.OpenCLRuntime;
@@ -46,6 +47,7 @@ final class GpuMemoryState {
     static final LinkedHashMap<ChunkCoord, Long> ACCESS_ORDER = new LinkedHashMap<>(16, 0.75f, true);
     static final Map<ChunkCoord, Integer> MEMORY_SIZES = new ConcurrentHashMap<>();
     static final Map<ChunkCoord, Long> ADD_TIMES = new ConcurrentHashMap<>();
+    static final java.util.concurrent.atomic.AtomicLong DISK_PROMOTIONS = new java.util.concurrent.atomic.AtomicLong(0L);
 
     static final long AGGRESSIVE_CLEANUP_THRESHOLD = (long) (MAX_GPU_MEMORY_BYTES * 0.6);
     static final List<ConcurrentHashMap<ChunkCoord, float[]>> RUNTIME_CACHES = List.of(
@@ -145,8 +147,11 @@ final class GpuMemoryState {
         }
 
         float[] diskCopy = GpuDiskCache.load(coord);
-        if (diskCopy != null && LC2H.LOGGER.isDebugEnabled()) {
-            LC2H.LOGGER.debug("Loaded GPU data for {} from disk cache ({} floats)", coord, diskCopy.length);
+        if (diskCopy != null) {
+            promoteDiskCopy(coord, diskCopy, cache);
+            if (LC2H.LOGGER.isDebugEnabled()) {
+                LC2H.LOGGER.debug("Loaded GPU data for {} from disk cache ({} floats)", coord, diskCopy.length);
+            }
         }
         return diskCopy;
     }
@@ -232,11 +237,13 @@ final class GpuMemoryState {
     }
 
     private static void ensureMemoryCapacityLocked(int requiredBytes) {
-        if (currentMemoryBytes + requiredBytes > AGGRESSIVE_CLEANUP_THRESHOLD) {
+        long maxBytes = effectiveMaxGpuBytes();
+        long aggressiveThreshold = Math.min(AGGRESSIVE_CLEANUP_THRESHOLD, (long) (maxBytes * 0.6));
+        if (currentMemoryBytes + requiredBytes > aggressiveThreshold) {
             aggressiveCleanup();
         }
 
-        while (currentMemoryBytes + requiredBytes > MAX_GPU_MEMORY_BYTES && !ACCESS_ORDER.isEmpty()) {
+        while (currentMemoryBytes + requiredBytes > maxBytes && !ACCESS_ORDER.isEmpty()) {
             evictLRUEntry();
         }
 
@@ -491,11 +498,53 @@ final class GpuMemoryState {
         LC2H.LOGGER.debug("No GPU entries met the eviction threshold; all were used recently");
     }
 
+    private static long effectiveMaxGpuBytes() {
+        long maxBytes = MAX_GPU_MEMORY_BYTES;
+        double tickMs = ServerTickLoad.getSmoothedTickMs();
+        if (tickMs >= 45.0D) {
+            maxBytes = (long) (maxBytes * 0.5);
+        } else if (tickMs >= 35.0D) {
+            maxBytes = (long) (maxBytes * 0.7);
+        }
+        return Math.max(16L * 1024L * 1024L, maxBytes);
+    }
+
+    private static void promoteDiskCopy(ChunkCoord coord, float[] data, ConcurrentHashMap<ChunkCoord, float[]> cache) {
+        if (coord == null || data == null || cache == null) {
+            return;
+        }
+        int dataSize = data.length * 4;
+        synchronized (MEMORY_LOCK) {
+            Integer priorSize = MEMORY_SIZES.get(coord);
+            long maxBytes = effectiveMaxGpuBytes();
+            if (priorSize == null && currentMemoryBytes + dataSize > maxBytes) {
+                return;
+            }
+            if (!checkGPUMonitorCapacity(dataSize)) {
+                return;
+            }
+            ensureMemoryCapacityLocked(priorSize == null ? dataSize : Math.max(0, dataSize - priorSize));
+            cache.put(coord, data);
+            if (priorSize == null) {
+                currentMemoryBytes += dataSize;
+                MEMORY_SIZES.put(coord, dataSize);
+                ADD_TIMES.put(coord, System.nanoTime());
+            } else if (priorSize != dataSize) {
+                currentMemoryBytes += (dataSize - priorSize);
+                MEMORY_SIZES.put(coord, dataSize);
+            }
+            ACCESS_ORDER.put(coord, System.nanoTime());
+            lastAccessMs = System.currentTimeMillis();
+            DISK_PROMOTIONS.incrementAndGet();
+        }
+    }
+
     static String getMemoryStats() {
         synchronized (MEMORY_LOCK) {
             long now = System.nanoTime();
             int protectedCount = 0;
             int unprotectedCount = 0;
+            long maxBytes = effectiveMaxGpuBytes();
 
             for (Map.Entry<ChunkCoord, Long> entry : ACCESS_ORDER.entrySet()) {
                 long ageMs = (now - entry.getValue()) / 1_000_000;
@@ -514,7 +563,7 @@ final class GpuMemoryState {
 
             return String.format("GPU Memory: %d MB used (%d%%), %d entries (%d protected, %d evictable)",
                 currentMemoryBytes / (1024 * 1024),
-                (int) ((currentMemoryBytes * 100L) / MAX_GPU_MEMORY_BYTES),
+                (int) ((currentMemoryBytes * 100L) / Math.max(1, maxBytes)),
                 MEMORY_SIZES.size(),
                 protectedCount,
                 unprotectedCount);
@@ -523,7 +572,9 @@ final class GpuMemoryState {
 
     static void continuousCleanup() {
         synchronized (MEMORY_LOCK) {
-            if (currentMemoryBytes > AGGRESSIVE_CLEANUP_THRESHOLD) {
+            long maxBytes = effectiveMaxGpuBytes();
+            long aggressiveThreshold = Math.min(AGGRESSIVE_CLEANUP_THRESHOLD, (long) (maxBytes * 0.6));
+            if (currentMemoryBytes > aggressiveThreshold) {
                 aggressiveCleanup();
             }
 
@@ -559,13 +610,14 @@ final class GpuMemoryState {
                     cleaned, freedMemory / (1024 * 1024));
             }
 
-            if (currentMemoryBytes > (MAX_GPU_MEMORY_BYTES * 0.7)) {
+            long maxBytes = effectiveMaxGpuBytes();
+            if (currentMemoryBytes > (maxBytes * 0.7)) {
                 int additionalCleaned = 0;
                 long now = System.nanoTime();
                 long minAgeCutoff = now - (MIN_AGE_FOR_EVICTION_MS * 1_000_000);
 
                 it = ACCESS_ORDER.entrySet().iterator();
-                while (it.hasNext() && additionalCleaned < 25 && currentMemoryBytes > (MAX_GPU_MEMORY_BYTES * 0.6)) {
+                while (it.hasNext() && additionalCleaned < 25 && currentMemoryBytes > (maxBytes * 0.6)) {
                     Map.Entry<ChunkCoord, Long> entry = it.next();
                     ChunkCoord coord = entry.getKey();
                     Long addTime = ADD_TIMES.get(coord);
