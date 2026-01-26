@@ -198,6 +198,7 @@ public final class LostCitiesCacheBudgetManager {
         private final AtomicLong bytes = new AtomicLong(0);
         private final AtomicLong entries = new AtomicLong(0);
         private final ConcurrentLinkedDeque<Object> order = new ConcurrentLinkedDeque<>();
+        private final AtomicLong orderSize = new AtomicLong(0);
         private final ConcurrentHashMap<Object, Integer> sizes = new ConcurrentHashMap<>();
         private final ConcurrentHashMap<Object, Long> lastAccess = new ConcurrentHashMap<>();
 
@@ -218,6 +219,8 @@ public final class LostCitiesCacheBudgetManager {
             sizes.put(key, size);
             lastAccess.put(key, now);
             order.addFirst(key);
+            orderSize.incrementAndGet();
+            trimOrder();
             entries.incrementAndGet();
             bytes.addAndGet(size);
             TOTAL_BYTES.addAndGet(size);
@@ -230,6 +233,8 @@ public final class LostCitiesCacheBudgetManager {
         private void recordAccessInternal(Object key, long now) {
             lastAccess.put(key, now);
             order.addFirst(key);
+            orderSize.incrementAndGet();
+            trimOrder();
         }
 
         private void recordRemove(Object key) {
@@ -252,6 +257,9 @@ public final class LostCitiesCacheBudgetManager {
             }
             while (true) {
                 Object key = order.pollLast();
+                if (key != null) {
+                    orderSize.decrementAndGet();
+                }
                 if (key == null) {
                     return false;
                 }
@@ -310,9 +318,28 @@ public final class LostCitiesCacheBudgetManager {
             long removed = bytes.getAndSet(0);
             entries.set(0);
             order.clear();
+            orderSize.set(0);
             sizes.clear();
             lastAccess.clear();
             return removed;
+        }
+
+        private void trimOrder() {
+            long entryCount = entries.get();
+            long cap = Math.max(minRetain, entryCount) * 4L + 1024L;
+            long current = orderSize.get();
+            if (current <= cap) {
+                return;
+            }
+            long target = cap;
+            while (current > target) {
+                Object removed = order.pollLast();
+                if (removed == null) {
+                    orderSize.set(0);
+                    break;
+                }
+                current = orderSize.decrementAndGet();
+            }
         }
 
         public long bytes() {

@@ -528,7 +528,14 @@ public class LC2H {
         if (!(event.getEntity() instanceof ServerPlayer player)) {
             return;
         }
+        AsyncChunkWarmup.notifyPlayerJoin();
         tryStartAsyncAfterDelay(player);
+    }
+
+    @SubscribeEvent
+    public void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
+        MinecraftServer server = event.getEntity() != null ? event.getEntity().getServer() : null;
+        AsyncChunkWarmup.notifyPlayerLeave(server);
     }
 
     @SubscribeEvent
@@ -544,6 +551,9 @@ public class LC2H {
             return;
         }
         if (!isAsyncReady(server)) {
+            return;
+        }
+        if (!AsyncChunkWarmup.canWarmup(server)) {
             return;
         }
         long tick = server.getTickCount();
@@ -738,6 +748,10 @@ public class LC2H {
         lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.planner").getString(),
             net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.planner",
                 planner.batchCount(), planner.pendingTasks(), plannerKinds).getString()));
+        lines.add(statLine("Planner pressure",
+            String.format(Locale.ROOT, "dropped=%d deduped=%d",
+                PlannerBatchQueue.getPressureDropCount(),
+                PlannerBatchQueue.getDuplicateDropCount())));
         lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.multichunk").getString(),
             net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.multichunk",
                 planned, gpuCache).getString()));
@@ -764,6 +778,8 @@ public class LC2H {
         lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.gpu").getString(),
             net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.gpu",
                 gpuEntries, formatBytes(gpuBytes), diskEntries, formatBytes(diskBytes), formatBytes(quantifiedBytes)).getString()));
+        lines.add(statLine("GPU cache",
+            String.format(Locale.ROOT, "promotions=%d", GPUMemoryManager.getDiskPromotionCount())));
         if (quantifiedEntries != null) {
             String pressureLabel = net.minecraft.network.chat.Component.translatable(cachePressure
                 ? "lc2h.command.stats.pressure.high"
@@ -795,6 +811,10 @@ public class LC2H {
             .append(statLine("Planner",
                 String.format(Locale.ROOT, "batches=%d pending=%d byKind=%s",
                     planner.batchCount(), planner.pendingTasks(), plannerKinds))).append('\n')
+            .append(statLine("Planner pressure",
+                String.format(Locale.ROOT, "dropped=%d deduped=%d",
+                    PlannerBatchQueue.getPressureDropCount(),
+                    PlannerBatchQueue.getDuplicateDropCount()))).append('\n')
             .append(statLine("MultiChunk",
                 String.format(Locale.ROOT, "planned=%d gpuCache=%d",
                     planned, gpuCache))).append('\n')
@@ -821,6 +841,8 @@ public class LC2H {
             .append(statLine("GPU",
                 String.format(Locale.ROOT, "entries=%d mem=%s diskEntries=%d diskMem=%s qApiMem=%s",
                     gpuEntries, formatBytes(gpuBytes), diskEntries, formatBytes(diskBytes), formatBytes(quantifiedBytes)))).append('\n');
+        log.append(statLine("GPU cache",
+            String.format(Locale.ROOT, "promotions=%d", GPUMemoryManager.getDiskPromotionCount()))).append('\n');
         if (quantifiedEntries != null) {
             log.append(statLine("FeatureCache",
                 String.format(Locale.ROOT, "local=%d distributed=%d mem=%dMB pressure=%s",

@@ -10,14 +10,26 @@ import net.minecraft.world.level.block.state.BlockState;
 import org.admany.lc2h.config.ConfigManager;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(value = LostCityTerrainFeature.class, remap = false)
 public abstract class MixinLostCityRubble {
 
+    @Inject(method = "generateRuins", at = @At("HEAD"), cancellable = true, remap = false)
+    private void lc2h$skipRuinsWhenDisabled(BuildingInfo info, CallbackInfo ci) {
+        if (!ConfigManager.ENABLE_EXPLOSION_DEBRIS) {
+            ci.cancel();
+        }
+    }
+
     @Redirect(method = "generateRuins", at = @At(value = "INVOKE", target = "Lmcjty/lostcities/worldgen/ChunkDriver;add(Lnet/minecraft/world/level/block/state/BlockState;)Lmcjty/lostcities/worldgen/ChunkDriver;"))
     private ChunkDriver lc2h_guardRubblePlacement(ChunkDriver driver, BlockState state, BuildingInfo info) {
         if (!ConfigManager.ENABLE_EXPLOSION_DEBRIS) {
+            return driver;
+        }
+        if (info != null && info.hasBuilding) {
             return driver;
         }
         BlockState below = driver.getBlockDown();

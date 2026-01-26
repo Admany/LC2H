@@ -69,6 +69,10 @@ public final class GPUMemoryManager {
         return GpuMemoryState.getQuantifiedAPICacheSize();
     }
 
+    public static long getDiskPromotionCount() {
+        return GpuMemoryState.DISK_PROMOTIONS.get();
+    }
+
     public static void clearQuantifiedAPICaches() {
         GpuMemoryState.clearQuantifiedAPICaches();
     }

@@ -141,6 +141,7 @@ public final class CacheBudgetManager {
         private final AtomicLong bytes = new AtomicLong(0);
         private final AtomicLong entries = new AtomicLong(0);
         private final ConcurrentLinkedDeque<Object> order = new ConcurrentLinkedDeque<>();
+        private final AtomicLong orderSize = new AtomicLong(0);
         private final ConcurrentHashMap<Object, Integer> sizes = new ConcurrentHashMap<>();
 
         private CacheGroup(String name, long defaultEntryBytes, int minRetain, Evictor evictor) {
@@ -158,6 +159,8 @@ public final class CacheBudgetManager {
             int size = (int) Math.min(Integer.MAX_VALUE, Math.max(1L, entryBytes));
             sizes.put(key, size);
             order.addFirst(key);
+            orderSize.incrementAndGet();
+            trimOrder();
             entries.incrementAndGet();
             bytes.addAndGet(size);
             TOTAL_BYTES.addAndGet(size);
@@ -165,6 +168,8 @@ public final class CacheBudgetManager {
 
         private void recordAccess(Object key) {
             order.addFirst(key);
+            orderSize.incrementAndGet();
+            trimOrder();
         }
 
         private void recordRemove(Object key) {
@@ -186,6 +191,9 @@ public final class CacheBudgetManager {
             }
             while (true) {
                 Object key = order.pollLast();
+                if (key != null) {
+                    orderSize.decrementAndGet();
+                }
                 if (key == null) {
                     return false;
                 }
@@ -219,8 +227,27 @@ public final class CacheBudgetManager {
             long removed = bytes.getAndSet(0);
             entries.set(0);
             order.clear();
+            orderSize.set(0);
             sizes.clear();
             return removed;
+        }
+
+        private void trimOrder() {
+            long entryCount = entries.get();
+            long cap = Math.max(minRetain, entryCount) * 4L + 1024L;
+            long current = orderSize.get();
+            if (current <= cap) {
+                return;
+            }
+            long target = cap;
+            while (current > target) {
+                Object removed = order.pollLast();
+                if (removed == null) {
+                    orderSize.set(0);
+                    break;
+                }
+                current = orderSize.decrementAndGet();
+            }
         }
 
         public long bytes() {

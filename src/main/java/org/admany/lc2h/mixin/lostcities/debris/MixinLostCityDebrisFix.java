@@ -45,6 +45,9 @@ public abstract class MixinLostCityDebrisFix {
         if (!adjacentInfo.hasBuilding) {
             return;
         }
+        if (info.hasBuilding) {
+            return;
+        }
 
         float damageFactor = adjacentInfo.getDamageArea().getDamageFactor();
         if (!(damageFactor > .5f)) {
