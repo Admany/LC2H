@@ -49,6 +49,7 @@ public final class AsyncMultiChunkPlanner {
     private static final ConcurrentHashMap<ChunkCoord, Boolean> WARM_BUILDING_INFO_SUBMITTED = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<ChunkCoord, Long> WARM_BUILDING_INFO_DONE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<ChunkCoord, WarmupPlan> WARM_PLANS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<ChunkCoord, Boolean> INTEGRATION_HOOKED = new ConcurrentHashMap<>();
     private static final long WARM_BUILDING_INFO_TTL_MS = Math.max(30_000L,
         Long.getLong("lc2h.multichunk.warmup_ttl_ms", java.util.concurrent.TimeUnit.MINUTES.toMillis(10)));
     private static final Semaphore WARM_SEMAPHORE = new Semaphore(2);
@@ -256,27 +257,41 @@ public final class AsyncMultiChunkPlanner {
         MultiChunk prepared = null;
         CompletableFuture<MultiChunk> future = PLANNED.get(multiCoord);
         if (future != null) {
-            try {
-                if (!future.isCancelled() && !future.isCompletedExceptionally()) {
-                    if (future.isDone()) {
-                        prepared = future.getNow(null);
-                    } else {
-                        prepared = future.join();
-                    }
+            if (future.isDone() && !future.isCompletedExceptionally() && !future.isCancelled()) {
+                prepared = future.getNow(null);
+                if (prepared != null) {
+                    integrateResult(provider, multiCoord, prepared, ServerRescheduler::runOnServer);
                 }
-            } catch (Throwable ignored) {
-            }
-        }
-        if (prepared == null) {
-            MultiChunk recent = loadRecentMulti(provider, multiCoord);
-            if (recent != null) {
-                integrateResult(provider, multiCoord, recent, Runnable::run);
                 return;
             }
-            prepared = computeMultiChunkSync(provider, areaSize, multiCoord);
+            if (INTEGRATION_HOOKED.putIfAbsent(multiCoord, Boolean.TRUE) == null) {
+                future.whenComplete((result, error) -> {
+                    INTEGRATION_HOOKED.remove(multiCoord);
+                    if (error != null || result == null) {
+                        return;
+                    }
+                    integrateResult(provider, multiCoord, result, ServerRescheduler::runOnServer);
+                });
+            }
+            return;
         }
-        if (prepared != null) {
-            integrateResult(provider, multiCoord, prepared, Runnable::run);
+
+        MultiChunk recent = loadRecentMulti(provider, multiCoord);
+        if (recent != null) {
+            integrateResult(provider, multiCoord, recent, ServerRescheduler::runOnServer);
+            return;
+        }
+
+        CompletableFuture<MultiChunk> scheduled = PLANNED.computeIfAbsent(multiCoord,
+            key -> submitMultiChunkCompute(provider, areaSize, key));
+        if (INTEGRATION_HOOKED.putIfAbsent(multiCoord, Boolean.TRUE) == null) {
+            scheduled.whenComplete((result, error) -> {
+                INTEGRATION_HOOKED.remove(multiCoord);
+                if (error != null || result == null) {
+                    return;
+                }
+                integrateResult(provider, multiCoord, result, ServerRescheduler::runOnServer);
+            });
         }
     }
 
