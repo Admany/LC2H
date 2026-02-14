@@ -12,6 +12,7 @@ import net.minecraft.world.level.levelgen.feature.FeaturePlaceContext;
 import net.minecraft.world.level.levelgen.feature.TreeFeature;
 import net.minecraft.world.level.levelgen.feature.configurations.TreeConfiguration;
 import org.admany.lc2h.config.ConfigManager;
+import org.admany.lc2h.worldgen.lostcities.LostCityTreeSafety;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -22,7 +23,8 @@ public class MixinTreeFeatureNearCityBorder {
 
     @Inject(method = "place", at = @At("HEAD"), cancellable = true)
     private void lc2h$preventTreesNearCityBorder(FeaturePlaceContext<TreeConfiguration> context, CallbackInfoReturnable<Boolean> cir) {
-        if (!ConfigManager.CITY_BLEND_ENABLED || !ConfigManager.CITY_BLEND_CLEAR_TREES) {
+        if (!ConfigManager.CITY_BLEND_TREE_SEAM_FIX
+            && (!ConfigManager.CITY_BLEND_ENABLED || !ConfigManager.CITY_BLEND_CLEAR_TREES)) {
             return;
         }
 
@@ -46,10 +48,26 @@ public class MixinTreeFeatureNearCityBorder {
         int z = origin.getZ();
 
         ResourceKey<Level> dim = dimInfo.getType();
+        if (dim == null) {
+            return;
+        }
         int originChunkX = x >> 4;
         int originChunkZ = z >> 4;
 
-        if (BuildingInfo.isCity(new ChunkCoord(dim, originChunkX, originChunkZ), dimInfo)) {
+        if (ConfigManager.CITY_BLEND_TREE_SEAM_FIX) {
+            int buffer = Math.max(1, ConfigManager.CITY_BLEND_TREE_SEAM_BUFFER);
+            if (LostCityTreeSafety.shouldBlockTreeAt(dimInfo, dim, x, z, buffer)) {
+                cir.setReturnValue(false);
+                return;
+            }
+        }
+
+        if (!ConfigManager.CITY_BLEND_ENABLED || !ConfigManager.CITY_BLEND_CLEAR_TREES) {
+            return;
+        }
+
+        boolean originCity = BuildingInfo.isCity(new ChunkCoord(dim, originChunkX, originChunkZ), dimInfo);
+        if (originCity) {
             return;
         }
 

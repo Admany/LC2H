@@ -321,6 +321,7 @@ public final class AsyncChunkWarmup {
 
         try {
             List<TaskBatchItem<Boolean>> regionBatchTasks = new ArrayList<>();
+            int gpuCapableTasks = 0;
             int maxRegions = effectiveRegionBatchSize();
             List<RegionProviderPair> regionsToProcess;
             regionsToProcess = new ArrayList<>(Math.min(maxRegions, pendingBeforeFlush));
@@ -348,20 +349,27 @@ public final class AsyncChunkWarmup {
                     LC2H.LOGGER.debug("Scheduling region warmup task for {}", region);
                 }
 
+                Object gpuTask = createRegionGPUTask(provider, region);
+                if (gpuTask != null) {
+                    gpuCapableTasks++;
+                }
                 regionBatchTasks.add(new TaskBatchItem<Boolean>(
                     "region-" + region,
                     () -> { processEntireRegion(provider, region); return true; },
-                    createRegionGPUTask(provider, region), 
+                    gpuTask,
                     CHUNKS_PER_REGION * 2048L, 
                     CHUNKS_PER_REGION * 256   
                 ));
             }
             if (!regionBatchTasks.isEmpty()) {
+                if (VERBOSE_LOGGING || org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+                    LC2H.LOGGER.debug("LC2H warmup batch prepared: regions={} gpuCapable={} openclAvailable={}",
+                        regionBatchTasks.size(), gpuCapableTasks, isOpenClAvailable());
+                }
                 activeBatches.incrementAndGet();
-                boolean gpuReady = isOpenClAvailable();
                 CompletableFuture<List<Boolean>> regionBatchFuture = TaskScheduler.submitBatch(
                     "lc2h", "region-warmup", regionBatchTasks,
-                    task -> (gpuReady && task.gpuTask() != null) ? ResourceHint.GPU : ResourceHint.CPU
+                    task -> task.gpuTask() != null ? ResourceHint.GPU : ResourceHint.CPU
                 );
 
                 regionBatchFuture.whenComplete((results, throwable) -> {
@@ -515,10 +523,6 @@ public final class AsyncChunkWarmup {
 
     private static Object createRegionGPUTask(IDimensionInfo provider, RegionCoord region) {
         if (!GPU_ENABLED) {
-            return null;
-        }
-        if (!isOpenClAvailable()) {
-            logOpenClStatusMaybe("createRegionGPUTask");
             return null;
         }
         try {

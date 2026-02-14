@@ -235,6 +235,7 @@ public class Lc2hConfigScreen extends Screen {
 
     private EditBox blendWidthBox;
     private EditBox blendSoftnessBox;
+    private EditBox blendTreeSeamBufferBox;
     private EditBox accentColorBox;
     private EditBox cacheCapBox;
     private EditBox lc2hCacheBox;
@@ -537,6 +538,11 @@ private Component unsavedDiscardLabel = Component.empty();
                 working.cityBlendClearTrees,
                 tr("lc2h.config.option.city_blend_clear_trees.desc"),
                 Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendClearTrees = val);
+        addToggle(layout,
+                tr("lc2h.config.option.city_blend_tree_seam_fix.title"),
+                working.cityBlendTreeSeamFix,
+                tr("lc2h.config.option.city_blend_tree_seam_fix.desc"),
+                Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendTreeSeamFix = val);
         this.blendWidthBox = addNumberField(layout,
                 tr("lc2h.config.option.city_blend_width.title"),
                 tr("lc2h.config.option.city_blend_width.desc"),
@@ -545,6 +551,11 @@ private Component unsavedDiscardLabel = Component.empty();
                 tr("lc2h.config.option.city_blend_softness.title"),
                 tr("lc2h.config.option.city_blend_softness.desc"),
                 String.valueOf(working.cityBlendSoftness), Lc2hConfigController.RESTART_CITY_EDGE);
+        this.blendTreeSeamBufferBox = addNumberField(layout,
+                tr("lc2h.config.option.city_blend_tree_seam_buffer.title"),
+                tr("lc2h.config.option.city_blend_tree_seam_buffer.desc"),
+                String.valueOf(working.cityBlendTreeSeamBuffer), Lc2hConfigController.RESTART_CITY_EDGE);
+        this.blendTreeSeamBufferBox.setFilter(this::isNumericInput);
 
         addSectionHeader(layout, tr("lc2h.config.section.benchmark"));
         addActionButton(layout,
@@ -1705,6 +1716,7 @@ private Component unsavedDiscardLabel = Component.empty();
         return new Lc2hConfigController.FormValues(
                 blendWidthBox.getValue(),
                 blendSoftnessBox.getValue(),
+                blendTreeSeamBufferBox == null ? null : blendTreeSeamBufferBox.getValue(),
                 accentColorBox == null ? null : accentColorBox.getValue(),
                 lc2hCacheBox == null ? null : lc2hCacheBox.getValue(),
                 lostCitiesCacheBox == null ? null : lostCitiesCacheBox.getValue(),

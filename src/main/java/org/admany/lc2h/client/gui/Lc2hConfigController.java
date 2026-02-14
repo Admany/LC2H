@@ -303,7 +303,9 @@ final class Lc2hConfigController {
         if (before.cityBlendEnabled != after.cityBlendEnabled) return true;
         if (before.cityBlendWidth != after.cityBlendWidth) return true;
         if (Double.compare(before.cityBlendSoftness, after.cityBlendSoftness) != 0) return true;
-        return before.cityBlendClearTrees != after.cityBlendClearTrees;
+        if (before.cityBlendClearTrees != after.cityBlendClearTrees) return true;
+        if (before.cityBlendTreeSeamFix != after.cityBlendTreeSeamFix) return true;
+        return before.cityBlendTreeSeamBuffer != after.cityBlendTreeSeamBuffer;
     }
 
     private void tryParseInt(String value, IntConsumer consumer) {
@@ -340,6 +342,7 @@ final class Lc2hConfigController {
         }
         tryParseInt(values.cityBlendWidth(), v -> target.cityBlendWidth = Math.max(4, v));
         tryParseDouble(values.cityBlendSoftness(), v -> target.cityBlendSoftness = Math.max(0.5, v));
+        tryParseInt(values.cityBlendTreeSeamBuffer(), v -> target.cityBlendTreeSeamBuffer = Math.max(1, v));
         tryParseCacheMaxMb(values.cacheCombinedMaxMB(), v -> target.cacheCombinedMaxMB = v);
         tryParseCacheMaxMb(values.cacheMaxMB(), v -> target.cacheMaxMB = v);
         tryParseCacheMaxMb(values.cacheLostCitiesMaxMB(), v -> target.cacheLostCitiesMaxMB = v);
@@ -376,6 +379,8 @@ final class Lc2hConfigController {
         copy.cityBlendWidth = src.cityBlendWidth;
         copy.cityBlendSoftness = src.cityBlendSoftness;
         copy.cityBlendClearTrees = src.cityBlendClearTrees;
+        copy.cityBlendTreeSeamFix = src.cityBlendTreeSeamFix;
+        copy.cityBlendTreeSeamBuffer = src.cityBlendTreeSeamBuffer;
         return copy;
     }
 
@@ -463,6 +468,8 @@ final class Lc2hConfigController {
         c.cityBlendWidth = src.cityBlendWidth;
         c.cityBlendSoftness = src.cityBlendSoftness;
         c.cityBlendClearTrees = src.cityBlendClearTrees;
+        c.cityBlendTreeSeamFix = src.cityBlendTreeSeamFix;
+        c.cityBlendTreeSeamBuffer = src.cityBlendTreeSeamBuffer;
         return c;
     }
 
@@ -498,6 +505,8 @@ final class Lc2hConfigController {
         state.cityBlendWidth = config.cityBlendWidth;
         state.cityBlendSoftness = config.cityBlendSoftness;
         state.cityBlendClearTrees = config.cityBlendClearTrees;
+        state.cityBlendTreeSeamFix = config.cityBlendTreeSeamFix;
+        state.cityBlendTreeSeamBuffer = config.cityBlendTreeSeamBuffer;
         return state;
     }
 
@@ -523,6 +532,8 @@ final class Lc2hConfigController {
         config.cityBlendWidth = state.cityBlendWidth;
         config.cityBlendSoftness = state.cityBlendSoftness;
         config.cityBlendClearTrees = state.cityBlendClearTrees;
+        config.cityBlendTreeSeamFix = state.cityBlendTreeSeamFix;
+        config.cityBlendTreeSeamBuffer = state.cityBlendTreeSeamBuffer;
         return config;
     }
 
@@ -552,7 +563,9 @@ final class Lc2hConfigController {
             && a.cityBlendEnabled == b.cityBlendEnabled
             && a.cityBlendWidth == b.cityBlendWidth
             && Double.compare(a.cityBlendSoftness, b.cityBlendSoftness) == 0
-            && a.cityBlendClearTrees == b.cityBlendClearTrees;
+            && a.cityBlendClearTrees == b.cityBlendClearTrees
+            && a.cityBlendTreeSeamFix == b.cityBlendTreeSeamFix
+            && a.cityBlendTreeSeamBuffer == b.cityBlendTreeSeamBuffer;
     }
 
     private boolean safeEquals(Object a, Object b) {
@@ -562,6 +575,7 @@ final class Lc2hConfigController {
     record FormValues(
         String cityBlendWidth,
         String cityBlendSoftness,
+        String cityBlendTreeSeamBuffer,
         String uiAccentColor,
         String cacheMaxMB,
         String cacheLostCitiesMaxMB,
@@ -592,6 +606,8 @@ final class Lc2hConfigController {
         public int cityBlendWidth;
         public double cityBlendSoftness;
         public boolean cityBlendClearTrees;
+        public boolean cityBlendTreeSeamFix;
+        public int cityBlendTreeSeamBuffer;
     }
 
     record CacheCapChange(Component summary) {

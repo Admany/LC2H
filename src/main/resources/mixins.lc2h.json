@@ -21,6 +21,7 @@
     "lostcities.cache.MixinCitySphereCacheBudget",
     "lostcities.cache.MixinLostCityTerrainFeatureHeightmapCache",
     "lostcities.terrain.MixinLostCityTerrainFeatureThreadSafeRandoms",
+    "lostcities.terrain.MixinLostCityTerrainFeatureSaplingSafety",
     "lostcities.damage.MixinDamageAreaDisable",
     "lostcities.debris.MixinLostCityDebrisFix",
     "lostcities.debris.MixinLostCityRubble",

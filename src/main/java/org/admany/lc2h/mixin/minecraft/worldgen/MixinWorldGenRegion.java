@@ -21,7 +21,23 @@ public class MixinWorldGenRegion {
                 WorldGenRegion region = (WorldGenRegion)(Object)this;
                 ChunkPostProcessor.markForRemovalIfFloating(region, pos);
             }
+            if (cir.getReturnValue()) {
+                WorldGenRegion region = (WorldGenRegion)(Object)this;
+                ChunkPostProcessor.markTreePlacement(region, pos, state);
+            }
         } catch (Throwable t) {
+        }
+    }
+
+    @Inject(method = "setBlock(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;II)Z",
+            at = @At("HEAD"), cancellable = true)
+    private void lc2h$preventTreeAirOverwrite(BlockPos pos, BlockState state, int flags, int recursionLeft, CallbackInfoReturnable<Boolean> cir) {
+        try {
+            WorldGenRegion region = (WorldGenRegion)(Object)this;
+            if (ChunkPostProcessor.shouldPreventTreeAirOverwrite(region, pos, state)) {
+                cir.setReturnValue(false);
+            }
+        } catch (Throwable ignored) {
         }
     }
 }

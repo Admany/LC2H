@@ -34,6 +34,7 @@ import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
 import org.admany.lc2h.mixin.accessor.lostcities.MultiChunkAccessor;
 import org.admany.lc2h.util.lostcities.MultiChunkCacheAccess;
 import org.admany.lc2h.worldgen.async.snapshot.MultiChunkSnapshot;
+import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -118,6 +119,7 @@ public final class ChunkDebugExporter {
                 }
                 chunk.add("characteristics", buildCharacteristicsJson(provider, coord, buildingInfo));
                 chunk.add("undergroundScan", buildUndergroundScanJson(player, coord, buildingInfo));
+                chunk.add("treeSeam", buildTreeSeamDebugJson(player.level(), provider, coord));
                 chunk.add("structures", buildStructureDebugJson(player.level(), coord));
                 chunks.add(chunk);
             }
@@ -314,6 +316,71 @@ public final class ChunkDebugExporter {
                 }
             } catch (Throwable ignored) {
             }
+        } catch (Throwable t) {
+            obj.addProperty("available", false);
+            obj.addProperty("error", t.getClass().getSimpleName());
+        }
+        return obj;
+    }
+
+    private static JsonObject buildTreeSeamDebugJson(Level level, IDimensionInfo provider, ChunkCoord coord) {
+        JsonObject obj = new JsonObject();
+        if (level == null || coord == null || provider == null) {
+            obj.addProperty("available", false);
+            obj.addProperty("reason", "missing-data");
+            return obj;
+        }
+        try {
+            int cx = coord.chunkX();
+            int cz = coord.chunkZ();
+            boolean city = BuildingInfo.isCity(new ChunkCoord(coord.dimension(), cx, cz), provider);
+            boolean north = BuildingInfo.isCity(new ChunkCoord(coord.dimension(), cx, cz - 1), provider);
+            boolean south = BuildingInfo.isCity(new ChunkCoord(coord.dimension(), cx, cz + 1), provider);
+            boolean west = BuildingInfo.isCity(new ChunkCoord(coord.dimension(), cx - 1, cz), provider);
+            boolean east = BuildingInfo.isCity(new ChunkCoord(coord.dimension(), cx + 1, cz), provider);
+            boolean seam = (north != city) || (south != city) || (west != city) || (east != city);
+
+            obj.addProperty("available", true);
+            obj.addProperty("isCity", city);
+            obj.addProperty("isSeam", seam);
+            obj.addProperty("neighborCityNorth", north);
+            obj.addProperty("neighborCitySouth", south);
+            obj.addProperty("neighborCityWest", west);
+            obj.addProperty("neighborCityEast", east);
+            obj.addProperty("treeSeamFixEnabled", ConfigManager.CITY_BLEND_TREE_SEAM_FIX);
+            obj.addProperty("treeSeamBuffer", ConfigManager.CITY_BLEND_TREE_SEAM_BUFFER);
+
+            int protectedCount = 0;
+            if (level instanceof net.minecraft.server.level.ServerLevel serverLevel) {
+                protectedCount = ChunkPostProcessor.getProtectedTreeBlockCount(serverLevel, cx, cz);
+                obj.addProperty("protectedTreeBlocks", protectedCount);
+                obj.addProperty("seamCacheFlag", ChunkPostProcessor.isSeamChunk(serverLevel, cx, cz));
+            }
+
+            int minY = level.getMinBuildHeight();
+            int maxY = level.getMaxBuildHeight() - 1;
+            int baseX = cx << 4;
+            int baseZ = cz << 4;
+            int edgeBuffer = Math.max(1, ConfigManager.CITY_BLEND_TREE_SEAM_BUFFER);
+
+            int treeBlocks = 0;
+            int treeBlocksEdge = 0;
+            for (int x = 0; x < 16; x++) {
+                for (int z = 0; z < 16; z++) {
+                    boolean edge = x < edgeBuffer || z < edgeBuffer || x >= 16 - edgeBuffer || z >= 16 - edgeBuffer;
+                    for (int y = minY; y <= maxY; y++) {
+                        BlockState state = level.getBlockState(new BlockPos(baseX + x, y, baseZ + z));
+                        if (ChunkPostProcessor.isTreeProtectedBlockForDebug(state)) {
+                            treeBlocks++;
+                            if (edge) {
+                                treeBlocksEdge++;
+                            }
+                        }
+                    }
+                }
+            }
+            obj.addProperty("treeBlocksTotal", treeBlocks);
+            obj.addProperty("treeBlocksEdge", treeBlocksEdge);
         } catch (Throwable t) {
             obj.addProperty("available", false);
             obj.addProperty("error", t.getClass().getSimpleName());

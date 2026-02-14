@@ -43,6 +43,8 @@ public class ConfigManager {
 
     // City edge tree handling
     public static boolean CITY_BLEND_CLEAR_TREES = true;
+    public static boolean CITY_BLEND_TREE_SEAM_FIX = true;
+    public static int CITY_BLEND_TREE_SEAM_BUFFER = 3;
 
     public static boolean isDedicatedServerEnv() {
         if (FMLEnvironment.dist == Dist.DEDICATED_SERVER) return true;
@@ -82,6 +84,8 @@ public class ConfigManager {
 
         // City edge tree handling
         public boolean cityBlendClearTrees = true;
+        public boolean cityBlendTreeSeamFix = true;
+        public int cityBlendTreeSeamBuffer = 3;
     }
 
     public static Config loadOrCreateConfig() {
@@ -174,6 +178,8 @@ public class ConfigManager {
         comments.put("cityBlendWidth", "Blend width in blocks around city borders");
         comments.put("cityBlendSoftness", "Blend softness (higher = softer falloff)");
         comments.put("cityBlendClearTrees", "Prevent trees from generating near city borders (within the blend distance)");
+        comments.put("cityBlendTreeSeamFix", "Prevent half-trees on city borders by blocking trees that would cross a city/vanilla seam");
+        comments.put("cityBlendTreeSeamBuffer", "Buffer (blocks) from a chunk edge to block seam-crossing trees");
 
         try (PrintWriter w = new PrintWriter(new FileWriter(path))) {
             w.println("/*");
@@ -219,7 +225,9 @@ public class ConfigManager {
                 "cityBlendEnabled",
                 "cityBlendWidth",
                 "cityBlendSoftness",
-                "cityBlendClearTrees"
+                "cityBlendClearTrees",
+                "cityBlendTreeSeamFix",
+                "cityBlendTreeSeamBuffer"
             });
 
             java.util.List<String> outputLines = new java.util.ArrayList<>();
@@ -329,6 +337,8 @@ public class ConfigManager {
         CITY_BLEND_WIDTH = CONFIG.cityBlendWidth;
         CITY_BLEND_SOFTNESS = CONFIG.cityBlendSoftness;
         CITY_BLEND_CLEAR_TREES = CONFIG.cityBlendClearTrees;
+        CITY_BLEND_TREE_SEAM_FIX = CONFIG.cityBlendTreeSeamFix;
+        CITY_BLEND_TREE_SEAM_BUFFER = Math.max(1, CONFIG.cityBlendTreeSeamBuffer);
     }
 
     private static int parseHexColor(String raw, int fallback) {
