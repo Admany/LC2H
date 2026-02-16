@@ -1,190 +1,230 @@
 BlackRift Studios Software License Agreement (BRSSLA)
-Version 1.3
+Version 1.4
 
-Written and maintained by:
-BlackRift Studios
+© BlackRift Studios - All rights reserved
 Founder: Admany
 
-Copyright © BlackRift Studios
-All rights reserved.
 
-This Software License Agreement (“Agreement”) governs the use of any
-software, code, binary, library, API, mod, plugin, or related material
-that is explicitly licensed under this Agreement (hereafter referred to
-as “the Software”).
+==================================================
+OVERVIEW
+==================================================
 
-────────────────────────────────────────
-1. Acceptance of Terms
-────────────────────────────────────────
-By downloading, installing, accessing, compiling, modifying, or otherwise
-using the Software, you acknowledge that you have read, understood, and
-agree to be legally bound by the terms of this Agreement.
-If you do not agree, you are not permitted to use the Software.
+This Software License Agreement (“Agreement”) governs the use,
+distribution, and modification of any software, mod, plugin,
+library, API, binary, source code, or related material provided
+by BlackRift Studios (“the Software”).
 
-────────────────────────────────────────
-2. Ownership
-────────────────────────────────────────
-The Software is and remains the exclusive intellectual property of
-BlackRift Studios.
+This Agreement distinguishes between:
 
-This Agreement does not transfer ownership and grants only a limited,
-conditional, non-exclusive, non-transferable, and revocable license to
-use the Software under the terms stated herein.
+1) End Users (players and individuals)
+2) Distributors (modpacks, large-scale bundles, or hosted platforms)
 
-────────────────────────────────────────
-3. Permitted Use
-────────────────────────────────────────
-You are permitted to:
+The intent of this license is to protect intellectual property
+and regulate large-scale commercial distributions. It is NOT
+intended to restrict normal users or standard gameplay.
 
-3.1 Use the Software for personal, educational, or experimental purposes.
 
-3.2 Include the Software in bundled distributions such as modpacks or
-collections, subject to the conditions defined in Section 4.
+==================================================
+PART I - END USER LICENSE
+==================================================
 
-3.3 Privately share the unmodified Software (e.g., via private file
-transfers or private communities), provided that:
-    - No monetary compensation is involved
-    - Proper credit to BlackRift Studios is retained
-    - This Agreement remains intact and unmodified
+1. Acceptance
 
-3.4 View, read, and analyze the source code of the Software if such source
-code is made publicly available by BlackRift Studios through official
-channels.
+By downloading, installing, or using the Software, you agree
+to be bound by this Agreement.
 
-3.5 Submit bug reports, feature requests, and contributions through
-official channels designated by BlackRift Studios.
+If you do not agree, you must not use the Software.
 
-────────────────────────────────────────
-4. Commercial Use, Monetization & Bundled Distributions
-────────────────────────────────────────
-4.1 Platform Hosting Exception  
-If the Software is hosted on https://curseforge.com, any bundled
-distribution hosted on CurseForge is granted automatic permission to
-include and distribute the Software, subject to the conditions defined
-in this section.
 
-4.2 Non-Commercial Classification Threshold  
-A bundled distribution that includes the Software may be monetized
-(including but not limited to advertisements, donations, or revenue
-sharing) and shall still be classified as NON-COMMERCIAL if its total
-combined download count remains below:
+2. Permitted Use
 
-    100,000 (one hundred thousand) total downloads globally
+End Users may:
 
-The download count is calculated as the aggregate total across all
-platforms, mirrors, launchers, and hosting services.
+• Use the Software for personal gameplay
+• Use the Software in private or public servers
+• Include the Software in modpacks below the commercial threshold
+• Share the unmodified official version without payment
+• Analyze publicly released source code for educational purposes
 
-4.3 Commercial Classification  
-Once the bundled distribution exceeds 100,000 total global downloads,
-it shall be classified as COMMERCIAL, regardless of monetization method.
 
-4.4 Licensing Requirement  
-Upon exceeding the threshold defined above, the owner, maintainer, or
-legal representative of the bundled distribution is required to request
-a commercial usage license from BlackRift Studios within a reasonable
-timeframe after being contacted.
+3. No Impact on Normal Users
 
-4.5 Public License Record  
-Approved commercial licenses shall be publicly listed and verifiable on:
+This license does NOT:
 
-    https://blackriftstudios.com
+• Charge individual players
+• Restrict normal gameplay
+• Disable features for ordinary users
+• Interfere with small non-commercial modpacks
 
-Only bundled distributions explicitly listed on the above domain are
-authorized to use the Software under commercial classification.
+Enforcement mechanisms apply only to non-compliant
+large-scale commercial distributions.
 
-────────────────────────────────────────
-5. Enforcement, Blacklisting & Technical Measures
-────────────────────────────────────────
-5.1 Non-Compliance  
-Failure to obtain a required license, ignoring licensing contact, or
-continuing unauthorized use constitutes a material breach of this
-Agreement.
 
-5.2 Blacklisting  
-BlackRift Studios reserves the right to blacklist any non-compliant
-distribution, project, or usage context.
+==================================================
+PART II - DISTRIBUTOR LICENSE
+==================================================
 
-5.3 Technical Enforcement  
-BlackRift Studios may implement technical measures to restrict, disable,
-or prevent the Software from functioning when used in violation of this
-Agreement. Such measures may include, but are not limited to:
+4. Non-Commercial Distribution
 
-    - Partial or complete functional disablement
-    - Refusal to operate in unauthorized environments
-    - Controlled application or game termination at startup or runtime,
-      accompanied by a clear message or log indicating license violation
-      or blacklist status
+A bundled distribution (modpack or platform bundle)
+remains NON-COMMERCIAL if its total combined global
+download count across all platforms remains below:
 
-5.4 Anti-Circumvention  
-Any attempt to bypass, remove, or interfere with licensing checks,
-blacklisting systems, or enforcement mechanisms is strictly prohibited.
+100,000 total downloads
 
-────────────────────────────────────────
-6. Contributions
-────────────────────────────────────────
-6.1 Contributions may only be submitted through official repositories or
-channels explicitly designated by BlackRift Studios.
 
-6.2 By submitting any contribution (including code, documentation,
-assets, ideas, or suggestions), you grant BlackRift Studios a perpetual,
-irrevocable, worldwide, royalty-free, and sublicensable right to use,
-modify, relicense, and distribute such contributions as part of the
-Software.
+5. Commercial Classification
 
-6.3 Contributors do not acquire ownership rights, authorship claims, or
-independent licensing authority over the Software.
+If a bundled distribution exceeds 100,000 total downloads,
+it is automatically classified as COMMERCIAL,
+regardless of monetization method.
 
-────────────────────────────────────────
-7. Prohibited Actions
-────────────────────────────────────────
-You may NOT:
+This threshold exists to regulate large-scale usage,
+not to restrict community creativity.
 
-7.1 Fork, mirror, or independently redistribute the Software or any part
-thereof without explicit written permission from BlackRift Studios.
 
-7.2 Upload or distribute the Software on unauthorized third-party
-platforms or hosting services.
+6. Commercial License Requirement
 
-7.3 Claim the Software, its code, systems, architecture, concepts, or
-ideas as your own.
+If the 100,000 download threshold is exceeded,
+the distributor must request a Commercial License
+within three (3) calendar days of:
 
-7.4 Create derivative works, reimplementations, clones, rewrites, or
-functionally equivalent software based on the Software, including
-so-called “clean-room” implementations.
+• Exceeding the threshold, or
+• Receiving notice from BlackRift Studios
 
-7.5 Use the Software for commercial purposes except as explicitly allowed
-under Section 4.
+Failure to comply constitutes a material breach.
 
-────────────────────────────────────────
-8. Warranty Disclaimer
-────────────────────────────────────────
-THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
 
-────────────────────────────────────────
-9. Limitation of Liability
-────────────────────────────────────────
-IN NO EVENT SHALL BLACKRIFT STUDIOS BE LIABLE FOR ANY DAMAGES, LOSSES, OR
-LIABILITIES ARISING FROM THE USE OR INABILITY TO USE THE SOFTWARE,
-INCLUDING BUT NOT LIMITED TO DATA LOSS, SYSTEM FAILURE, SERVICE
-INTERRUPTION, OR ECONOMIC LOSS.
+7. Nature of Commercial Licensing
 
-────────────────────────────────────────
-10. Termination
-────────────────────────────────────────
-This Agreement is automatically terminated upon any violation of its
-terms. Upon termination, all rights to use the Software cease
-immediately.
+In most cases, Commercial Licenses:
 
-────────────────────────────────────────
-11. Amendments & Final Provisions
-────────────────────────────────────────
-11.1 BlackRift Studios reserves the right to modify this Agreement at any
-time.
+• Do NOT require payment
+• Do NOT impose strict financial terms
+• Are issued to maintain transparency and record-keeping
 
-11.2 Continued use of the Software after any modification constitutes
-acceptance of the updated terms.
+However, in cases involving:
 
-11.3 All licensing inquiries, permissions, and commercial requests must
-be directed to BlackRift Studios through official channels.
+• Very large-scale distributions
+• Significant revenue generation
+• Corporate-backed or enterprise environments
+
+BlackRift Studios reserves the right to negotiate
+reasonable terms, which may include a revenue share
+or profit participation proportional to scale.
+
+
+==================================================
+PART III - INTELLECTUAL PROPERTY PROTECTION
+==================================================
+
+8. Ownership
+
+The Software remains the sole intellectual property
+of BlackRift Studios.
+
+No ownership rights are transferred under this Agreement.
+
+
+9. Redistribution Restrictions
+
+Without explicit written permission, you may NOT:
+
+• Re-upload the Software to unauthorized platforms
+• Rebrand the Software under a different name
+• Remove or alter author credits
+• Present modified versions as original work
+• Claim the Software or its systems as your own
+
+
+10. Anti-Modification & Anti-Reverse Engineering
+
+Except where prohibited by law, you may NOT:
+
+• Reverse engineer the Software
+• Decompile or disassemble binaries
+• Circumvent obfuscation or protection systems
+• Bypass licensing or enforcement mechanisms
+• Modify the Software to remove attribution
+• Create derivative works intended to replicate
+  or replace the Software’s protected systems
+
+Any attempt to bypass enforcement systems constitutes
+a severe breach of this Agreement.
+
+
+11. Copyright Enforcement & DMCA
+
+Unauthorized redistribution, rebranding, code theft,
+or misrepresentation constitutes copyright infringement.
+
+BlackRift Studios reserves the full right to:
+
+• Issue DMCA takedown notices
+• Contact hosting providers
+• Request removal from platforms
+• Pursue civil legal action where applicable
+
+
+==================================================
+PART IV - ENFORCEMENT
+==================================================
+
+12. Blacklisting & Functional Limitation
+
+If a distributor exceeds the commercial threshold
+and fails to obtain a required license within
+the compliance window, BlackRift Studios may:
+
+• Blacklist the distribution
+• Limit or disable the Software’s own features
+
+Enforcement measures will:
+
+• NOT crash the game
+• NOT corrupt saves or worlds
+• NOT interfere with unrelated gameplay
+• Only affect the Software’s own functionality
+
+The goal of enforcement is compliance — not disruption.
+
+
+13. Anti-Circumvention
+
+Any attempt to disable, modify, interfere with,
+or bypass enforcement systems is strictly prohibited.
+
+
+==================================================
+PART V - GENERAL PROVISIONS
+==================================================
+
+14. Disclaimer
+
+THE SOFTWARE IS PROVIDED “AS IS” WITHOUT WARRANTY
+OF ANY KIND, EXPRESS OR IMPLIED.
+
+
+15. Limitation of Liability
+
+BLACKRIFT STUDIOS SHALL NOT BE LIABLE FOR ANY DAMAGES
+ARISING FROM THE USE OR INABILITY TO USE THE SOFTWARE.
+
+
+16. Termination
+
+This Agreement automatically terminates upon violation.
+All rights to use the Software cease immediately.
+
+
+17. Amendments
+
+BlackRift Studios reserves the right to modify
+this Agreement at any time.
+
+Continued use of the Software constitutes acceptance
+of the updated terms.
+
+
+For licensing inquiries, contact BlackRift Studios
+through official communication channels.
