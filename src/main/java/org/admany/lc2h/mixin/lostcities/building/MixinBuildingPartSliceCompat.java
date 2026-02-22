@@ -10,6 +10,7 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(value = BuildingPart.class, remap = false)
@@ -40,6 +41,42 @@ public abstract class MixinBuildingPartSliceCompat {
         int count = lc2h$sliceCount();
         if (slice < 0 || slice >= count) {
             cir.setReturnValue(' ');
+        }
+    }
+
+    @Redirect(
+        method = "getC",
+        at = @At(value = "INVOKE", target = "Ljava/lang/String;charAt(I)C")
+    )
+    private char lc2h$safeCharAtGetC(String slice, int index) {
+        if (!ConfigManager.ENABLE_LOSTCITIES_PART_SLICE_COMPAT) {
+            return slice.charAt(index);
+        }
+        if (slice == null || index < 0 || index >= slice.length()) {
+            return ' ';
+        }
+        try {
+            return slice.charAt(index);
+        } catch (Throwable ignored) {
+            return ' ';
+        }
+    }
+
+    @Redirect(
+        method = "getPaletteChar",
+        at = @At(value = "INVOKE", target = "Ljava/lang/String;charAt(I)C")
+    )
+    private char lc2h$safeCharAtGetPaletteChar(String slice, int index) {
+        if (!ConfigManager.ENABLE_LOSTCITIES_PART_SLICE_COMPAT) {
+            return slice.charAt(index);
+        }
+        if (slice == null || index < 0 || index >= slice.length()) {
+            return ' ';
+        }
+        try {
+            return slice.charAt(index);
+        } catch (Throwable ignored) {
+            return ' ';
         }
     }
 

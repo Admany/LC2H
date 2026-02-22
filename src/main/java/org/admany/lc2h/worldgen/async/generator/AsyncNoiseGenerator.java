@@ -8,20 +8,23 @@ public class AsyncNoiseGenerator {
 
     public static void generateNoiseAsync(int chunkX, int chunkZ) {
         String cacheKey = "noise_" + chunkX + "_" + chunkZ;
+        FeatureCache.containsAsync(cacheKey).thenAccept(cached -> {
+            if (Boolean.TRUE.equals(cached)) {
+                LC2H.LOGGER.debug("Using cached noise for " + cacheKey);
+                return;
+            }
 
-        Object cached = FeatureCache.get(cacheKey);
-        if (cached != null) {
-            LC2H.LOGGER.debug("Using cached noise for " + cacheKey);
-            return;
-        }
-
-        AsyncManager.submitTask("noise_gen", () -> {
-            LC2H.LOGGER.info("Generating noise asynchronously for chunk " + chunkX + "," + chunkZ);
-        }, new Object()).thenAccept(result -> {
-            FeatureCache.put(cacheKey, result);
-            AsyncManager.syncToMain(() -> {
-                LC2H.LOGGER.debug("Noise generation completed for " + cacheKey);
+            AsyncManager.submitTask("noise_gen", () -> {
+                LC2H.LOGGER.info("Generating noise asynchronously for chunk " + chunkX + "," + chunkZ);
+            }, new Object()).thenAccept(result -> {
+                FeatureCache.put(cacheKey, result);
+                AsyncManager.syncToMain(() -> {
+                    LC2H.LOGGER.debug("Noise generation completed for " + cacheKey);
+                });
             });
+        }).exceptionally(t -> {
+            LC2H.LOGGER.error("Noise cache lookup failed for {}: {}", cacheKey, t.getMessage());
+            return null;
         });
     }
 }

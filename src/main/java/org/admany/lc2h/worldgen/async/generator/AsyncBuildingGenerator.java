@@ -34,41 +34,48 @@ public class AsyncBuildingGenerator {
         }
 
         String cacheKey = "building_" + chunkX + "," + chunkZ;
-        Object cached = FeatureCache.get(cacheKey, true);
-        if (cached != null) {
-            LC2H.LOGGER.debug("Using cached building for " + cacheKey);
-            return;
-        }
-
-        IDimensionInfo provider = extractProvider(buildingInfo);
-        if (provider != null && coord != null) {
-            AsyncChunkWarmup.preSchedule(provider, coord);
-        }
-
-        Priority priority = coord != null ? ChunkPriorityManager.getPriorityForChunk(coord) : Priority.LOW;
         final int finalChunkX = chunkX;
         final int finalChunkZ = chunkZ;
+        final ChunkCoord finalCoord = coord;
+        final Object finalBuildingInfo = buildingInfo;
 
-        AsyncManager.submitTask("building_gen", () -> {
-            try {
-                LC2H.LOGGER.debug("Starting async building generation for " + finalChunkX + "," + finalChunkZ);
-                long start = System.nanoTime();
-                for (int i = 0; i < 10000; i++) {
-                    Math.sin(i * 0.01);
-                    Math.cos(i * 0.01);
+        FeatureCache.containsAsync(cacheKey, true).thenAccept(cached -> {
+            if (Boolean.TRUE.equals(cached)) {
+                LC2H.LOGGER.debug("Using cached building for " + cacheKey);
+                return;
+            }
+
+            IDimensionInfo provider = extractProvider(finalBuildingInfo);
+            if (provider != null && finalCoord != null) {
+                AsyncChunkWarmup.preSchedule(provider, finalCoord);
+            }
+
+            Priority priority = finalCoord != null ? ChunkPriorityManager.getPriorityForChunk(finalCoord) : Priority.LOW;
+
+            AsyncManager.submitTask("building_gen", () -> {
+                try {
+                    LC2H.LOGGER.debug("Starting async building generation for " + finalChunkX + "," + finalChunkZ);
+                    long start = System.nanoTime();
+                    for (int i = 0; i < 10000; i++) {
+                        Math.sin(i * 0.01);
+                        Math.cos(i * 0.01);
+                    }
+                    long end = System.nanoTime();
+                    LC2H.LOGGER.debug("Completed async building generation in " + (end - start) / 1_000_000 + "ms");
+                } catch (Exception e) {
+                    LC2H.LOGGER.error("Error in async building generation: " + e.getMessage(), e);
                 }
-                long end = System.nanoTime();
-                LC2H.LOGGER.debug("Completed async building generation in " + (end - start) / 1_000_000 + "ms");
-            } catch (Exception e) {
-                LC2H.LOGGER.error("Error in async building generation: " + e.getMessage(), e);
-            }
-        }, buildingInfo, priority).thenAccept(result -> {
-            try {
-                FeatureCache.put(cacheKey, result, true);
-                LC2H.LOGGER.debug("Building generation completed for {}", cacheKey);
-            } catch (Exception e) {
-                LC2H.LOGGER.error("Error applying building result: " + e.getMessage(), e);
-            }
+            }, finalBuildingInfo, priority).thenAccept(result -> {
+                try {
+                    FeatureCache.put(cacheKey, result, true);
+                    LC2H.LOGGER.debug("Building generation completed for {}", cacheKey);
+                } catch (Exception e) {
+                    LC2H.LOGGER.error("Error applying building result: " + e.getMessage(), e);
+                }
+            });
+        }).exceptionally(t -> {
+            LC2H.LOGGER.error("Building cache lookup failed for {}: {}", cacheKey, t.getMessage());
+            return null;
         });
     }
 
