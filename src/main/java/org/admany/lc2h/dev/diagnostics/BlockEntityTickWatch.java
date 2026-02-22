@@ -27,6 +27,8 @@ public final class BlockEntityTickWatch {
     private static final boolean CREATE_PRESENT = ModList.get().isLoaded("create");
     private static final String CREATE_WHEEL_BE = "create:crushing_wheel";
     private static final String CREATE_WHEEL_CONTROLLER_BE = "create:crushing_wheel_controller";
+    private static final ResourceLocation CREATE_WHEEL_CONTROLLER_BE_ID =
+        ResourceLocation.fromNamespaceAndPath("create", "crushing_wheel_controller");
 
     private static final AtomicBoolean TICKER_REFLECTION_LOGGED = new AtomicBoolean(false);
 
@@ -247,7 +249,7 @@ public final class BlockEntityTickWatch {
             }
 
             try {
-                controllerTypeRegistered = ForgeRegistries.BLOCK_ENTITY_TYPES.containsKey(new ResourceLocation("create", "crushing_wheel_controller"));
+                controllerTypeRegistered = ForgeRegistries.BLOCK_ENTITY_TYPES.containsKey(CREATE_WHEEL_CONTROLLER_BE_ID);
             } catch (Throwable ignored) {
             }
 
