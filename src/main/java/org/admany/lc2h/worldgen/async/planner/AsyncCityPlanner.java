@@ -13,16 +13,19 @@ public final class AsyncCityPlanner {
 
     public static void planCityAsync(IDimensionInfo info, int chunkX, int chunkZ) {
         String cacheKey = "city_" + chunkX + "_" + chunkZ;
+        FeatureCache.containsAsync(cacheKey, true).thenAccept(cached -> {
+            if (Boolean.TRUE.equals(cached)) {
+                LC2H.LOGGER.debug("Using cached city plan for " + cacheKey);
+                return;
+            }
 
-        Object cached = FeatureCache.get(cacheKey, true);
-        if (cached != null) {
-            LC2H.LOGGER.debug("Using cached city plan for " + cacheKey);
-            return;
-        }
-
-        ChunkCoord coord = new ChunkCoord(info.getType(), chunkX, chunkZ);
-        PlannerBatchQueue.enqueue(info, coord, PlannerTaskKind.CITY_LAYOUT,
-            () -> runCityPlanning(info, chunkX, chunkZ, cacheKey));
+            ChunkCoord coord = new ChunkCoord(info.getType(), chunkX, chunkZ);
+            PlannerBatchQueue.enqueue(info, coord, PlannerTaskKind.CITY_LAYOUT,
+                () -> runCityPlanning(info, chunkX, chunkZ, cacheKey));
+        }).exceptionally(t -> {
+            LC2H.LOGGER.error("City plan cache lookup failed for {}: {}", cacheKey, t.getMessage());
+            return null;
+        });
     }
 
     public static void flushPendingCityBatches() {

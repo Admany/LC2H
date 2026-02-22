@@ -9,8 +9,13 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+
+import org.admany.lc2h.concurrency.async.AsyncManager;
+import org.admany.lc2h.concurrency.async.Priority;
 
 public class FeatureCache {
 
@@ -25,13 +30,21 @@ public class FeatureCache {
         Long.getLong("lc2h.featureCache.memoryTtlMinutes", 20L)));
     private static final Duration DISK_TTL = Duration.ofHours(Math.max(1L,
         Long.getLong("lc2h.featureCache.diskTtlHours", 24L)));
+    private static final Duration LOOKUP_TTL = Duration.ofMinutes(Math.max(1L,
+        Long.getLong("lc2h.featureCache.lookupTtlMinutes", 2L)));
+    private static final long LOOKUP_MAX_ENTRIES = Math.max(256L,
+        Long.getLong("lc2h.featureCache.lookupMaxEntries", 12_000L));
 
     private static final String MEMORY_CACHE = "feature_memory";
     private static final String DISK_CACHE = "feature_disk";
+    private static final String MEMORY_LOOKUP_CACHE = "feature_lookup_memory";
+    private static final String DISK_LOOKUP_CACHE = "feature_lookup_disk";
 
     private static ThreadSafeCache<String, Object> quantifiedMemoryCache;
     private static ThreadSafeCache<String, Object> quantifiedDiskCache;
     private static boolean quantifiedAvailable = false;
+    private static volatile java.lang.reflect.Method quantifiedGetCachedAsyncMethod;
+    private static volatile boolean quantifiedGetCachedAsyncChecked = false;
 
     static {
         try {
@@ -152,6 +165,38 @@ public class FeatureCache {
             LC2H.LOGGER.error("[LC2H] Error retrieving from cache: " + e.getMessage(), e);
             return null;
         }
+    }
+
+    public static CompletableFuture<Boolean> containsAsync(String key) {
+        return containsAsync(key, false);
+    }
+
+    public static CompletableFuture<Boolean> containsAsync(String key, boolean checkDiskCache) {
+        if (key == null || key.isEmpty()) {
+            return CompletableFuture.completedFuture(false);
+        }
+
+        long now = System.currentTimeMillis();
+        LocalEntry local = memoryCache.get(key);
+        if (local != null) {
+            if ((now - local.lastAccessMs) <= LOCAL_TTL_MS) {
+                local.lastAccessMs = now;
+                return CompletableFuture.completedFuture(true);
+            }
+            memoryCache.remove(key, local);
+        }
+
+        CompletableFuture<Boolean> quantifiedLookup = tryQuantifiedContainsAsync(key, checkDiskCache);
+        if (quantifiedLookup != null) {
+            return quantifiedLookup;
+        }
+
+        String taskName = checkDiskCache ? "feature_cache_contains_disk" : "feature_cache_contains_memory";
+        return AsyncManager.submitSupplier(taskName, () -> get(key, checkDiskCache) != null, Priority.LOW)
+            .exceptionally(t -> {
+                LC2H.LOGGER.debug("[LC2H] Async feature cache contains lookup failed for {}", key, t);
+                return get(key, checkDiskCache) != null;
+            });
     }
 
     public static CacheStats clear() {
@@ -472,6 +517,70 @@ public class FeatureCache {
         }
         quantifiedMemoryCache = memory;
         quantifiedDiskCache = disk;
+    }
+
+    private static CompletableFuture<Boolean> tryQuantifiedContainsAsync(String key, boolean checkDiskCache) {
+        if (!ensureQuantifiedReady()) {
+            return null;
+        }
+
+        java.lang.reflect.Method asyncMethod = resolveQuantifiedGetCachedAsyncMethod();
+        if (asyncMethod == null) {
+            return null;
+        }
+
+        String lookupCache = checkDiskCache ? DISK_LOOKUP_CACHE : MEMORY_LOOKUP_CACHE;
+        Supplier<Boolean> loader = () -> get(key, checkDiskCache) != null ? Boolean.TRUE : null;
+
+        try {
+            Object rawFuture = asyncMethod.invoke(
+                null,
+                lookupCache,
+                key,
+                loader,
+                LOOKUP_TTL,
+                LOOKUP_MAX_ENTRIES,
+                false
+            );
+            if (!(rawFuture instanceof CompletableFuture<?> future)) {
+                return null;
+            }
+            return future.thenApply(value -> value != null)
+                .exceptionally(t -> {
+                    LC2H.LOGGER.debug("[LC2H] Quantified async cache lookup failed for {}", key, t);
+                    return get(key, checkDiskCache) != null;
+                });
+        } catch (Throwable t) {
+            LC2H.LOGGER.debug("[LC2H] Unable to invoke Quantified getCachedAsync for {}", key, t);
+            return null;
+        }
+    }
+
+    private static java.lang.reflect.Method resolveQuantifiedGetCachedAsyncMethod() {
+        if (quantifiedGetCachedAsyncChecked) {
+            return quantifiedGetCachedAsyncMethod;
+        }
+        synchronized (FeatureCache.class) {
+            if (quantifiedGetCachedAsyncChecked) {
+                return quantifiedGetCachedAsyncMethod;
+            }
+            try {
+                quantifiedGetCachedAsyncMethod = QuantifiedAPI.class.getMethod(
+                    "getCachedAsync",
+                    String.class,
+                    String.class,
+                    java.util.function.Supplier.class,
+                    Duration.class,
+                    long.class,
+                    boolean.class
+                );
+            } catch (Throwable ignored) {
+                quantifiedGetCachedAsyncMethod = null;
+            } finally {
+                quantifiedGetCachedAsyncChecked = true;
+            }
+            return quantifiedGetCachedAsyncMethod;
+        }
     }
 
     private static long cacheSize(ThreadSafeCache<String, Object> cache) {

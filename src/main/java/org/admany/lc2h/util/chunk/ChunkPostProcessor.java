@@ -97,6 +97,13 @@ public class ChunkPostProcessor {
     );
     private static final int MAX_PENDING_FLOATING_CHECKS = Math.max(256, Integer.getInteger("lc.floating.max_pending_checks", 8192));
     private static final int MAX_FLOATING_CHECKS_PER_TICK = Math.max(8, Integer.getInteger("lc.floating.max_checks_per_tick", 128));
+    private static final int MAX_FLUID_CLUSTER_SCAN = Math.max(16, Integer.getInteger("lc.floating.max_fluid_cluster_scan", 96));
+    private static final int CITY_FLOATING_SOURCE_MIN_HEIGHT =
+        Math.max(4, Integer.getInteger("lc.floating.city_source_column_min_height", 8));
+    private static final int CITY_FLOATING_SOURCE_MAX_DEPTH =
+        Math.max(16, Integer.getInteger("lc.floating.city_source_column_max_depth", 96));
+    private static final int CITY_FLOATING_SOURCE_MIN_EXPOSED_SIDES =
+        Math.max(1, Math.min(4, Integer.getInteger("lc.floating.city_source_column_min_exposed_sides", 3)));
     private static final double TICK_TIME_BUDGET_MS = Math.max(5D, Double.parseDouble(System.getProperty("lc.floating.tick_budget_ms", "35")));
     // If set (>0), forces a fixed work budget. Otherwise, the post processor auto-tunes.
     private static final double OVERRIDE_MAX_WORK_TIME_PER_TICK_MS = Double.parseDouble(System.getProperty("lc.floating.max_work_ms_per_tick", "-1"));
@@ -231,10 +238,13 @@ public class ChunkPostProcessor {
 
         BlockPos below = pos.below();
         BlockState belowState = level.getBlockState(below);
-        boolean unsupported = belowState.isAir() || !belowState.isCollisionShapeFullBlock(level, below);
+        boolean unsupported = isUnsupportedSupport(level, below, belowState);
 
         if (isPotentialFloatingSourceFluid(state)) {
-            return unsupported && isFloatingFluidDisconnected(level, pos, state);
+            if (unsupported && isFloatingFluidDisconnected(level, pos, state)) {
+                return true;
+            }
+            return shouldRemoveTallCityFluidSource(level, pos, state);
         }
         if (isHorrorElementBlock(state)) {
             return isFullySurroundedByVanillaAir(level, pos);
@@ -283,20 +293,32 @@ public class ChunkPostProcessor {
         if (sourceFluid == null || !sourceFluid.isSource()) {
             return false;
         }
+        boolean hasConnectedFluid = false;
         for (Direction direction : Direction.values()) {
             BlockPos neighborPos = pos.relative(direction);
             if (!level.isLoaded(neighborPos)) {
                 return false;
             }
             BlockState neighborState = level.getBlockState(neighborPos);
+            net.minecraft.world.level.material.FluidState neighborFluid = neighborState.getFluidState();
+            if (neighborFluid != null && !neighborFluid.isEmpty()) {
+                if (isSameFloatingFluidFamily(sourceFluid, neighborFluid)) {
+                    hasConnectedFluid = true;
+                    continue;
+                }
+                return false;
+            }
             if (neighborState.isAir()) {
                 continue;
             }
-            if (!neighborState.getCollisionShape(level, neighborPos).isEmpty() || !neighborState.canBeReplaced()) {
+            if (isSolidOrFixedBlock(level, neighborPos, neighborState)) {
                 return false;
             }
         }
-        return true;
+        if (!hasConnectedFluid) {
+            return true;
+        }
+        return isFloatingFluidClusterUnsupported(level, pos, sourceFluid);
     }
 
     private static boolean isFloatingFluidDisconnected(net.minecraft.server.level.WorldGenRegion region, BlockPos pos, BlockState state) {
@@ -307,17 +329,293 @@ public class ChunkPostProcessor {
         if (sourceFluid == null || !sourceFluid.isSource()) {
             return false;
         }
+        boolean hasConnectedFluid = false;
         for (Direction direction : Direction.values()) {
             BlockPos neighborPos = pos.relative(direction);
             BlockState neighborState = region.getBlockState(neighborPos);
+            net.minecraft.world.level.material.FluidState neighborFluid = neighborState.getFluidState();
+            if (neighborFluid != null && !neighborFluid.isEmpty()) {
+                if (isSameFloatingFluidFamily(sourceFluid, neighborFluid)) {
+                    hasConnectedFluid = true;
+                    continue;
+                }
+                return false;
+            }
             if (neighborState.isAir()) {
                 continue;
             }
-            if (!neighborState.getCollisionShape(region, neighborPos).isEmpty() || !neighborState.canBeReplaced()) {
+            if (isSolidOrFixedBlock(region, neighborPos, neighborState)) {
                 return false;
             }
         }
+        if (!hasConnectedFluid) {
+            return true;
+        }
+        return isFloatingFluidClusterUnsupported(region, pos, sourceFluid);
+    }
+
+    private static boolean isFloatingFluidClusterUnsupported(ServerLevel level,
+                                                             BlockPos origin,
+                                                             net.minecraft.world.level.material.FluidState sourceFluid) {
+        java.util.ArrayDeque<BlockPos> queue = new java.util.ArrayDeque<>();
+        java.util.HashSet<Long> visited = new java.util.HashSet<>();
+        queue.add(origin.immutable());
+
+        while (!queue.isEmpty()) {
+            BlockPos current = queue.poll();
+            long packed = current.asLong();
+            if (!visited.add(packed)) {
+                continue;
+            }
+            if (visited.size() > MAX_FLUID_CLUSTER_SCAN) {
+                // Large clusters are likely natural or intentional; leave them untouched.
+                return false;
+            }
+
+            if (!level.isLoaded(current)) {
+                return false;
+            }
+            BlockState currentState = level.getBlockState(current);
+            net.minecraft.world.level.material.FluidState currentFluid = currentState.getFluidState();
+            if (currentFluid == null || currentFluid.isEmpty() || !isSameFloatingFluidFamily(sourceFluid, currentFluid)) {
+                continue;
+            }
+
+            BlockPos belowPos = current.below();
+            if (!level.isLoaded(belowPos)) {
+                return false;
+            }
+            BlockState belowState = level.getBlockState(belowPos);
+            if (!isUnsupportedSupport(level, belowPos, belowState)) {
+                return false;
+            }
+
+            for (Direction direction : Direction.values()) {
+                BlockPos neighborPos = current.relative(direction);
+                if (!level.isLoaded(neighborPos)) {
+                    return false;
+                }
+                BlockState neighborState = level.getBlockState(neighborPos);
+                net.minecraft.world.level.material.FluidState neighborFluid = neighborState.getFluidState();
+                if (neighborFluid != null && !neighborFluid.isEmpty()) {
+                    if (isSameFloatingFluidFamily(sourceFluid, neighborFluid)) {
+                        queue.add(neighborPos.immutable());
+                        continue;
+                    }
+                    return false;
+                }
+                if (neighborState.isAir()) {
+                    continue;
+                }
+                if (isSolidOrFixedBlock(level, neighborPos, neighborState)) {
+                    return false;
+                }
+            }
+        }
         return true;
+    }
+
+    private static boolean isFloatingFluidClusterUnsupported(net.minecraft.server.level.WorldGenRegion region,
+                                                             BlockPos origin,
+                                                             net.minecraft.world.level.material.FluidState sourceFluid) {
+        java.util.ArrayDeque<BlockPos> queue = new java.util.ArrayDeque<>();
+        java.util.HashSet<Long> visited = new java.util.HashSet<>();
+        queue.add(origin.immutable());
+
+        while (!queue.isEmpty()) {
+            BlockPos current = queue.poll();
+            long packed = current.asLong();
+            if (!visited.add(packed)) {
+                continue;
+            }
+            if (visited.size() > MAX_FLUID_CLUSTER_SCAN) {
+                return false;
+            }
+
+            BlockState currentState = region.getBlockState(current);
+            net.minecraft.world.level.material.FluidState currentFluid = currentState.getFluidState();
+            if (currentFluid == null || currentFluid.isEmpty() || !isSameFloatingFluidFamily(sourceFluid, currentFluid)) {
+                continue;
+            }
+
+            BlockPos belowPos = current.below();
+            BlockState belowState = region.getBlockState(belowPos);
+            if (!isUnsupportedSupport(region, belowPos, belowState)) {
+                return false;
+            }
+
+            for (Direction direction : Direction.values()) {
+                BlockPos neighborPos = current.relative(direction);
+                BlockState neighborState = region.getBlockState(neighborPos);
+                net.minecraft.world.level.material.FluidState neighborFluid = neighborState.getFluidState();
+                if (neighborFluid != null && !neighborFluid.isEmpty()) {
+                    if (isSameFloatingFluidFamily(sourceFluid, neighborFluid)) {
+                        queue.add(neighborPos.immutable());
+                        continue;
+                    }
+                    return false;
+                }
+                if (neighborState.isAir()) {
+                    continue;
+                }
+                if (isSolidOrFixedBlock(region, neighborPos, neighborState)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private static boolean shouldRemoveTallCityFluidSource(ServerLevel level, BlockPos pos, BlockState state) {
+        if (level == null || pos == null || state == null) {
+            return false;
+        }
+        net.minecraft.world.level.material.FluidState sourceFluid = state.getFluidState();
+        if (sourceFluid == null || sourceFluid.isEmpty() || !sourceFluid.isSource()) {
+            return false;
+        }
+        if (!sourceFluid.is(FluidTags.WATER) && !sourceFluid.is(FluidTags.LAVA)) {
+            return false;
+        }
+        int chunkX = pos.getX() >> 4;
+        int chunkZ = pos.getZ() >> 4;
+        if (!isCityChunkCached(level, chunkX, chunkZ)) {
+            return false;
+        }
+
+        BlockPos belowPos = pos.below();
+        if (!level.isLoaded(belowPos)) {
+            return false;
+        }
+        BlockState belowState = level.getBlockState(belowPos);
+        net.minecraft.world.level.material.FluidState belowFluid = belowState.getFluidState();
+        if (belowFluid == null || belowFluid.isEmpty() || !isSameFloatingFluidFamily(sourceFluid, belowFluid)) {
+            return false;
+        }
+
+        int exposedAtSource = countExposedFluidSides(level, pos, sourceFluid);
+        if (exposedAtSource < CITY_FLOATING_SOURCE_MIN_EXPOSED_SIDES) {
+            return false;
+        }
+        int exposedBelowSource = countExposedFluidSides(level, belowPos, sourceFluid);
+        if (exposedBelowSource < Math.max(1, CITY_FLOATING_SOURCE_MIN_EXPOSED_SIDES - 1)) {
+            return false;
+        }
+
+        int depth = countFreeHangingFluidColumnDepth(level, pos, sourceFluid);
+        return depth >= CITY_FLOATING_SOURCE_MIN_HEIGHT;
+    }
+
+    private static int countFreeHangingFluidColumnDepth(ServerLevel level,
+                                                        BlockPos origin,
+                                                        net.minecraft.world.level.material.FluidState sourceFluid) {
+        if (level == null || origin == null || sourceFluid == null) {
+            return 0;
+        }
+        BlockPos current = origin;
+        int depth = 0;
+        while (depth < CITY_FLOATING_SOURCE_MAX_DEPTH) {
+            if (!level.isLoaded(current)) {
+                return 0;
+            }
+            BlockState state = level.getBlockState(current);
+            net.minecraft.world.level.material.FluidState fluid = state.getFluidState();
+            if (fluid == null || fluid.isEmpty() || !isSameFloatingFluidFamily(sourceFluid, fluid)) {
+                break;
+            }
+            if (hasSolidSideAnchor(level, current, sourceFluid)) {
+                return 0;
+            }
+            depth++;
+            current = current.below();
+        }
+        return depth;
+    }
+
+    private static int countExposedFluidSides(ServerLevel level,
+                                              BlockPos pos,
+                                              net.minecraft.world.level.material.FluidState sourceFluid) {
+        if (level == null || pos == null || sourceFluid == null) {
+            return 0;
+        }
+        int openSides = 0;
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos neighborPos = pos.relative(direction);
+            if (!level.isLoaded(neighborPos)) {
+                return 0;
+            }
+            BlockState neighborState = level.getBlockState(neighborPos);
+            net.minecraft.world.level.material.FluidState neighborFluid = neighborState.getFluidState();
+            if (neighborFluid != null && !neighborFluid.isEmpty() && isSameFloatingFluidFamily(sourceFluid, neighborFluid)) {
+                continue;
+            }
+            if (neighborState.isAir() || neighborState.canBeReplaced()) {
+                openSides++;
+            }
+        }
+        return openSides;
+    }
+
+    private static boolean hasSolidSideAnchor(ServerLevel level,
+                                              BlockPos pos,
+                                              net.minecraft.world.level.material.FluidState sourceFluid) {
+        if (level == null || pos == null || sourceFluid == null) {
+            return true;
+        }
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos neighborPos = pos.relative(direction);
+            if (!level.isLoaded(neighborPos)) {
+                return true;
+            }
+            BlockState neighborState = level.getBlockState(neighborPos);
+            net.minecraft.world.level.material.FluidState neighborFluid = neighborState.getFluidState();
+            if (neighborFluid != null && !neighborFluid.isEmpty() && isSameFloatingFluidFamily(sourceFluid, neighborFluid)) {
+                continue;
+            }
+            if (neighborState.isAir()) {
+                continue;
+            }
+            if (isSolidOrFixedBlock(level, neighborPos, neighborState)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isSameFloatingFluidFamily(net.minecraft.world.level.material.FluidState sourceFluid,
+                                                     net.minecraft.world.level.material.FluidState otherFluid) {
+        if (sourceFluid == null || otherFluid == null || otherFluid.isEmpty()) {
+            return false;
+        }
+        if (sourceFluid.is(FluidTags.WATER)) {
+            return otherFluid.is(FluidTags.WATER);
+        }
+        if (sourceFluid.is(FluidTags.LAVA)) {
+            return otherFluid.is(FluidTags.LAVA);
+        }
+        return false;
+    }
+
+    private static boolean isSolidOrFixedBlock(ServerLevel level, BlockPos pos, BlockState state) {
+        return !state.getCollisionShape(level, pos).isEmpty() || !state.canBeReplaced();
+    }
+
+    private static boolean isSolidOrFixedBlock(net.minecraft.server.level.WorldGenRegion region, BlockPos pos, BlockState state) {
+        return !state.getCollisionShape(region, pos).isEmpty() || !state.canBeReplaced();
+    }
+
+    private static boolean isUnsupportedSupport(ServerLevel level, BlockPos supportPos, BlockState supportState) {
+        if (supportState == null || level == null) {
+            return true;
+        }
+        return supportState.isAir() || !supportState.isCollisionShapeFullBlock(level, supportPos);
+    }
+
+    private static boolean isUnsupportedSupport(net.minecraft.server.level.WorldGenRegion region, BlockPos supportPos, BlockState supportState) {
+        if (supportState == null) {
+            return true;
+        }
+        return supportState.isAir() || !supportState.isCollisionShapeFullBlock(region, supportPos);
     }
 
     private record ChunkScanKey(ResourceLocation dimension, int chunkX, int chunkZ) {
@@ -336,11 +634,18 @@ public class ChunkPostProcessor {
 
         BlockPos below = pos.below();
         BlockState belowState = region.getBlockState(below);
-        boolean unsupported = belowState.isAir() || !belowState.isCollisionShapeFullBlock(region, below);
+        boolean unsupported = isUnsupportedSupport(region, below, belowState);
         boolean enqueue = false;
+        ServerLevel level = null;
 
         if (isPotentialFloatingSourceFluid(state)) {
             enqueue = unsupported && isFloatingFluidDisconnected(region, pos, state);
+            if (!enqueue) {
+                level = resolveServerLevel(region);
+                if (level != null) {
+                    enqueue = shouldRemoveTallCityFluidSource(level, pos, state);
+                }
+            }
         } else if (isHorrorElementBlock(state)) {
             enqueue = isFullySurroundedByVanillaAir(region, pos);
         } else if (isTracked(state.getBlock())) {
@@ -349,7 +654,9 @@ public class ChunkPostProcessor {
 
         if (enqueue) {
             try {
-                ServerLevel level = resolveServerLevel(region);
+                if (level == null) {
+                    level = resolveServerLevel(region);
+                }
                 if (level != null) {
                     enqueueFloatingCheck(level, pos);
                 }
@@ -808,13 +1115,8 @@ public class ChunkPostProcessor {
                 below.set(pos.getX(), pos.getY() - 1, pos.getZ());
                 try {
                     BlockState belowState = chunk.getBlockState(below);
-                    boolean unsupported = belowState.isAir() || !belowState.isCollisionShapeFullBlock(chunk.getLevel(), below);
-                    boolean queueCandidate = false;
-                    if (isPotentialFloatingSourceFluid(state) || isHorrorElementBlock(state)) {
-                        queueCandidate = belowState.isAir();
-                    } else if (isTracked(state.getBlock())) {
-                        queueCandidate = unsupported;
-                    }
+                    boolean unsupported = isUnsupportedSupport(levelFromChunk(chunk), below, belowState);
+                    boolean queueCandidate = unsupported;
                     if (queueCandidate) {
                         if (floating == null) {
                             floating = new java.util.ArrayList<>();
@@ -837,6 +1139,13 @@ public class ChunkPostProcessor {
         }
 
         return new ChunkScanResult(key, current, floating == null ? List.of() : floating, doubleBlocks == null ? List.of() : doubleBlocks);
+    }
+
+    private static ServerLevel levelFromChunk(LevelChunk chunk) {
+        if (chunk == null || !(chunk.getLevel() instanceof ServerLevel level)) {
+            return null;
+        }
+        return level;
     }
 
     private static void applyScanResult(ServerLevel level, ChunkScanResult result) {

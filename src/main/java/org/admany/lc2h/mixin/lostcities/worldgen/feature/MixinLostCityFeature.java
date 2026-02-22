@@ -64,39 +64,23 @@ public class MixinLostCityFeature {
 
         long now = System.currentTimeMillis();
 
-        if (LostCityFeatureGuards.isPlacedRecently(coord, now)) {
-            if (LostCityFeatureGuards.TRACE_PLACE) {
-                org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityFeature.place skipped (already placed) coord={} thread={}",
-                    coord, Thread.currentThread().getName());
-            }
-            cir.setReturnValue(true);
-            cir.cancel();
-            return;
+        if (LostCityFeatureGuards.isPlacedRecently(coord, now) && LostCityFeatureGuards.TRACE_PLACE) {
+            org.admany.lc2h.LC2H.LOGGER.debug(
+                "[LC2H] LostCityFeature.place seen as already placed recently (continuing) coord={} thread={}",
+                coord, Thread.currentThread().getName()
+            );
         }
 
         Long inFlight = LostCityFeatureGuards.IN_FLIGHT_PLACE_MS.putIfAbsent(coord, now);
         if (inFlight != null) {
             if ((now - inFlight) < LostCityFeatureGuards.PLACE_GUARD_MS) {
                 if (LostCityFeatureGuards.TRACE_PLACE) {
-                    org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityFeature.place skipped (in-flight) coord={} thread={}",
+                    org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityFeature.place duplicate in-flight (continuing) coord={} thread={}",
                         coord, Thread.currentThread().getName());
                 }
-                cir.setReturnValue(true);
-                cir.cancel();
-                return;
+            } else {
+                LostCityFeatureGuards.IN_FLIGHT_PLACE_MS.put(coord, now);
             }
-            LostCityFeatureGuards.IN_FLIGHT_PLACE_MS.put(coord, now);
-        }
-        Long last = LostCityFeatureGuards.getLastSuccess(coord, now);
-        if (last != null && (now - last) < LostCityFeatureGuards.PLACE_GUARD_MS) {
-            LostCityFeatureGuards.IN_FLIGHT_PLACE_MS.remove(coord);
-            if (LostCityFeatureGuards.TRACE_PLACE) {
-                org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityFeature.place skipped (recent) coord={} thread={}",
-                    coord, Thread.currentThread().getName());
-            }
-            cir.setReturnValue(true);
-            cir.cancel();
-            return;
         }
         if (LostCityFeatureGuards.TRACE_PLACE) {
             org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityFeature.place begin coord={} thread={}",
@@ -141,10 +125,13 @@ public class MixinLostCityFeature {
         ChunkCoord coord = new ChunkCoord(provider.getType(), center.x, center.z);
 
         LostCityFeatureGuards.IN_FLIGHT_PLACE_MS.remove(coord);
-        LostCityFeatureGuards.markPlaced(coord, System.currentTimeMillis());
+        boolean placed = Boolean.TRUE.equals(cir.getReturnValue());
+        if (placed) {
+            LostCityFeatureGuards.markPlaced(coord, System.currentTimeMillis());
+        }
         if (LostCityFeatureGuards.TRACE_PLACE) {
-            org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityFeature.place end coord={} thread={}",
-                coord, Thread.currentThread().getName());
+            org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityFeature.place end coord={} placed={} thread={}",
+                coord, placed, Thread.currentThread().getName());
         }
 
         try {

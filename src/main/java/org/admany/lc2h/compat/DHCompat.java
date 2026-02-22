@@ -21,6 +21,9 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -651,44 +654,62 @@ public class DHCompat {
         public Object invoke(Object proxy, Method method, Object[] args) {
             String name = method.getName();
 
-            switch (name) {
-                case "getReturnType":
-                    return apiDataSourceReturnType;
-                case "runApiValidation":
-                    return Boolean.FALSE;
-                case "getPriority":
-                    return 0;
-                case "getSmallestDataDetailLevel":
-                    return (byte) 0;
-                case "getLargestDataDetailLevel":
-                    return (byte) 9;
-                case "preGeneratorTaskStart":
-                    return null;
-                case "generateLod":
-                    int chunkPosMinX = (int) args[0];
-                    int chunkPosMinZ = (int) args[1];
-                    int lodPosX = (int) args[2];
-                    int lodPosZ = (int) args[3];
-                    byte detailLevel = (byte) args[4];
-                    Object dataSource = args[5];
-                    ExecutorService executor = (ExecutorService) args[7];
-                    @SuppressWarnings("unchecked")
-                    Consumer<Object> consumer = (Consumer<Object>) args[8];
-                    return integration.generateLod(chunkPosMinX, chunkPosMinZ, lodPosX, lodPosZ, detailLevel, dataSource, executor, consumer);
-                default:
-                    if (name.equals("toString")) {
-                        return "LC2H-DH-WorldGenerator";
-                    }
-                    if (name.equals("hashCode")) {
-                        return System.identityHashCode(identity);
-                    }
-                    if (name.equals("equals")) {
-                        return args != null && args.length == 1 && args[0] == proxy;
-                    }
-                    Object fallback = defaultValueFor(method);
-                    LC2H.LOGGER.debug("Unhandled DH generator method {}; returning {}", name, fallback);
-                    return fallback;
+            try {
+                switch (name) {
+                    case "getReturnType":
+                        return apiDataSourceReturnType;
+                    case "runApiValidation":
+                        return Boolean.FALSE;
+                    case "getPriority":
+                        return 0;
+                    case "getSmallestDataDetailLevel":
+                        return (byte) 0;
+                    case "getLargestDataDetailLevel":
+                        return (byte) 9;
+                    case "preGeneratorTaskStart":
+                        return null;
+                    case "generateLod":
+                        int chunkPosMinX = (int) args[0];
+                        int chunkPosMinZ = (int) args[1];
+                        int lodPosX = (int) args[2];
+                        int lodPosZ = (int) args[3];
+                        byte detailLevel = (byte) args[4];
+                        Object dataSource = args[5];
+                        ExecutorService executor = (ExecutorService) args[7];
+                        @SuppressWarnings("unchecked")
+                        Consumer<Object> consumer = (Consumer<Object>) args[8];
+                        return integration.generateLod(chunkPosMinX, chunkPosMinZ, lodPosX, lodPosZ, detailLevel, dataSource, executor, consumer);
+                    default:
+                        if (name.equals("toString")) {
+                            return "LC2H-DH-WorldGenerator";
+                        }
+                        if (name.equals("hashCode")) {
+                            return System.identityHashCode(identity);
+                        }
+                        if (name.equals("equals")) {
+                            return args != null && args.length == 1 && args[0] == proxy;
+                        }
+                        if (method.isDefault()) {
+                            return invokeDefaultMethod(proxy, method, args);
+                        }
+                        Object fallback = defaultValueFor(method);
+                        LC2H.LOGGER.debug("Unhandled DH generator method {}; returning {}", name, fallback);
+                        return fallback;
+                }
+            } catch (Throwable t) {
+                Object fallback = defaultValueFor(method);
+                LC2H.LOGGER.debug("DH generator method {} failed; returning fallback {} ({})", name, fallback, t.toString());
+                return fallback;
             }
+        }
+
+        private Object invokeDefaultMethod(Object proxy, Method method, Object[] args) throws Throwable {
+            Class<?> owner = method.getDeclaringClass();
+            MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(owner, MethodHandles.lookup());
+            MethodType type = MethodType.methodType(method.getReturnType(), method.getParameterTypes());
+            MethodHandle handle = lookup.findSpecial(owner, method.getName(), type, owner);
+            Object[] safeArgs = args != null ? args : new Object[0];
+            return handle.bindTo(proxy).invokeWithArguments(safeArgs);
         }
 
         private Object defaultValueFor(Method method) {
