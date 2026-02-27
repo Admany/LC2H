@@ -45,6 +45,10 @@ public class ConfigManager {
     public static boolean CITY_BLEND_CLEAR_TREES = true;
     public static boolean CITY_BLEND_TREE_SEAM_FIX = true;
     public static int CITY_BLEND_TREE_SEAM_BUFFER = 3;
+    public static boolean SEAM_OWNERSHIP_ENABLED = true;
+    public static int SEAM_OWNERSHIP_MAX_INTENTS_PER_CHUNK = 8192;
+    public static long SEAM_OWNERSHIP_INTENT_TTL_MS = 10L * 60L * 1000L;
+    public static int HIGHWAY_SUPPORT_MAX_DEPTH = 192;
 
     public static boolean isDedicatedServerEnv() {
         if (FMLEnvironment.dist == Dist.DEDICATED_SERVER) return true;
@@ -86,6 +90,10 @@ public class ConfigManager {
         public boolean cityBlendClearTrees = true;
         public boolean cityBlendTreeSeamFix = true;
         public int cityBlendTreeSeamBuffer = 3;
+        public boolean seamOwnershipEnabled = true;
+        public int seamOwnershipMaxIntentsPerChunk = 8192;
+        public long seamOwnershipIntentTtlMs = 10L * 60L * 1000L;
+        public int highwaySupportMaxDepth = 192;
     }
 
     public static Config loadOrCreateConfig() {
@@ -180,6 +188,10 @@ public class ConfigManager {
         comments.put("cityBlendClearTrees", "Prevent trees from generating near city borders (within the blend distance)");
         comments.put("cityBlendTreeSeamFix", "Prevent half-trees on city borders by blocking trees that would cross a city/vanilla seam");
         comments.put("cityBlendTreeSeamBuffer", "Buffer (blocks) from a chunk edge to block seam-crossing trees");
+        comments.put("seamOwnershipEnabled", "Enable chunk seam ownership journal for cross-chunk Lost Cities writes");
+        comments.put("seamOwnershipMaxIntentsPerChunk", "Maximum deferred seam write intents per target chunk");
+        comments.put("seamOwnershipIntentTtlMs", "How long deferred seam write intents are kept before expiring (milliseconds)");
+        comments.put("highwaySupportMaxDepth", "Maximum downward support depth for Lost Cities highway pillars (higher reaches seabed in deep oceans)");
 
         try (PrintWriter w = new PrintWriter(new FileWriter(path))) {
             w.println("/*");
@@ -227,7 +239,11 @@ public class ConfigManager {
                 "cityBlendSoftness",
                 "cityBlendClearTrees",
                 "cityBlendTreeSeamFix",
-                "cityBlendTreeSeamBuffer"
+                "cityBlendTreeSeamBuffer",
+                "seamOwnershipEnabled",
+                "seamOwnershipMaxIntentsPerChunk",
+                "seamOwnershipIntentTtlMs",
+                "highwaySupportMaxDepth"
             });
 
             java.util.List<String> outputLines = new java.util.ArrayList<>();
@@ -339,6 +355,10 @@ public class ConfigManager {
         CITY_BLEND_CLEAR_TREES = CONFIG.cityBlendClearTrees;
         CITY_BLEND_TREE_SEAM_FIX = CONFIG.cityBlendTreeSeamFix;
         CITY_BLEND_TREE_SEAM_BUFFER = Math.max(1, CONFIG.cityBlendTreeSeamBuffer);
+        SEAM_OWNERSHIP_ENABLED = CONFIG.seamOwnershipEnabled;
+        SEAM_OWNERSHIP_MAX_INTENTS_PER_CHUNK = Math.max(256, CONFIG.seamOwnershipMaxIntentsPerChunk);
+        SEAM_OWNERSHIP_INTENT_TTL_MS = Math.max(30_000L, CONFIG.seamOwnershipIntentTtlMs);
+        HIGHWAY_SUPPORT_MAX_DEPTH = Math.max(40, Math.min(384, CONFIG.highwaySupportMaxDepth));
     }
 
     private static int parseHexColor(String raw, int fallback) {

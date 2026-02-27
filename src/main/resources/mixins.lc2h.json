@@ -32,6 +32,7 @@
     "lostcities.dimension.MixinDefaultDimensionInfoThreadLocal",
     "lostcities.highway.MixinHighwayThreadSafety",
     "lostcities.highway.MixinHighwayNullGuard",
+    "lostcities.highway.MixinHighwaySupportDepth",
     "lostcities.railway.MixinRailway",
     "lostcities.safety.MixinChunkDriverNullGuard",
     "lostcities.worldgen.MixinMultiChunkTimings",

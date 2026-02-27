@@ -15,6 +15,7 @@ import net.minecraft.world.level.ServerLevelAccessor;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.worldgen.lostcities.LostCityFeatureGuards;
 import org.admany.lc2h.worldgen.lostcities.LostCitiesGenerationLocks;
+import org.admany.lc2h.worldgen.seams.SeamOwnershipJournal;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mutable;
@@ -90,6 +91,11 @@ public class MixinLostCityFeature {
         if (!AsyncChunkWarmup.isPreScheduled(coord)) {
             AsyncChunkWarmup.preSchedule(provider, coord);
         }
+
+        try {
+            SeamOwnershipJournal.beginLostCityPass(region);
+        } catch (Throwable ignored) {
+        }
     }
 
     @Redirect(
@@ -142,6 +148,11 @@ public class MixinLostCityFeature {
             if (provider instanceof org.admany.lc2h.util.lostcities.ThreadLocalDimensionInfo tl) {
                 tl.lc2h$clearThreadContext();
             }
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            SeamOwnershipJournal.endLostCityPass(region);
         } catch (Throwable ignored) {
         }
     }
