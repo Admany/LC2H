@@ -5,6 +5,7 @@ import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.world.level.block.state.BlockState;
 
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
+import org.admany.lc2h.worldgen.seams.SeamOwnershipJournal;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -34,6 +35,10 @@ public class MixinWorldGenRegion {
     private void lc2h$preventTreeAirOverwrite(BlockPos pos, BlockState state, int flags, int recursionLeft, CallbackInfoReturnable<Boolean> cir) {
         try {
             WorldGenRegion region = (WorldGenRegion)(Object)this;
+            if (SeamOwnershipJournal.deferCrossChunkWrite(region, pos, state, flags)) {
+                cir.setReturnValue(false);
+                return;
+            }
             if (ChunkPostProcessor.shouldPreventTreeAirOverwrite(region, pos, state)) {
                 cir.setReturnValue(false);
             }

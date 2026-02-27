@@ -236,6 +236,9 @@ public class Lc2hConfigScreen extends Screen {
     private EditBox blendWidthBox;
     private EditBox blendSoftnessBox;
     private EditBox blendTreeSeamBufferBox;
+    private EditBox seamOwnershipMaxIntentsBox;
+    private EditBox seamOwnershipIntentTtlMsBox;
+    private EditBox highwaySupportMaxDepthBox;
     private EditBox accentColorBox;
     private EditBox cacheCapBox;
     private EditBox lc2hCacheBox;
@@ -543,6 +546,11 @@ private Component unsavedDiscardLabel = Component.empty();
                 working.cityBlendTreeSeamFix,
                 tr("lc2h.config.option.city_blend_tree_seam_fix.desc"),
                 Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendTreeSeamFix = val);
+        addToggle(layout,
+                tr("lc2h.config.option.seam_ownership_enabled.title"),
+                working.seamOwnershipEnabled,
+                tr("lc2h.config.option.seam_ownership_enabled.desc"),
+                Lc2hConfigController.RESTART_CITY_EDGE, val -> working.seamOwnershipEnabled = val);
         this.blendWidthBox = addNumberField(layout,
                 tr("lc2h.config.option.city_blend_width.title"),
                 tr("lc2h.config.option.city_blend_width.desc"),
@@ -556,6 +564,21 @@ private Component unsavedDiscardLabel = Component.empty();
                 tr("lc2h.config.option.city_blend_tree_seam_buffer.desc"),
                 String.valueOf(working.cityBlendTreeSeamBuffer), Lc2hConfigController.RESTART_CITY_EDGE);
         this.blendTreeSeamBufferBox.setFilter(this::isNumericInput);
+        this.seamOwnershipMaxIntentsBox = addNumberField(layout,
+                tr("lc2h.config.option.seam_ownership_max_intents.title"),
+                tr("lc2h.config.option.seam_ownership_max_intents.desc"),
+                String.valueOf(working.seamOwnershipMaxIntentsPerChunk), Lc2hConfigController.RESTART_CITY_EDGE);
+        this.seamOwnershipMaxIntentsBox.setFilter(this::isNumericInput);
+        this.seamOwnershipIntentTtlMsBox = addNumberField(layout,
+                tr("lc2h.config.option.seam_ownership_intent_ttl_ms.title"),
+                tr("lc2h.config.option.seam_ownership_intent_ttl_ms.desc"),
+                String.valueOf(working.seamOwnershipIntentTtlMs), Lc2hConfigController.RESTART_CITY_EDGE);
+        this.seamOwnershipIntentTtlMsBox.setFilter(this::isNumericInput);
+        this.highwaySupportMaxDepthBox = addNumberField(layout,
+                tr("lc2h.config.option.highway_support_max_depth.title"),
+                tr("lc2h.config.option.highway_support_max_depth.desc"),
+                String.valueOf(working.highwaySupportMaxDepth), Lc2hConfigController.RESTART_CITY_EDGE);
+        this.highwaySupportMaxDepthBox.setFilter(this::isNumericInput);
 
         addSectionHeader(layout, tr("lc2h.config.section.benchmark"));
         addActionButton(layout,
@@ -1717,6 +1740,9 @@ private Component unsavedDiscardLabel = Component.empty();
                 blendWidthBox.getValue(),
                 blendSoftnessBox.getValue(),
                 blendTreeSeamBufferBox == null ? null : blendTreeSeamBufferBox.getValue(),
+                seamOwnershipMaxIntentsBox == null ? null : seamOwnershipMaxIntentsBox.getValue(),
+                seamOwnershipIntentTtlMsBox == null ? null : seamOwnershipIntentTtlMsBox.getValue(),
+                highwaySupportMaxDepthBox == null ? null : highwaySupportMaxDepthBox.getValue(),
                 accentColorBox == null ? null : accentColorBox.getValue(),
                 lc2hCacheBox == null ? null : lc2hCacheBox.getValue(),
                 lostCitiesCacheBox == null ? null : lostCitiesCacheBox.getValue(),
