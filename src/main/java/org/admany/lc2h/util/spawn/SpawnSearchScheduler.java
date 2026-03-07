@@ -15,6 +15,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.ServerLevelData;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner;
+import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 
 import javax.annotation.Nonnull;
 import java.io.BufferedWriter;
@@ -302,7 +303,7 @@ public final class SpawnSearchScheduler {
                         logSpawnProgress(world.dimension());
                         ChunkCoord coord = new ChunkCoord(provider.getType(), chunkX, chunkZ);
                         CityInfo cityInfo = getCachedCityInfo(world.dimension(), coord);
-                        if (cityInfo == null && !BuildingInfo.isCity(coord, provider)) {
+                        if (cityInfo == null && !ChunkRoleProbe.isCity(provider, coord.dimension(), coord.chunkX(), coord.chunkZ())) {
                             continue;
                         }
                         if (cityInfo == null) {
@@ -422,7 +423,7 @@ public final class SpawnSearchScheduler {
             if (!visited.add(packed)) {
                 continue;
             }
-            if (!BuildingInfo.isCity(coord, provider)) {
+            if (!ChunkRoleProbe.isCity(provider, coord.dimension(), coord.chunkX(), coord.chunkZ())) {
                 continue;
             }
             cityChunks.add(packed);
@@ -584,7 +585,7 @@ public final class SpawnSearchScheduler {
         return PrefilterDecision.PASS;
     }
         try {
-            LostChunkCharacteristics characteristics = BuildingInfo.getChunkCharacteristics(coord, provider);
+            LostChunkCharacteristics characteristics = ChunkRoleProbe.getCharacteristics(provider, coord.dimension(), coord.chunkX(), coord.chunkZ());
             if (characteristics == null) {
                 return PrefilterDecision.NEED_INFO;
             }

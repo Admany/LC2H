@@ -306,6 +306,7 @@ final class Lc2hConfigController {
         if (before.cityBlendClearTrees != after.cityBlendClearTrees) return true;
         if (before.cityBlendTreeSeamFix != after.cityBlendTreeSeamFix) return true;
         if (before.cityBlendTreeSeamBuffer != after.cityBlendTreeSeamBuffer) return true;
+        if (Double.compare(before.treeSeamRadiusMultiplier, after.treeSeamRadiusMultiplier) != 0) return true;
         if (before.seamOwnershipEnabled != after.seamOwnershipEnabled) return true;
         if (before.seamOwnershipMaxIntentsPerChunk != after.seamOwnershipMaxIntentsPerChunk) return true;
         if (before.seamOwnershipIntentTtlMs != after.seamOwnershipIntentTtlMs) return true;
@@ -347,6 +348,7 @@ final class Lc2hConfigController {
         tryParseInt(values.cityBlendWidth(), v -> target.cityBlendWidth = Math.max(4, v));
         tryParseDouble(values.cityBlendSoftness(), v -> target.cityBlendSoftness = Math.max(0.5, v));
         tryParseInt(values.cityBlendTreeSeamBuffer(), v -> target.cityBlendTreeSeamBuffer = Math.max(1, v));
+        tryParseDouble(values.treeSeamRadiusMultiplier(), v -> target.treeSeamRadiusMultiplier = clampDoubleRange(v, 0.5D, 3.0D));
         tryParseInt(values.seamOwnershipMaxIntentsPerChunk(), v -> target.seamOwnershipMaxIntentsPerChunk = Math.max(256, v));
         tryParseInt(values.seamOwnershipIntentTtlMs(), v -> target.seamOwnershipIntentTtlMs = Math.max(30_000L, v));
         tryParseInt(values.highwaySupportMaxDepth(), v -> target.highwaySupportMaxDepth = clampIntRange(v, 40, 384));
@@ -388,6 +390,7 @@ final class Lc2hConfigController {
         copy.cityBlendClearTrees = src.cityBlendClearTrees;
         copy.cityBlendTreeSeamFix = src.cityBlendTreeSeamFix;
         copy.cityBlendTreeSeamBuffer = src.cityBlendTreeSeamBuffer;
+        copy.treeSeamRadiusMultiplier = src.treeSeamRadiusMultiplier;
         copy.seamOwnershipEnabled = src.seamOwnershipEnabled;
         copy.seamOwnershipMaxIntentsPerChunk = src.seamOwnershipMaxIntentsPerChunk;
         copy.seamOwnershipIntentTtlMs = src.seamOwnershipIntentTtlMs;
@@ -415,6 +418,10 @@ final class Lc2hConfigController {
     }
 
     private int clampIntRange(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private double clampDoubleRange(double value, double min, double max) {
         return Math.max(min, Math.min(max, value));
     }
 
@@ -481,6 +488,7 @@ final class Lc2hConfigController {
         c.cityBlendClearTrees = src.cityBlendClearTrees;
         c.cityBlendTreeSeamFix = src.cityBlendTreeSeamFix;
         c.cityBlendTreeSeamBuffer = src.cityBlendTreeSeamBuffer;
+        c.treeSeamRadiusMultiplier = src.treeSeamRadiusMultiplier;
         c.seamOwnershipEnabled = src.seamOwnershipEnabled;
         c.seamOwnershipMaxIntentsPerChunk = src.seamOwnershipMaxIntentsPerChunk;
         c.seamOwnershipIntentTtlMs = src.seamOwnershipIntentTtlMs;
@@ -501,6 +509,7 @@ final class Lc2hConfigController {
             state.seamOwnershipEnabled = ConfigManager.SEAM_OWNERSHIP_ENABLED;
             state.seamOwnershipMaxIntentsPerChunk = Math.max(256, ConfigManager.SEAM_OWNERSHIP_MAX_INTENTS_PER_CHUNK);
             state.seamOwnershipIntentTtlMs = Math.max(30_000L, ConfigManager.SEAM_OWNERSHIP_INTENT_TTL_MS);
+            state.treeSeamRadiusMultiplier = clampDoubleRange(ConfigManager.TREE_SEAM_RADIUS_MULTIPLIER, 0.5D, 3.0D);
             state.highwaySupportMaxDepth = clampIntRange(ConfigManager.HIGHWAY_SUPPORT_MAX_DEPTH, 40, 384);
             return state;
         }
@@ -526,6 +535,7 @@ final class Lc2hConfigController {
         state.cityBlendClearTrees = config.cityBlendClearTrees;
         state.cityBlendTreeSeamFix = config.cityBlendTreeSeamFix;
         state.cityBlendTreeSeamBuffer = config.cityBlendTreeSeamBuffer;
+        state.treeSeamRadiusMultiplier = clampDoubleRange(config.treeSeamRadiusMultiplier, 0.5D, 3.0D);
         state.seamOwnershipEnabled = config.seamOwnershipEnabled;
         state.seamOwnershipMaxIntentsPerChunk = Math.max(256, config.seamOwnershipMaxIntentsPerChunk);
         state.seamOwnershipIntentTtlMs = Math.max(30_000L, config.seamOwnershipIntentTtlMs);
@@ -557,6 +567,7 @@ final class Lc2hConfigController {
         config.cityBlendClearTrees = state.cityBlendClearTrees;
         config.cityBlendTreeSeamFix = state.cityBlendTreeSeamFix;
         config.cityBlendTreeSeamBuffer = state.cityBlendTreeSeamBuffer;
+        config.treeSeamRadiusMultiplier = (float) clampDoubleRange(state.treeSeamRadiusMultiplier, 0.5D, 3.0D);
         config.seamOwnershipEnabled = state.seamOwnershipEnabled;
         config.seamOwnershipMaxIntentsPerChunk = state.seamOwnershipMaxIntentsPerChunk;
         config.seamOwnershipIntentTtlMs = state.seamOwnershipIntentTtlMs;
@@ -593,6 +604,7 @@ final class Lc2hConfigController {
             && a.cityBlendClearTrees == b.cityBlendClearTrees
             && a.cityBlendTreeSeamFix == b.cityBlendTreeSeamFix
             && a.cityBlendTreeSeamBuffer == b.cityBlendTreeSeamBuffer
+            && Double.compare(a.treeSeamRadiusMultiplier, b.treeSeamRadiusMultiplier) == 0
             && a.seamOwnershipEnabled == b.seamOwnershipEnabled
             && a.seamOwnershipMaxIntentsPerChunk == b.seamOwnershipMaxIntentsPerChunk
             && a.seamOwnershipIntentTtlMs == b.seamOwnershipIntentTtlMs
@@ -607,6 +619,7 @@ final class Lc2hConfigController {
         String cityBlendWidth,
         String cityBlendSoftness,
         String cityBlendTreeSeamBuffer,
+        String treeSeamRadiusMultiplier,
         String seamOwnershipMaxIntentsPerChunk,
         String seamOwnershipIntentTtlMs,
         String highwaySupportMaxDepth,
@@ -642,6 +655,7 @@ final class Lc2hConfigController {
         public boolean cityBlendClearTrees;
         public boolean cityBlendTreeSeamFix;
         public int cityBlendTreeSeamBuffer;
+        public double treeSeamRadiusMultiplier;
         public boolean seamOwnershipEnabled;
         public int seamOwnershipMaxIntentsPerChunk;
         public long seamOwnershipIntentTtlMs;

@@ -14,6 +14,7 @@ import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.lc2h.util.log.RateLimitedLogger;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
+import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -204,11 +205,18 @@ public final class PlannerBatchQueue {
     }
 
     private static void runExecutable(PlannerTaskKind kind, PlannerExecutable exec) {
+        long startNs = System.nanoTime();
         try {
             exec.action.run();
         } catch (Throwable t) {
             LC2H.LOGGER.error("Planner task {} failed at {}: {}", kind.displayName(), describe(exec.coord), t.getMessage());
             LC2H.LOGGER.debug("Planner task error", t);
+        } finally {
+            long elapsedNs = System.nanoTime() - startNs;
+            Lc2hTimingRegistry.record("planner.total", elapsedNs);
+            if (kind != null) {
+                Lc2hTimingRegistry.record("planner." + kind.name().toLowerCase(java.util.Locale.ROOT), elapsedNs);
+            }
         }
     }
 

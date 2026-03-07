@@ -45,6 +45,7 @@ public class ConfigManager {
     public static boolean CITY_BLEND_CLEAR_TREES = true;
     public static boolean CITY_BLEND_TREE_SEAM_FIX = true;
     public static int CITY_BLEND_TREE_SEAM_BUFFER = 3;
+    public static float TREE_SEAM_RADIUS_MULTIPLIER = 1.0f;
     public static boolean SEAM_OWNERSHIP_ENABLED = true;
     public static int SEAM_OWNERSHIP_MAX_INTENTS_PER_CHUNK = 8192;
     public static long SEAM_OWNERSHIP_INTENT_TTL_MS = 10L * 60L * 1000L;
@@ -90,6 +91,7 @@ public class ConfigManager {
         public boolean cityBlendClearTrees = true;
         public boolean cityBlendTreeSeamFix = true;
         public int cityBlendTreeSeamBuffer = 3;
+        public float treeSeamRadiusMultiplier = 1.0f;
         public boolean seamOwnershipEnabled = true;
         public int seamOwnershipMaxIntentsPerChunk = 8192;
         public long seamOwnershipIntentTtlMs = 10L * 60L * 1000L;
@@ -188,6 +190,7 @@ public class ConfigManager {
         comments.put("cityBlendClearTrees", "Prevent trees from generating near city borders (within the blend distance)");
         comments.put("cityBlendTreeSeamFix", "Prevent half-trees on city borders by blocking trees that would cross a city/vanilla seam");
         comments.put("cityBlendTreeSeamBuffer", "Buffer (blocks) from a chunk edge to block seam-crossing trees");
+        comments.put("treeSeamRadiusMultiplier", "Multiplier for auto-detected tree spread at seams (raise for giant tree modpacks)");
         comments.put("seamOwnershipEnabled", "Enable chunk seam ownership journal for cross-chunk Lost Cities writes");
         comments.put("seamOwnershipMaxIntentsPerChunk", "Maximum deferred seam write intents per target chunk");
         comments.put("seamOwnershipIntentTtlMs", "How long deferred seam write intents are kept before expiring (milliseconds)");
@@ -240,6 +243,7 @@ public class ConfigManager {
                 "cityBlendClearTrees",
                 "cityBlendTreeSeamFix",
                 "cityBlendTreeSeamBuffer",
+                "treeSeamRadiusMultiplier",
                 "seamOwnershipEnabled",
                 "seamOwnershipMaxIntentsPerChunk",
                 "seamOwnershipIntentTtlMs",
@@ -355,6 +359,7 @@ public class ConfigManager {
         CITY_BLEND_CLEAR_TREES = CONFIG.cityBlendClearTrees;
         CITY_BLEND_TREE_SEAM_FIX = CONFIG.cityBlendTreeSeamFix;
         CITY_BLEND_TREE_SEAM_BUFFER = Math.max(1, CONFIG.cityBlendTreeSeamBuffer);
+        TREE_SEAM_RADIUS_MULTIPLIER = (float) Math.max(0.5D, Math.min(3.0D, CONFIG.treeSeamRadiusMultiplier));
         SEAM_OWNERSHIP_ENABLED = CONFIG.seamOwnershipEnabled;
         SEAM_OWNERSHIP_MAX_INTENTS_PER_CHUNK = Math.max(256, CONFIG.seamOwnershipMaxIntentsPerChunk);
         SEAM_OWNERSHIP_INTENT_TTL_MS = Math.max(30_000L, CONFIG.seamOwnershipIntentTtlMs);

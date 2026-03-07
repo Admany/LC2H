@@ -23,6 +23,7 @@ import org.admany.lc2h.worldgen.async.snapshot.MultiChunkSnapshot;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
+import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
 
 import java.util.ArrayList;
@@ -453,6 +454,7 @@ public final class AsyncMultiChunkPlanner {
             }
             return result;
         } finally {
+            Lc2hTimingRegistry.record("multichunk.compute", System.nanoTime() - start);
         }
     }
 
@@ -565,13 +567,43 @@ public final class AsyncMultiChunkPlanner {
     }
 
     private static MultiChunk integrateResult(IDimensionInfo provider, ChunkCoord multiCoord, MultiChunk prepared, java.util.function.Consumer<Runnable> runnableCollector) {
+        long startNs = System.nanoTime();
         String threadName = Thread.currentThread().getName();
         boolean onServerThread = "Server thread".equals(threadName);
 
-        if (runnableCollector != null) {
+        try {
+            if (runnableCollector != null) {
+                if (onServerThread) {
+                    MultiChunk gameCompatible = translateToGameCompatible(prepared, provider);
+                    runnableCollector.accept(() -> applyIntegrated(provider, multiCoord, gameCompatible));
+                    return gameCompatible;
+                }
+
+                byte[] snapshot = null;
+                try {
+                    snapshot = MultiChunkSnapshot.encode(prepared);
+                } catch (Throwable ignored) {
+                }
+                final byte[] finalSnapshot = snapshot;
+                runnableCollector.accept(() -> {
+                    MultiChunk gameCompatible = prepared;
+                    if (finalSnapshot != null) {
+                        try {
+                            MultiChunk decoded = MultiChunkSnapshot.decode(finalSnapshot);
+                            if (decoded != null) {
+                                gameCompatible = decoded;
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    applyIntegrated(provider, multiCoord, gameCompatible);
+                });
+                return prepared;
+            }
+
             if (onServerThread) {
                 MultiChunk gameCompatible = translateToGameCompatible(prepared, provider);
-                runnableCollector.accept(() -> applyIntegrated(provider, multiCoord, gameCompatible));
+                applyIntegrated(provider, multiCoord, gameCompatible);
                 return gameCompatible;
             }
 
@@ -581,7 +613,7 @@ public final class AsyncMultiChunkPlanner {
             } catch (Throwable ignored) {
             }
             final byte[] finalSnapshot = snapshot;
-            runnableCollector.accept(() -> {
+            org.admany.lc2h.worldgen.apply.MainThreadChunkApplier.enqueueChunkApplication(multiCoord, () -> {
                 MultiChunk gameCompatible = prepared;
                 if (finalSnapshot != null) {
                     try {
@@ -595,63 +627,43 @@ public final class AsyncMultiChunkPlanner {
                 applyIntegrated(provider, multiCoord, gameCompatible);
             });
             return prepared;
+        } finally {
+            Lc2hTimingRegistry.record("multichunk.integrate", System.nanoTime() - startNs);
         }
-
-        if (onServerThread) {
-            MultiChunk gameCompatible = translateToGameCompatible(prepared, provider);
-            applyIntegrated(provider, multiCoord, gameCompatible);
-            return gameCompatible;
-        }
-
-        byte[] snapshot = null;
-        try {
-            snapshot = MultiChunkSnapshot.encode(prepared);
-        } catch (Throwable ignored) {
-        }
-        final byte[] finalSnapshot = snapshot;
-        org.admany.lc2h.worldgen.apply.MainThreadChunkApplier.enqueueChunkApplication(multiCoord, () -> {
-            MultiChunk gameCompatible = prepared;
-            if (finalSnapshot != null) {
-                try {
-                    MultiChunk decoded = MultiChunkSnapshot.decode(finalSnapshot);
-                    if (decoded != null) {
-                        gameCompatible = decoded;
-                    }
-                } catch (Throwable ignored) {
-                }
-            }
-            applyIntegrated(provider, multiCoord, gameCompatible);
-        });
-        return prepared;
     }
 
     private static void applyIntegrated(IDimensionInfo provider, ChunkCoord multiCoord, MultiChunk gameCompatible) {
+        long startNs = System.nanoTime();
         Object cacheLock = MultiChunkCacheAccess.lock();
         boolean inserted = false;
-        synchronized (cacheLock) {
-            if (!MultiChunkCacheAccess.contains(multiCoord)) {
-                MultiChunkCacheAccess.put(multiCoord, gameCompatible);
-                inserted = true;
-            }
-        }
-        if (inserted) {
-            LostCitiesCacheBudgetManager.recordPut(MULTICHUNK_BUDGET, multiCoord, MULTICHUNK_BUDGET.defaultEntryBytes(), true);
-        } else {
-            LostCitiesCacheBudgetManager.recordAccess(MULTICHUNK_BUDGET, multiCoord);
-        }
-
         try {
-            int areaSize = provider.getWorldStyle().getMultiSettings().areasize();
-            ChunkCoord topLeft = new ChunkCoord(multiCoord.dimension(), multiCoord.chunkX() * areaSize, multiCoord.chunkZ() * areaSize);
-            org.admany.lc2h.util.lostcities.BuildingInfoCacheInvalidator.invalidateArea(topLeft, areaSize);
-            org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner.invalidateArea(topLeft, areaSize);
-            ChunkGenTracker.recordMultiChunkIntegrated(topLeft, areaSize);
-        } catch (Throwable ignored) {
-        }
+            synchronized (cacheLock) {
+                if (!MultiChunkCacheAccess.contains(multiCoord)) {
+                    MultiChunkCacheAccess.put(multiCoord, gameCompatible);
+                    inserted = true;
+                }
+            }
+            if (inserted) {
+                LostCitiesCacheBudgetManager.recordPut(MULTICHUNK_BUDGET, multiCoord, MULTICHUNK_BUDGET.defaultEntryBytes(), true);
+            } else {
+                LostCitiesCacheBudgetManager.recordAccess(MULTICHUNK_BUDGET, multiCoord);
+            }
 
-        PLANNED.remove(multiCoord);
-        cacheRecentMulti(multiCoord, gameCompatible);
-        scheduleWarmBuildingInfo(provider, gameCompatible, multiCoord);
+            try {
+                int areaSize = provider.getWorldStyle().getMultiSettings().areasize();
+                ChunkCoord topLeft = new ChunkCoord(multiCoord.dimension(), multiCoord.chunkX() * areaSize, multiCoord.chunkZ() * areaSize);
+                org.admany.lc2h.util.lostcities.BuildingInfoCacheInvalidator.invalidateArea(topLeft, areaSize);
+                org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner.invalidateArea(topLeft, areaSize);
+                ChunkGenTracker.recordMultiChunkIntegrated(topLeft, areaSize);
+            } catch (Throwable ignored) {
+            }
+
+            PLANNED.remove(multiCoord);
+            cacheRecentMulti(multiCoord, gameCompatible);
+            scheduleWarmBuildingInfo(provider, gameCompatible, multiCoord);
+        } finally {
+            Lc2hTimingRegistry.record("multichunk.apply_integrated", System.nanoTime() - startNs);
+        }
     }
 
     private static void cacheRecentMulti(ChunkCoord multiCoord, MultiChunk multiChunk) {

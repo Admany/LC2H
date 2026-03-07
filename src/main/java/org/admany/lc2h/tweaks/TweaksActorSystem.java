@@ -4,6 +4,7 @@ import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import mcjty.lostcities.worldgen.lost.MultiChunk;
+import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.lc2h.mixin.accessor.lostcities.MultiChunkAccessor;
 
 import java.lang.reflect.Field;
@@ -55,9 +56,23 @@ public final class TweaksActorSystem {
 
     private static ComputationResult execute(ComputationRequest request, Supplier<Object> supplier) {
         long start = System.nanoTime();
-        Object payload = supplier.get();
-        long end = System.nanoTime();
-        return new ComputationResult(request, payload, end - start);
+        try {
+            Object payload = supplier.get();
+            long end = System.nanoTime();
+            long elapsed = end - start;
+            if (request != null && request.type() != null) {
+                Lc2hTimingRegistry.record("tweaks." + request.type().name().toLowerCase(), elapsed);
+            }
+            Lc2hTimingRegistry.record("tweaks.total", elapsed);
+            return new ComputationResult(request, payload, elapsed);
+        } catch (Throwable t) {
+            long elapsed = System.nanoTime() - start;
+            if (request != null && request.type() != null) {
+                Lc2hTimingRegistry.record("tweaks." + request.type().name().toLowerCase(), elapsed);
+            }
+            Lc2hTimingRegistry.record("tweaks.total", elapsed);
+            throw t;
+        }
     }
 
     private static boolean isResultLegit(ComputationResult result) {

@@ -1,6 +1,7 @@
 package org.admany.lc2h.util.batch;
 
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.quantified.api.QuantifiedAPI;
 import org.admany.quantified.api.model.QuantifiedTask;
 
@@ -11,6 +12,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class CpuBatchScheduler {
+    private record NamedTask(String name, Runnable action) {}
         private static final int MAX_BATCH = Math.max(128, Integer.getInteger("lc.cpu_batch.size", 2048));
         private static final int TARGET_BATCH = Math.max(
             64,
@@ -20,14 +22,18 @@ public final class CpuBatchScheduler {
             )
         );
     private static final long SPIN_WAIT_MS = Math.max(0L, Long.getLong("lc.cpu_batch.spin_wait_ms", 4L));
-    private static final Queue<Runnable> QUEUE = new ConcurrentLinkedQueue<>();
+    private static final Queue<NamedTask> QUEUE = new ConcurrentLinkedQueue<>();
     private static final AtomicBoolean FLUSH_SCHEDULED = new AtomicBoolean(false);
 
     private CpuBatchScheduler() {
     }
 
     public static void submit(String name, Runnable task) {
-        QUEUE.add(task);
+        if (task == null) {
+            return;
+        }
+        String bucket = (name == null || name.isBlank()) ? "cpu_batch.task" : "cpu_batch." + name;
+        QUEUE.add(new NamedTask(bucket, task));
         int backlog = QUEUE.size();
         if (backlog >= MAX_BATCH) {
             requestFlush(name, true);
@@ -79,9 +85,10 @@ public final class CpuBatchScheduler {
     }
 
     private static void flush() {
+        long flushStartNs = System.nanoTime();
         try {
-            List<Runnable> batch = new ArrayList<>(MAX_BATCH);
-            Runnable r;
+            List<NamedTask> batch = new ArrayList<>(MAX_BATCH);
+            NamedTask r;
             while ((r = QUEUE.poll()) != null) {
                 batch.add(r);
                 if (batch.size() >= MAX_BATCH) {
@@ -93,6 +100,7 @@ public final class CpuBatchScheduler {
                 runBatch(batch);
             }
         } finally {
+            Lc2hTimingRegistry.record("cpu_batch.flush", System.nanoTime() - flushStartNs);
             FLUSH_SCHEDULED.set(false);
             if (!QUEUE.isEmpty()) {
                 if (FLUSH_SCHEDULED.compareAndSet(false, true)) {
@@ -102,12 +110,15 @@ public final class CpuBatchScheduler {
         }
     }
 
-    private static void runBatch(List<Runnable> batch) {
-        for (Runnable r : batch) {
+    private static void runBatch(List<NamedTask> batch) {
+        for (NamedTask task : batch) {
+            long startNs = System.nanoTime();
             try {
-                r.run();
+                task.action().run();
             } catch (Throwable t) {
                 LC2H.LOGGER.debug("[LC2H] CpuBatchScheduler task error: {}", t.toString());
+            } finally {
+                Lc2hTimingRegistry.record(task.name(), System.nanoTime() - startNs);
             }
         }
     }

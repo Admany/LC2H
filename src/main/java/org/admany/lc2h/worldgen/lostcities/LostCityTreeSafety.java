@@ -1,17 +1,11 @@
 package org.admany.lc2h.worldgen.lostcities;
 
-import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.setup.Registration;
-import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
-import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.WorldGenLevel;
-
-import java.util.HashMap;
-import java.util.Map;
 
 /**
  * Shared tree-safety checks for Lost Cities worldgen.
@@ -94,53 +88,125 @@ public final class LostCityTreeSafety {
         return false;
     }
 
-    private static final class ChunkUnsafeLookup {
-        private final IDimensionInfo dimInfo;
-        private final ResourceKey<Level> dim;
-        private final LostCityProfile profile;
-        private final Map<Long, Boolean> cache = new HashMap<>(8);
-
-        private ChunkUnsafeLookup(IDimensionInfo dimInfo, ResourceKey<Level> dim) {
-            this.dimInfo = dimInfo;
-            this.dim = dim;
-            LostCityProfile p = null;
-            try {
-                p = dimInfo.getProfile();
-            } catch (Throwable ignored) {
-            }
-            this.profile = p;
+    public static boolean hasUnsafeNeighborChunk(IDimensionInfo dimInfo, ResourceKey<Level> dim, int chunkX, int chunkZ) {
+        if (dimInfo == null || dim == null) {
+            return false;
         }
-
-        private boolean isUnsafe(int cx, int cz) {
-            long key = (((long) cx) << 32) ^ (cz & 0xffffffffL);
-            Boolean cached = cache.get(key);
-            if (cached != null) {
-                return cached;
-            }
-
-            ChunkCoord coord = new ChunkCoord(dim, cx, cz);
-            boolean unsafe = false;
-            try {
-                unsafe = BuildingInfo.isCity(coord, dimInfo);
-            } catch (Throwable ignored) {
-            }
-            if (!unsafe && profile != null) {
-                try {
-                    unsafe = BuildingInfo.hasHighway(coord, dimInfo, profile);
-                } catch (Throwable ignored) {
-                    unsafe = false;
+        ChunkUnsafeLookup unsafeLookup = new ChunkUnsafeLookup(dimInfo, dim);
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
                 }
-                if (!unsafe) {
-                    try {
-                        unsafe = BuildingInfo.hasRailway(coord, dimInfo, profile);
-                    } catch (Throwable ignored) {
-                        unsafe = false;
-                    }
+                if (unsafeLookup.isUnsafe(chunkX + dx, chunkZ + dz)) {
+                    return true;
                 }
             }
-
-            cache.put(key, unsafe);
-            return unsafe;
         }
+        return false;
+    }
+
+    public static boolean isUnsafeChunk(IDimensionInfo dimInfo, ResourceKey<Level> dim, int chunkX, int chunkZ) {
+        if (dimInfo == null || dim == null) {
+            return false;
+        }
+        return new ChunkUnsafeLookup(dimInfo, dim).isUnsafe(chunkX, chunkZ);
+    }
+
+    public static boolean isNearUnsafeChunk(IDimensionInfo dimInfo, ResourceKey<Level> dim, int worldX, int worldZ, int radiusBlocks) {
+        if (dimInfo == null || dim == null || radiusBlocks <= 0) {
+            return false;
+        }
+
+        int maxDistSq = radiusBlocks * radiusBlocks;
+        int originChunkX = worldX >> 4;
+        int originChunkZ = worldZ >> 4;
+        int radiusChunks = ((radiusBlocks + 15) / 16) + 1;
+        ChunkUnsafeLookup unsafeLookup = new ChunkUnsafeLookup(dimInfo, dim);
+
+        for (int dcx = -radiusChunks; dcx <= radiusChunks; dcx++) {
+            int cx = originChunkX + dcx;
+            for (int dcz = -radiusChunks; dcz <= radiusChunks; dcz++) {
+                int cz = originChunkZ + dcz;
+                if (!unsafeLookup.isUnsafe(cx, cz)) {
+                    continue;
+                }
+
+                int minX = cx << 4;
+                int maxX = minX + 15;
+                int minZ = cz << 4;
+                int maxZ = minZ + 15;
+
+                int dx = 0;
+                if (worldX < minX) {
+                    dx = minX - worldX;
+                } else if (worldX > maxX) {
+                    dx = worldX - maxX;
+                }
+
+                int dz = 0;
+                if (worldZ < minZ) {
+                    dz = minZ - worldZ;
+                } else if (worldZ > maxZ) {
+                    dz = worldZ - maxZ;
+                }
+
+                int distSq = dx * dx + dz * dz;
+                if (distSq <= maxDistSq) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public static boolean isNearUnsafeTransition(IDimensionInfo dimInfo, ResourceKey<Level> dim, int worldX, int worldZ, int radiusBlocks) {
+        if (dimInfo == null || dim == null || radiusBlocks <= 0) {
+            return false;
+        }
+
+        int maxDistSq = radiusBlocks * radiusBlocks;
+        int originChunkX = worldX >> 4;
+        int originChunkZ = worldZ >> 4;
+        int radiusChunks = ((radiusBlocks + 15) / 16) + 1;
+        ChunkUnsafeLookup unsafeLookup = new ChunkUnsafeLookup(dimInfo, dim);
+        boolean originUnsafe = unsafeLookup.isUnsafe(originChunkX, originChunkZ);
+
+        for (int dcx = -radiusChunks; dcx <= radiusChunks; dcx++) {
+            int cx = originChunkX + dcx;
+            for (int dcz = -radiusChunks; dcz <= radiusChunks; dcz++) {
+                int cz = originChunkZ + dcz;
+                boolean candidateUnsafe = unsafeLookup.isUnsafe(cx, cz);
+                if (candidateUnsafe == originUnsafe) {
+                    continue;
+                }
+
+                int minX = cx << 4;
+                int maxX = minX + 15;
+                int minZ = cz << 4;
+                int maxZ = minZ + 15;
+
+                int dx = 0;
+                if (worldX < minX) {
+                    dx = minX - worldX;
+                } else if (worldX > maxX) {
+                    dx = worldX - maxX;
+                }
+
+                int dz = 0;
+                if (worldZ < minZ) {
+                    dz = minZ - worldZ;
+                } else if (worldZ > maxZ) {
+                    dz = worldZ - maxZ;
+                }
+
+                int distSq = dx * dx + dz * dz;
+                if (distSq <= maxDistSq) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 }

@@ -29,15 +29,16 @@ import net.minecraftforge.event.level.BlockEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import mcjty.lostcities.setup.Registration;
-import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
-import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.log.LCLogger;
 import org.admany.lc2h.config.ConfigManager;
+import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.lc2h.util.batch.CpuBatchScheduler;
 import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.util.server.ServerTickLoad;
+import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
+import org.admany.lc2h.worldgen.lostcities.DeferredTreeQueue;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -144,10 +145,14 @@ public class ChunkPostProcessor {
     private static final ConcurrentHashMap<ResourceKey<Level>, PendingCheckQueue> PENDING_FLOATING = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<ResourceKey<Level>, IDimensionInfo> DIMENSION_INFO_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<ChunkScanKey, Boolean> CITY_CHUNK_CACHE = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<ChunkScanKey, Long> RECENT_SCAN_ENQUEUE_MS = new ConcurrentHashMap<>();
+    private static final long CHUNK_SCAN_ENQUEUE_COOLDOWN_MS = Math.max(250L,
+        Long.getLong("lc.floating.chunk_enqueue_cooldown_ms", 5000L));
 
     private static final class PendingCheckQueue {
         private final ConcurrentLinkedQueue<Long> queue = new ConcurrentLinkedQueue<>();
         private final AtomicInteger size = new AtomicInteger();
+        private final ConcurrentHashMap<Long, Boolean> dedupe = new ConcurrentHashMap<>();
         private volatile ResourceKey<Level> dimensionKey;
         private volatile ServerLevel level;
     }
@@ -834,6 +839,10 @@ public class ChunkPostProcessor {
         } catch (Throwable ignored) {
         }
 
+        if (!shouldEnqueueChunkScan(key)) {
+            return;
+        }
+
         int minY = chunk.getLevel().getMinBuildHeight();
         CHUNK_SCAN_PROGRESS.computeIfAbsent(key, k -> new ScanCursor(0, minY, 0));
     }
@@ -995,6 +1004,7 @@ public class ChunkPostProcessor {
     }
 
     private static ScanCursor processChunk(ServerLevel level, LevelChunk chunk, ScanCursor cursor, long deadlineNs, boolean floatingScanEnabled, int sampleBudget) {
+        long startNs = System.nanoTime();
         int minY = level.getMinBuildHeight();
         int maxY = level.getMaxBuildHeight() - 1;
         int baseX = chunk.getPos().getMinBlockX();
@@ -1005,6 +1015,7 @@ public class ChunkPostProcessor {
 
         ScanCursor current = cursor;
         int samples = 0;
+        try {
         while (samples < budget) {
             if (System.nanoTime() > deadlineNs) {
                 // Yield to the next tick; keep the cursor so we can resume.
@@ -1034,7 +1045,10 @@ public class ChunkPostProcessor {
             BlockState state = chunk.getBlockState(pos);
 
             if (floatingScanEnabled && shouldWatchFloatingCandidate(state)) {
-                if (shouldRemoveFloatingCandidate(level, pos, state)) {
+                long floatingStartNs = System.nanoTime();
+                boolean remove = shouldRemoveFloatingCandidate(level, pos, state);
+                Lc2hTimingRegistry.record("chunk_post.floating_candidate_check", System.nanoTime() - floatingStartNs);
+                if (remove) {
                     level.removeBlockEntity(pos);
                     level.setBlock(pos, AIR_STATE, SAFE_SET_FLAGS);
                     LCLogger.debug("Removed floating vegetation on chunk scan at {}", pos);
@@ -1043,7 +1057,9 @@ public class ChunkPostProcessor {
             }
 
             if (doubleBlockEnabled && hasDoubleHalf(state)) {
+                long repairStartNs = System.nanoTime();
                 repairDoubleHalf(level, pos, state);
+                Lc2hTimingRegistry.record("chunk_post.double_block_repair", System.nanoTime() - repairStartNs);
             }
 
             samples++;
@@ -1051,21 +1067,28 @@ public class ChunkPostProcessor {
         }
 
         return current;
+        } finally {
+            Lc2hTimingRegistry.record("chunk_post.process_chunk", System.nanoTime() - startNs);
+        }
     }
 
     private static void submitAsyncScan(ServerLevel level, ChunkScanKey key, LevelChunk chunk, ScanCursor cursor, boolean floatingScanEnabled, int sampleBudget) {
         int budget = Math.max(MIN_SAMPLES_PER_TASK, Math.min(SAMPLES_PER_CHUNK, sampleBudget));
         CpuBatchScheduler.submit("chunk_post_scan", () -> {
+            long startNs = System.nanoTime();
             try {
                 ChunkScanResult result = scanChunkAsync(key, chunk, cursor, floatingScanEnabled, budget);
                 ServerRescheduler.runOnServer(() -> applyScanResult(level, result));
             } catch (Throwable t) {
                 INFLIGHT_CHUNK_SCANS.remove(key);
+            } finally {
+                Lc2hTimingRegistry.record("chunk_post.submit_async_scan", System.nanoTime() - startNs);
             }
         });
     }
 
     private static ChunkScanResult scanChunkAsync(ChunkScanKey key, LevelChunk chunk, ScanCursor cursor, boolean floatingScanEnabled, int sampleBudget) {
+        long startNs = System.nanoTime();
         int minY = chunk.getLevel().getMinBuildHeight();
         int maxY = chunk.getLevel().getMaxBuildHeight() - 1;
         int baseX = chunk.getPos().getMinBlockX();
@@ -1079,6 +1102,7 @@ public class ChunkPostProcessor {
         List<Long> floating = null;
         List<Long> doubleBlocks = null;
 
+        try {
         while (samples < budget) {
             if (current.y < minY) {
                 current = new ScanCursor(current.x, minY, current.z);
@@ -1114,9 +1138,11 @@ public class ChunkPostProcessor {
                 BlockPos.MutableBlockPos below = LOCAL_BELOW_POS.get();
                 below.set(pos.getX(), pos.getY() - 1, pos.getZ());
                 try {
+                    long candidateStartNs = System.nanoTime();
                     BlockState belowState = chunk.getBlockState(below);
                     boolean unsupported = isUnsupportedSupport(levelFromChunk(chunk), below, belowState);
                     boolean queueCandidate = unsupported;
+                    Lc2hTimingRegistry.record("chunk_post.async_floating_candidate", System.nanoTime() - candidateStartNs);
                     if (queueCandidate) {
                         if (floating == null) {
                             floating = new java.util.ArrayList<>();
@@ -1139,6 +1165,9 @@ public class ChunkPostProcessor {
         }
 
         return new ChunkScanResult(key, current, floating == null ? List.of() : floating, doubleBlocks == null ? List.of() : doubleBlocks);
+        } finally {
+            Lc2hTimingRegistry.record("chunk_post.scan_chunk_async", System.nanoTime() - startNs);
+        }
     }
 
     private static ServerLevel levelFromChunk(LevelChunk chunk) {
@@ -1149,6 +1178,7 @@ public class ChunkPostProcessor {
     }
 
     private static void applyScanResult(ServerLevel level, ChunkScanResult result) {
+        long startNs = System.nanoTime();
         if (result == null) {
             return;
         }
@@ -1175,7 +1205,10 @@ public class ChunkPostProcessor {
                 continue;
             }
             BlockState state = level.getBlockState(pos);
-            if (shouldRemoveFloatingCandidate(level, pos, state)) {
+            long floatingStartNs = System.nanoTime();
+            boolean remove = shouldRemoveFloatingCandidate(level, pos, state);
+            Lc2hTimingRegistry.record("chunk_post.apply_floating_candidate", System.nanoTime() - floatingStartNs);
+            if (remove) {
                 level.removeBlockEntity(pos);
                 level.setBlock(pos, AIR_STATE, SAFE_SET_FLAGS);
                 FIXED_FLOATING++;
@@ -1192,7 +1225,9 @@ public class ChunkPostProcessor {
             }
             BlockState state = level.getBlockState(pos);
             if (hasDoubleHalf(state)) {
+                long repairStartNs = System.nanoTime();
                 repairDoubleHalf(level, pos, state);
+                Lc2hTimingRegistry.record("chunk_post.apply_double_block_repair", System.nanoTime() - repairStartNs);
             }
         }
 
@@ -1204,6 +1239,7 @@ public class ChunkPostProcessor {
         }
 
         maybeFinishRescan(level);
+        Lc2hTimingRegistry.record("chunk_post.apply_scan_result", System.nanoTime() - startNs);
     }
 
     private static void maybeFinishRescan(ServerLevel level) {
@@ -1228,11 +1264,18 @@ public class ChunkPostProcessor {
         // Conservative cap; actual time budget is the primary limiter.
         // ~0.75ms per chunk is a rough upper bound for typical scans.
         int byBudget = (int) Math.ceil(workBudgetMs / 0.75D);
-        return Math.max(1, Math.min(8, Math.max(MAX_CHUNKS_PER_TICK, byBudget)));
+        int value = Math.max(1, Math.min(8, Math.max(MAX_CHUNKS_PER_TICK, byBudget)));
+        int deferredTrees = DeferredTreeQueue.pendingCountAll() + DeferredTreeQueue.readyCountAll();
+        if (CHUNK_SCAN_PROGRESS.size() >= QUEUE_ALERT_THRESHOLD || deferredTrees >= 96) {
+            value = Math.max(1, value / 2);
+        }
+        return value;
     }
 
     private static int computeScanSamplesPerTask(double workBudgetMs, double avgTickMs, int playerCount, boolean threaded) {
         int samples = threaded ? Math.max(MIN_SAMPLES_PER_TASK, SAMPLES_PER_CHUNK / 2) : SAMPLES_PER_CHUNK;
+        int deferredTrees = DeferredTreeQueue.pendingCountAll() + DeferredTreeQueue.readyCountAll();
+        int backlog = CHUNK_SCAN_PROGRESS.size();
 
         if (avgTickMs >= TICK_TIME_BUDGET_MS * 0.95D || workBudgetMs <= 0.5D) {
             samples = Math.max(MIN_SAMPLES_PER_TASK, samples / 2);
@@ -1240,6 +1283,14 @@ public class ChunkPostProcessor {
             samples = Math.max(MIN_SAMPLES_PER_TASK, (samples * 2) / 3);
         } else if (playerCount <= 0 && workBudgetMs >= 2.0D) {
             samples = Math.min(SAMPLES_PER_CHUNK, samples + 16);
+        }
+        if (backlog >= QUEUE_ALERT_THRESHOLD) {
+            samples = Math.max(MIN_SAMPLES_PER_TASK, (samples * 3) / 4);
+        }
+        if (deferredTrees >= 96) {
+            samples = Math.max(MIN_SAMPLES_PER_TASK, samples / 2);
+        } else if (deferredTrees >= 48) {
+            samples = Math.max(MIN_SAMPLES_PER_TASK, (samples * 3) / 4);
         }
 
         return Math.max(MIN_SAMPLES_PER_TASK, Math.min(SAMPLES_PER_CHUNK, samples));
@@ -1270,6 +1321,12 @@ public class ChunkPostProcessor {
         if (backlog >= QUEUE_ALERT_THRESHOLD && slack > 3.0D) {
             next += 0.5D;
         }
+        int deferredTrees = DeferredTreeQueue.pendingCountAll() + DeferredTreeQueue.readyCountAll();
+        if (deferredTrees >= 96) {
+            next *= 0.60D;
+        } else if (deferredTrees >= 48) {
+            next *= 0.80D;
+        }
 
         // Clamp and slightly smooth to avoid oscillation.
         next = Math.max(MIN_WORK_TIME_PER_TICK_MS, Math.min(cap, next));
@@ -1288,6 +1345,7 @@ public class ChunkPostProcessor {
     }
 
     private static void drainAll(ServerLevel level) {
+        long startNs = System.nanoTime();
         int processed = 0;
         ResourceLocation dimension = level.dimension().location();
         while (!CHUNK_SCAN_PROGRESS.isEmpty()) {
@@ -1356,6 +1414,7 @@ public class ChunkPostProcessor {
         if (CHUNK_SCAN_PROGRESS.isEmpty()) {
             BATCH_IN_FLIGHT.set(false);
         }
+        Lc2hTimingRegistry.record("chunk_post.drain_all", System.nanoTime() - startNs);
     }
 
     private static void enqueueLoadedChunks(ServerLevel level) {
@@ -1392,6 +1451,9 @@ public class ChunkPostProcessor {
                             continue;
                         }
                         ChunkScanKey key = chunkKey(level.dimension().location(), chunk.getPos().x, chunk.getPos().z);
+                        if (!shouldEnqueueChunkScan(key)) {
+                            continue;
+                        }
                         int minY = chunk.getLevel().getMinBuildHeight();
                         if (CHUNK_SCAN_PROGRESS.putIfAbsent(key, new ScanCursor(0, minY, 0)) == null) {
                             backlog++;
@@ -1579,6 +1641,7 @@ public class ChunkPostProcessor {
     private static void markChunkComplete(LevelChunk chunk) {
         ChunkScanKey key = chunkKey(chunk.getLevel().dimension().location(), chunk.getPos().x, chunk.getPos().z);
         COMPLETED_CHUNKS.add(key);
+        RECENT_SCAN_ENQUEUE_MS.put(key, System.currentTimeMillis());
     }
 
     public static void forceRescanChunk(ServerLevel level, net.minecraft.world.level.ChunkPos pos) {
@@ -1595,13 +1658,32 @@ public class ChunkPostProcessor {
             }
             return;
         }
+        if (!shouldEnqueueChunkScan(key)) {
+            return;
+        }
         int minY = level.getMinBuildHeight();
-        CHUNK_SCAN_PROGRESS.put(key, new ScanCursor(0, minY, 0));
+        CHUNK_SCAN_PROGRESS.putIfAbsent(key, new ScanCursor(0, minY, 0));
         LCLogger.info("ChunkPostProcessor: forced rescan queued for chunk ({}, {})", pos.x, pos.z);
     }
 
     private static ChunkScanKey chunkKey(ResourceLocation dimension, int chunkX, int chunkZ) {
         return new ChunkScanKey(dimension, chunkX, chunkZ);
+    }
+
+    private static boolean shouldEnqueueChunkScan(ChunkScanKey key) {
+        if (key == null) {
+            return false;
+        }
+        if (CHUNK_SCAN_PROGRESS.containsKey(key) || INFLIGHT_CHUNK_SCANS.contains(key)) {
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        Long last = RECENT_SCAN_ENQUEUE_MS.get(key);
+        if (last != null && (now - last) < CHUNK_SCAN_ENQUEUE_COOLDOWN_MS) {
+            return false;
+        }
+        RECENT_SCAN_ENQUEUE_MS.put(key, now);
+        return true;
     }
 
     private static void enqueueFloatingCheck(ServerLevel level, BlockPos pos) {
@@ -1615,8 +1697,13 @@ public class ChunkPostProcessor {
         PendingCheckQueue bucket = PENDING_FLOATING.computeIfAbsent(dimension, k -> new PendingCheckQueue());
         bucket.dimensionKey = dimension;
         bucket.level = level;
+        long packed = pos.asLong();
+        if (bucket.dedupe.putIfAbsent(packed, Boolean.TRUE) != null) {
+            return;
+        }
         int pending = bucket.size.incrementAndGet();
         if (pending > MAX_PENDING_FLOATING_CHECKS) {
+            bucket.dedupe.remove(packed);
             bucket.size.decrementAndGet();
             if (LOGGED_FLOATING_QUEUE_HARD_LIMIT.compareAndSet(false, true)) {
                 LCLogger.warn(
@@ -1627,7 +1714,7 @@ public class ChunkPostProcessor {
             }
             return;
         }
-        bucket.queue.add(pos.asLong());
+        bucket.queue.add(packed);
         if (pending < MAX_PENDING_FLOATING_CHECKS / 2) {
             LOGGED_FLOATING_QUEUE_HARD_LIMIT.set(false);
         }
@@ -1644,6 +1731,12 @@ public class ChunkPostProcessor {
             return;
         }
         int remainingBudget = MAX_FLOATING_CHECKS_PER_TICK;
+        int deferredTrees = DeferredTreeQueue.pendingCountAll() + DeferredTreeQueue.readyCountAll();
+        if (deferredTrees >= 96) {
+            remainingBudget = Math.max(8, remainingBudget / 4);
+        } else if (deferredTrees >= 48) {
+            remainingBudget = Math.max(8, remainingBudget / 2);
+        }
         boolean pending = false;
         for (PendingCheckQueue bucket : PENDING_FLOATING.values()) {
             if (remainingBudget <= 0) {
@@ -1664,6 +1757,7 @@ public class ChunkPostProcessor {
                 if (posLong == null) {
                     break;
                 }
+                bucket.dedupe.remove(posLong);
                 if (bucket.size.decrementAndGet() < 0) {
                     bucket.size.set(0);
                 }
@@ -1735,6 +1829,27 @@ public class ChunkPostProcessor {
         }
         ServerLevel level = resolveServerLevel(region);
         if (level == null) {
+            return;
+        }
+        int cx = pos.getX() >> 4;
+        int cz = pos.getZ() >> 4;
+        if (!isCityChunkCached(level, cx, cz)) {
+            return;
+        }
+        ChunkScanKey key = chunkKey(level.dimension().location(), cx, cz);
+        PROTECTED_TREE_BLOCKS
+            .computeIfAbsent(key, k -> new java.util.concurrent.ConcurrentHashMap<>())
+            .put(pos.asLong(), Boolean.TRUE);
+    }
+
+    public static void markTreePlacement(ServerLevel level, BlockPos pos, BlockState state) {
+        if (!ConfigManager.CITY_BLEND_TREE_SEAM_FIX) {
+            return;
+        }
+        if (level == null || pos == null || state == null) {
+            return;
+        }
+        if (!isTreeProtectedBlock(state)) {
             return;
         }
         int cx = pos.getX() >> 4;
@@ -1832,7 +1947,7 @@ public class ChunkPostProcessor {
         boolean isCity = false;
         if (dimInfo != null) {
             try {
-                isCity = BuildingInfo.isCity(new ChunkCoord(level.dimension(), cx, cz), dimInfo);
+                isCity = ChunkRoleProbe.isCity(dimInfo, level.dimension(), cx, cz);
             } catch (Throwable ignored) {
                 isCity = false;
             }

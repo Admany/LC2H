@@ -10,6 +10,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.WorldGenLevel;
+import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 
 import java.util.Arrays;
 
@@ -124,7 +125,7 @@ public final class CityEdgeBlender {
             if (world != null && !world.hasChunk(check.chunkX(), check.chunkZ())) {
                 break;
             }
-            if (!BuildingInfo.isCity(check, info.provider)) {
+            if (!ChunkRoleProbe.isCity(info.provider, c.dimension(), check.chunkX(), check.chunkZ())) {
                 int distBlocks = x + ((d - 1) << 4);
                 int sampleX = baseX - (d << 4) + 15;
                 int sampleZ = baseZ + z;
@@ -143,7 +144,7 @@ public final class CityEdgeBlender {
             if (world != null && !world.hasChunk(check.chunkX(), check.chunkZ())) {
                 break;
             }
-            if (!BuildingInfo.isCity(check, info.provider)) {
+            if (!ChunkRoleProbe.isCity(info.provider, c.dimension(), check.chunkX(), check.chunkZ())) {
                 int distBlocks = (15 - x) + ((d - 1) << 4);
                 int sampleX = baseX + (d << 4);
                 int sampleZ = baseZ + z;
@@ -162,7 +163,7 @@ public final class CityEdgeBlender {
             if (world != null && !world.hasChunk(check.chunkX(), check.chunkZ())) {
                 break;
             }
-            if (!BuildingInfo.isCity(check, info.provider)) {
+            if (!ChunkRoleProbe.isCity(info.provider, c.dimension(), check.chunkX(), check.chunkZ())) {
                 int distBlocks = z + ((d - 1) << 4);
                 int sampleX = baseX + x;
                 int sampleZ = baseZ - (d << 4) + 15;
@@ -181,7 +182,7 @@ public final class CityEdgeBlender {
             if (world != null && !world.hasChunk(check.chunkX(), check.chunkZ())) {
                 break;
             }
-            if (!BuildingInfo.isCity(check, info.provider)) {
+            if (!ChunkRoleProbe.isCity(info.provider, c.dimension(), check.chunkX(), check.chunkZ())) {
                 int distBlocks = (15 - z) + ((d - 1) << 4);
                 int sampleX = baseX + x;
                 int sampleZ = baseZ + (d << 4);
