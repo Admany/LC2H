@@ -54,6 +54,9 @@
     "lc2h.config.option.city_blend_tree_seam_fix.desc": "阻止树木跨越城市与原版区块边界生成，避免出现被切断的树冠。",
     "lc2h.config.option.city_blend_tree_seam_buffer.title": "树木边界缓冲 (格)",
     "lc2h.config.option.city_blend_tree_seam_buffer.desc": "树木在靠近城市边界时，距离区块边缘多少格内会被禁止生成。",
+
+"lc2h.config.option.tree_seam_radius_multiplier.title": "边界树木半径倍率",
+"lc2h.config.option.tree_seam_radius_multiplier.desc": "调整边界处树木扩散范围的自动检测倍率。如果模组添加的大型树木仍被切割，可适当提高此值。",
     "lc2h.config.option.city_blend_width.title": "融合范围 (格)",
     "lc2h.config.option.city_blend_width.desc": "城市融合效果向野外延伸的距离。",
     "lc2h.config.option.city_blend_softness.title": "融合柔和度",

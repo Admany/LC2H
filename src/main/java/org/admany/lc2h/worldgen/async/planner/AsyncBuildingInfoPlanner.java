@@ -2,12 +2,14 @@ package org.admany.lc2h.worldgen.async.planner;
 
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
+import mcjty.lostcities.api.LostChunkCharacteristics;
 import net.minecraft.server.MinecraftServer;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.concurrency.async.AsyncManager;
 import org.admany.lc2h.data.cache.CacheBudgetManager;
 import org.admany.lc2h.concurrency.parallel.AdaptiveBatchController;
 import org.admany.lc2h.concurrency.parallel.AdaptiveConcurrencyLimiter;
+import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
@@ -109,6 +111,10 @@ public final class AsyncBuildingInfoPlanner {
 
     private static final AtomicLong EWMA_NANOS_PER_TASK = new AtomicLong(0L);
     private static volatile long lastTuneNs = 0L;
+    private static final long AREA_INVALIDATE_SUPPRESS_MS = Math.max(250L,
+        Long.getLong("lc2h.buildinginfo.invalidateSuppressMs", 3000L));
+    private static final ConcurrentHashMap<ChunkCoord, Long> RECENT_AREA_INVALIDATIONS = new ConcurrentHashMap<>();
+    private static final AtomicLong SKIPPED_FULL_WARMUPS = new AtomicLong(0L);
 
     private record ReadyResult(ChunkCoord coord, Object value, long nowMs) {}
     private static final ConcurrentHashMap<ChunkCoord, ReadyResult> READY_RESULTS = new ConcurrentHashMap<>();
@@ -167,6 +173,7 @@ public final class AsyncBuildingInfoPlanner {
         boolean debugLogging = AsyncChunkWarmup.isWarmupDebugLoggingEnabled();
 
         if (GPUMemoryManager.getGPUData(coord, GPU_DATA_CACHE) != null) {
+            removeCachedEntry(coord, BUILDING_INFO_CACHE.get(coord));
             if (debugLogging) {
                 LC2H.LOGGER.debug("Used GPU data for building info in {}", coord);
             }
@@ -222,6 +229,7 @@ public final class AsyncBuildingInfoPlanner {
         maybePrune(now);
 
         if (GPUMemoryManager.getGPUData(coord, GPU_DATA_CACHE) != null) {
+            removeCachedEntry(coord, BUILDING_INFO_CACHE.get(coord));
             SPAWN_PREFETCH.remove(coord);
             SPAWN_PREFETCH_COUNT.decrementAndGet();
             return;
@@ -359,19 +367,31 @@ public final class AsyncBuildingInfoPlanner {
         long startNs = System.nanoTime();
         try {
             INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() + 1);
+            long characteristicsStartNs = System.nanoTime();
             mcjty.lostcities.worldgen.lost.BuildingInfo.getChunkCharacteristics(coord, provider);
+            Lc2hTimingRegistry.record("building_info.characteristics", System.nanoTime() - characteristicsStartNs);
+
+            long getInfoStartNs = System.nanoTime();
             Object buildingInfo = mcjty.lostcities.worldgen.lost.BuildingInfo.getBuildingInfo(coord, provider);
+            Lc2hTimingRegistry.record("building_info.get_info", System.nanoTime() - getInfoStartNs);
+
+            long acceptStartNs = System.nanoTime();
             acceptBuildingInfoResult(coord, buildingInfo, System.currentTimeMillis());
+            Lc2hTimingRegistry.record("building_info.accept_result", System.nanoTime() - acceptStartNs);
         } catch (Throwable t) {
             boolean debugLogging = AsyncChunkWarmup.isWarmupDebugLoggingEnabled()
                 || org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING;
             if (debugLogging) {
                 LC2H.LOGGER.debug("Sync building info warmup failed for {}", coord, t);
             }
+            long acceptStartNs = System.nanoTime();
             acceptBuildingInfoResult(coord, new FailureMarker(System.nanoTime() + FAILURE_RETRY_DELAY_NS), System.currentTimeMillis());
+            Lc2hTimingRegistry.record("building_info.accept_failure", System.nanoTime() - acceptStartNs);
         } finally {
             INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() - 1);
-            recordTiming(System.nanoTime() - startNs);
+            long elapsedNs = System.nanoTime() - startNs;
+            recordTiming(elapsedNs);
+            Lc2hTimingRegistry.record("building_info.sync_warmup", elapsedNs);
             token.close();
         }
     }
@@ -389,6 +409,11 @@ public final class AsyncBuildingInfoPlanner {
      */
     public static void invalidateArea(ChunkCoord topLeft, int areaSize) {
         if (topLeft == null || areaSize <= 0) {
+            return;
+        }
+        long nowMs = System.currentTimeMillis();
+        Long previous = RECENT_AREA_INVALIDATIONS.put(topLeft, nowMs);
+        if (previous != null && (nowMs - previous) < AREA_INVALIDATE_SUPPRESS_MS) {
             return;
         }
 
@@ -458,19 +483,39 @@ public final class AsyncBuildingInfoPlanner {
                                         boolean debugLogging,
                                         long startTime,
                                         boolean highPriority) {
+        long prepStartNs = System.nanoTime();
         ensureMultiChunkReady(provider, coord);
+        Lc2hTimingRegistry.record("building_info.ensure_multichunk_ready", System.nanoTime() - prepStartNs);
+
+        long tuneStartNs = System.nanoTime();
         tuneIfNeeded();
+        Lc2hTimingRegistry.record("building_info.tune", System.nanoTime() - tuneStartNs);
         AdaptiveConcurrencyLimiter.Token token = LIMITER.tryEnter();
         if (token == null) {
+            Lc2hTimingRegistry.record("building_info.limiter_blocked", 1L);
             rescheduleLimiterBlocked(provider, coord, debugLogging, startTime, highPriority);
             return;
         }
         long startNs = System.nanoTime();
         try {
             INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() + 1);
-            mcjty.lostcities.worldgen.lost.BuildingInfo.getChunkCharacteristics(coord, provider);
+            long characteristicsStartNs = System.nanoTime();
+            LostChunkCharacteristics characteristics = mcjty.lostcities.worldgen.lost.BuildingInfo.getChunkCharacteristics(coord, provider);
+            Lc2hTimingRegistry.record("building_info.characteristics", System.nanoTime() - characteristicsStartNs);
+            if (!highPriority && shouldSkipFullWarmup(characteristics)) {
+                SKIPPED_FULL_WARMUPS.incrementAndGet();
+                clearWarmupReservation(coord);
+                Lc2hTimingRegistry.record("building_info.skip_full", 1L);
+                return;
+            }
+
+            long getInfoStartNs = System.nanoTime();
             Object buildingInfo = mcjty.lostcities.worldgen.lost.BuildingInfo.getBuildingInfo(coord, provider);
+            Lc2hTimingRegistry.record("building_info.get_info", System.nanoTime() - getInfoStartNs);
+
+            long acceptStartNs = System.nanoTime();
             acceptBuildingInfoResult(coord, buildingInfo, System.currentTimeMillis());
+            Lc2hTimingRegistry.record("building_info.accept_result", System.nanoTime() - acceptStartNs);
             if (debugLogging) {
                 long endTime = System.nanoTime();
                 LC2H.LOGGER.debug("Finished BuildingInfo compute for {} in {} ms", coord, (endTime - startTime) / 1_000_000);
@@ -479,10 +524,14 @@ public final class AsyncBuildingInfoPlanner {
             if (debugLogging) {
                 LC2H.LOGGER.debug("Async building info warmup failed for {}", coord, t);
             }
+            long acceptStartNs = System.nanoTime();
             acceptBuildingInfoResult(coord, new FailureMarker(System.nanoTime() + FAILURE_RETRY_DELAY_NS), System.currentTimeMillis());
+            Lc2hTimingRegistry.record("building_info.accept_failure", System.nanoTime() - acceptStartNs);
         } finally {
             INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() - 1);
-            recordTiming(System.nanoTime() - startNs);
+            long elapsedNs = System.nanoTime() - startNs;
+            recordTiming(elapsedNs);
+            Lc2hTimingRegistry.record(highPriority ? "building_info.high_priority_total" : "building_info.async_total", elapsedNs);
             token.close();
         }
     }
@@ -491,24 +540,44 @@ public final class AsyncBuildingInfoPlanner {
         if (provider == null || coords == null || coords.isEmpty()) {
             return;
         }
-        long startTime = System.nanoTime();
+        long batchStartNs = System.nanoTime();
         for (ChunkCoord coord : coords) {
+            long entryStartNs = System.nanoTime();
             try {
                 AdaptiveConcurrencyLimiter.Token token = LIMITER.tryEnter();
                 if (token == null) {
-                    rescheduleLimiterBlocked(provider, coord, false, startTime, true);
+                    Lc2hTimingRegistry.record("building_info.limiter_blocked", 1L);
+                    rescheduleLimiterBlocked(provider, coord, false, batchStartNs, true);
                     continue;
                 }
                 try {
                     INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() + 1);
-                    mcjty.lostcities.worldgen.lost.BuildingInfo.getChunkCharacteristics(coord, provider);
+                    long characteristicsStartNs = System.nanoTime();
+                    LostChunkCharacteristics characteristics = mcjty.lostcities.worldgen.lost.BuildingInfo.getChunkCharacteristics(coord, provider);
+                    Lc2hTimingRegistry.record("building_info.characteristics", System.nanoTime() - characteristicsStartNs);
+                    if (shouldSkipFullWarmup(characteristics)) {
+                        SKIPPED_FULL_WARMUPS.incrementAndGet();
+                        clearWarmupReservation(coord);
+                        Lc2hTimingRegistry.record("building_info.skip_full", 1L);
+                        continue;
+                    }
+
+                    long getInfoStartNs = System.nanoTime();
                     Object buildingInfo = mcjty.lostcities.worldgen.lost.BuildingInfo.getBuildingInfo(coord, provider);
+                    Lc2hTimingRegistry.record("building_info.get_info", System.nanoTime() - getInfoStartNs);
+
+                    long acceptStartNs = System.nanoTime();
                     acceptBuildingInfoResult(coord, buildingInfo, System.currentTimeMillis());
+                    Lc2hTimingRegistry.record("building_info.accept_result", System.nanoTime() - acceptStartNs);
                 } catch (Throwable t) {
+                    long acceptStartNs = System.nanoTime();
                     acceptBuildingInfoResult(coord, new FailureMarker(System.nanoTime() + FAILURE_RETRY_DELAY_NS), System.currentTimeMillis());
+                    Lc2hTimingRegistry.record("building_info.accept_failure", System.nanoTime() - acceptStartNs);
                 } finally {
                     INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() - 1);
-                    recordTiming(System.nanoTime() - startTime);
+                    long elapsedNs = System.nanoTime() - entryStartNs;
+                    recordTiming(elapsedNs);
+                    Lc2hTimingRegistry.record("building_info.batch_entry", elapsedNs);
                     token.close();
                 }
             } finally {
@@ -516,6 +585,7 @@ public final class AsyncBuildingInfoPlanner {
                 SPAWN_PREFETCH_COUNT.decrementAndGet();
             }
         }
+        Lc2hTimingRegistry.record("building_info.batch_total", System.nanoTime() - batchStartNs);
     }
 
     private static void rescheduleLimiterBlocked(IDimensionInfo provider,
@@ -547,6 +617,7 @@ public final class AsyncBuildingInfoPlanner {
         if (debugLogging) {
             LC2H.LOGGER.debug("BuildingInfo limiter saturated; retrying {} in {} ms", coord, delayMs);
         }
+        Lc2hTimingRegistry.record(highPriority ? "building_info.retry_spawn" : "building_info.retry_limiter", TimeUnit.MILLISECONDS.toNanos(delayMs));
         enqueueLimiterRetry(provider, coord, debugLogging, startTime, highPriority, nowMs + delayMs);
     }
 
@@ -634,6 +705,32 @@ public final class AsyncBuildingInfoPlanner {
         }
     }
 
+    private static boolean shouldSkipFullWarmup(LostChunkCharacteristics characteristics) {
+        if (characteristics == null) {
+            return false;
+        }
+        if (characteristics.isCity) {
+            return false;
+        }
+        if (characteristics.couldHaveBuilding) {
+            return false;
+        }
+        if (characteristics.buildingType != null) {
+            return false;
+        }
+        return characteristics.multiPos == null || characteristics.multiPos.isSingle();
+    }
+
+    private static void clearWarmupReservation(ChunkCoord coord) {
+        if (coord == null) {
+            return;
+        }
+        Object cached = BUILDING_INFO_CACHE.get(coord);
+        if (cached instanceof InFlightMarker) {
+            removeCachedEntry(coord, cached);
+        }
+    }
+
     private static void acceptBuildingInfoResult(ChunkCoord coord, Object value, long nowMs) {
         if (coord == null) {
             return;
@@ -656,7 +753,9 @@ public final class AsyncBuildingInfoPlanner {
             return;
         }
         try {
+            long startNs = System.nanoTime();
             AsyncMultiChunkPlanner.syncWarmup(provider, coord);
+            Lc2hTimingRegistry.record("building_info.multichunk_sync", System.nanoTime() - startNs);
         } catch (Throwable ignored) {
         }
     }
@@ -808,6 +907,22 @@ public final class AsyncBuildingInfoPlanner {
         if (count >= BUILDING_INFO_CACHE_PRUNE_EVERY) {
             BUILDING_INFO_PRUNE_COUNTER.set(0);
             pruneExpiredEntries(nowMs, BUILDING_INFO_CACHE_PRUNE_SCAN);
+            pruneRecentAreaInvalidations(nowMs);
+        }
+    }
+
+    private static void pruneRecentAreaInvalidations(long nowMs) {
+        if (RECENT_AREA_INVALIDATIONS.isEmpty()) {
+            return;
+        }
+        long ttl = Math.max(AREA_INVALIDATE_SUPPRESS_MS, BUILDING_INFO_CACHE_TTL_MS > 0L
+            ? Math.min(BUILDING_INFO_CACHE_TTL_MS, TimeUnit.MINUTES.toMillis(2))
+            : TimeUnit.MINUTES.toMillis(2));
+        for (Map.Entry<ChunkCoord, Long> entry : RECENT_AREA_INVALIDATIONS.entrySet()) {
+            Long ts = entry.getValue();
+            if (ts != null && (nowMs - ts) > ttl) {
+                RECENT_AREA_INVALIDATIONS.remove(entry.getKey(), ts);
+            }
         }
     }
 

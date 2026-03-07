@@ -25,6 +25,7 @@ import org.admany.lc2h.dev.diagnostics.DiagnosticsReporter;
 import org.admany.lc2h.dev.diagnostics.StallDetector;
 import org.admany.lc2h.dev.diagnostics.AsyncIssueMonitor;
 import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
+import org.admany.lc2h.dev.diagnostics.Lc2hMonitorService;
 import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.admany.lc2h.util.server.ServerRescheduler;
@@ -87,6 +88,10 @@ public class LC2H {
         Long.getLong("lc2h.async.startDelayTicks", 200L));
     private static final java.util.concurrent.atomic.AtomicLong ASYNC_START_TICK = new java.util.concurrent.atomic.AtomicLong(-1L);
     private static final java.util.concurrent.atomic.AtomicBoolean ASYNC_DELAYED = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static final java.time.Duration CACHE_MAINTENANCE_INTERVAL = java.time.Duration.ofMinutes(
+        Math.max(2L, Long.getLong("lc2h.cache.maintenanceIntervalMinutes", 10L)));
+    private static final java.time.Duration CACHE_MAINTENANCE_RETENTION = java.time.Duration.ofMinutes(
+        Math.max(CACHE_MAINTENANCE_INTERVAL.toMinutes(), Long.getLong("lc2h.cache.maintenanceRetentionMinutes", 20L)));
 
     @SuppressWarnings("removal")
     public LC2H() {
@@ -97,7 +102,7 @@ public class LC2H {
         ChunkDebugNetwork.register();
         FrustumDebugNetwork.register();
         try {
-            CacheManager.startMaintenance(java.time.Duration.ofMinutes(5), java.time.Duration.ofMinutes(10));
+            CacheManager.startMaintenance(CACHE_MAINTENANCE_INTERVAL, CACHE_MAINTENANCE_RETENTION);
         } catch (Throwable ignored) {
         }
 
@@ -317,6 +322,39 @@ public class LC2H {
                     })
                 ).then(
                     Commands.literal("stats").executes(ctx -> reportStats(ctx.getSource()))
+                ).then(
+                    Commands.literal("monitor")
+                        .executes(ctx -> {
+                            ctx.getSource().sendSuccess(() -> Lc2hMonitorService.status(ctx.getSource().getServer()), false);
+                            return 1;
+                        })
+                        .then(Commands.literal("start")
+                            .executes(ctx -> {
+                                String initiator = ctx.getSource().getTextName();
+                                ctx.getSource().sendSuccess(() -> Lc2hMonitorService.start(ctx.getSource().getServer(), initiator, 60), false);
+                                return 1;
+                            })
+                            .then(Commands.argument("seconds", IntegerArgumentType.integer(10, 300))
+                                .executes(ctx -> {
+                                    String initiator = ctx.getSource().getTextName();
+                                    int seconds = IntegerArgumentType.getInteger(ctx, "seconds");
+                                    ctx.getSource().sendSuccess(() -> Lc2hMonitorService.start(ctx.getSource().getServer(), initiator, seconds), false);
+                                    return 1;
+                                })
+                            )
+                        )
+                        .then(Commands.literal("status")
+                            .executes(ctx -> {
+                                ctx.getSource().sendSuccess(() -> Lc2hMonitorService.status(ctx.getSource().getServer()), false);
+                                return 1;
+                            })
+                        )
+                        .then(Commands.literal("stop")
+                            .executes(ctx -> {
+                                ctx.getSource().sendSuccess(() -> Lc2hMonitorService.stop(ctx.getSource().getServer()), false);
+                                return 1;
+                            })
+                        )
                 ).then(
                     Commands.literal("chunkinfo").executes(ctx -> {
                         ServerPlayer player = ctx.getSource().getPlayerOrException();

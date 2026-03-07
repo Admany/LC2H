@@ -34,20 +34,28 @@ public final class ChunkGenTracker {
         DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
     private static final LongAdder PRIORITY_FOREGROUND = new LongAdder();
     private static final LongAdder PRIORITY_BACKGROUND = new LongAdder();
+    private static final LongAdder TOTAL_GENERATE_START = new LongAdder();
+    private static final LongAdder TOTAL_GENERATE_END = new LongAdder();
+    private static final LongAdder TOTAL_GENERATE_SKIP = new LongAdder();
+    private static final LongAdder TOTAL_BUILDING_INFO = new LongAdder();
+    private static final LongAdder TOTAL_MULTICHUNK_INTEGRATED = new LongAdder();
 
     private ChunkGenTracker() {
     }
 
     public static void recordGenerateStart(ChunkCoord coord) {
+        TOTAL_GENERATE_START.increment();
         record(coord, "generate-start", null);
     }
 
     public static void recordGenerateEnd(ChunkCoord coord) {
+        TOTAL_GENERATE_END.increment();
         record(coord, "generate-end", null);
         recordPriority(coord);
     }
 
     public static void recordGenerateSkip(ChunkCoord coord, String reason) {
+        TOTAL_GENERATE_SKIP.increment();
         record(coord, "generate-skip", reason);
     }
 
@@ -55,6 +63,7 @@ public final class ChunkGenTracker {
         if (info == null) {
             return;
         }
+        TOTAL_BUILDING_INFO.increment();
         ChunkCoord coord = null;
         String detail = null;
         try {
@@ -83,6 +92,7 @@ public final class ChunkGenTracker {
         if (topLeft == null || areaSize <= 0) {
             return;
         }
+        TOTAL_MULTICHUNK_INTEGRATED.increment();
         String detail = "topLeft=" + topLeft + " areaSize=" + areaSize;
         for (int dx = 0; dx < areaSize; dx++) {
             for (int dz = 0; dz < areaSize; dz++) {
@@ -230,6 +240,18 @@ public final class ChunkGenTracker {
 
     public static PrioritySnapshot prioritySnapshot() {
         return new PrioritySnapshot(PRIORITY_FOREGROUND.sum(), PRIORITY_BACKGROUND.sum());
+    }
+
+    public static GlobalSnapshot globalSnapshot() {
+        return new GlobalSnapshot(
+            TOTAL_GENERATE_START.sum(),
+            TOTAL_GENERATE_END.sum(),
+            TOTAL_GENERATE_SKIP.sum(),
+            TOTAL_BUILDING_INFO.sum(),
+            TOTAL_MULTICHUNK_INTEGRATED.sum(),
+            PRIORITY_FOREGROUND.sum(),
+            PRIORITY_BACKGROUND.sum()
+        );
     }
 
     private static void record(ChunkCoord coord, String event, String detail) {
@@ -382,5 +404,16 @@ public final class ChunkGenTracker {
     }
 
     public record PrioritySnapshot(long foreground, long background) {
+    }
+
+    public record GlobalSnapshot(
+        long generateStart,
+        long generateEnd,
+        long generateSkip,
+        long buildingInfo,
+        long multichunkIntegrated,
+        long priorityForeground,
+        long priorityBackground
+    ) {
     }
 }

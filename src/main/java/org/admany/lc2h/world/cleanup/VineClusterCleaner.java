@@ -1,9 +1,8 @@
 package org.admany.lc2h.world.cleanup;
 
 import mcjty.lostcities.setup.Registration;
-import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
-import mcjty.lostcities.worldgen.lost.BuildingInfo;
+import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
@@ -681,7 +680,7 @@ public final class VineClusterCleaner {
 
     private static boolean isCityChunk(IDimensionInfo dimInfo, ResourceKey<net.minecraft.world.level.Level> dim, int cx, int cz) {
         try {
-            return BuildingInfo.isCity(new ChunkCoord(dim, cx, cz), dimInfo);
+            return ChunkRoleProbe.isCity(dimInfo, dim, cx, cz);
         } catch (Throwable ignored) {
             return false;
         }

@@ -34,6 +34,12 @@ public class FeatureCache {
         Long.getLong("lc2h.featureCache.lookupTtlMinutes", 2L)));
     private static final long LOOKUP_MAX_ENTRIES = Math.max(256L,
         Long.getLong("lc2h.featureCache.lookupMaxEntries", 12_000L));
+    private static final double LOCAL_PROMOTE_THRESHOLD = Math.max(0.10D,
+        Math.min(1.00D, Double.parseDouble(System.getProperty("lc2h.featureCache.localPromoteThreshold", "0.75"))));
+    private static final double LOCAL_HARD_PRESSURE_THRESHOLD = Math.max(0.10D,
+        Math.min(1.00D, Double.parseDouble(System.getProperty("lc2h.featureCache.localHardPressureThreshold", "0.95"))));
+    private static final boolean CLEAR_DISK_ON_MEMORY_PRESSURE =
+        Boolean.parseBoolean(System.getProperty("lc2h.featureCache.clearDiskOnMemoryPressure", "false"));
 
     private static final String MEMORY_CACHE = "feature_memory";
     private static final String DISK_CACHE = "feature_disk";
@@ -111,12 +117,14 @@ public class FeatureCache {
                 }
             }
 
-            memoryCache.put(key, new LocalEntry(value, now));
-            pruneExpiredLocalEntries(now);
-            if (memoryCache.size() > MAX_MEMORY_CACHE_SIZE) {
-                String oldestKey = findOldestLocalKey();
-                memoryCache.remove(oldestKey);
-                LC2H.LOGGER.debug("[LC2H] Evicted memory cache entry: " + oldestKey);
+            if (shouldPromoteToLocal(useDiskCache, now)) {
+                memoryCache.put(key, new LocalEntry(value, now));
+                pruneExpiredLocalEntries(now);
+                if (memoryCache.size() > MAX_MEMORY_CACHE_SIZE) {
+                    String oldestKey = findOldestLocalKey();
+                    memoryCache.remove(oldestKey);
+                    LC2H.LOGGER.debug("[LC2H] Evicted memory cache entry: " + oldestKey);
+                }
             }
         } catch (Exception e) {
             LC2H.LOGGER.error("[LC2H] Error caching feature: " + e.getMessage(), e);
@@ -155,7 +163,9 @@ public class FeatureCache {
                     LC2H.LOGGER.debug("[LC2H] Could not retrieve from Quantified cache", e);
                 }
                 if (value != null) {
-                    memoryCache.put(key, new LocalEntry(value, now));
+                    if (shouldPromoteToLocal(checkDiskCache, now)) {
+                        memoryCache.put(key, new LocalEntry(value, now));
+                    }
                     return value;
                 }
             }
@@ -301,7 +311,7 @@ public class FeatureCache {
                 if (quantifiedMemoryCache != null) {
                     quantifiedMemoryCache.invalidateAll();
                 }
-                if (quantifiedDiskCache != null) {
+                if (CLEAR_DISK_ON_MEMORY_PRESSURE && quantifiedDiskCache != null) {
                     quantifiedDiskCache.invalidateAll();
                 }
             } catch (Exception e) {
@@ -517,6 +527,18 @@ public class FeatureCache {
         }
         quantifiedMemoryCache = memory;
         quantifiedDiskCache = disk;
+    }
+
+    private static boolean shouldPromoteToLocal(boolean fromDiskCache, long now) {
+        pruneExpiredLocalEntries(now);
+        int size = memoryCache.size();
+        if (size >= Math.max(1, (int) Math.floor(MAX_MEMORY_CACHE_SIZE * LOCAL_HARD_PRESSURE_THRESHOLD))) {
+            return false;
+        }
+        if (fromDiskCache && size >= Math.max(1, (int) Math.floor(MAX_MEMORY_CACHE_SIZE * LOCAL_PROMOTE_THRESHOLD))) {
+            return false;
+        }
+        return true;
     }
 
     private static CompletableFuture<Boolean> tryQuantifiedContainsAsync(String key, boolean checkDiskCache) {

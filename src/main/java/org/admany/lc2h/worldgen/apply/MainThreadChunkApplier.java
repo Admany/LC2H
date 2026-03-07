@@ -25,6 +25,7 @@ import org.admany.lc2h.client.frustum.ChunkPriorityManager;
 import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
+import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 
 import java.util.Comparator;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 
 
 @Mod.EventBusSubscriber(modid = LC2H.MODID)
@@ -63,6 +65,8 @@ public class MainThreadChunkApplier {
 
     private static final AtomicLong LAST_DRAIN_TICK = new AtomicLong(-1L);
     private static final AtomicInteger DRAIN_PASSES_THIS_TICK = new AtomicInteger(0);
+    private static final LongAdder TOTAL_APPLIED = new LongAdder();
+    private static final LongAdder TOTAL_CULLED = new LongAdder();
 
     private static final long DEFAULT_TICK_BUDGET_NS = TimeUnit.MILLISECONDS.toNanos(1);
     private static final long STARTUP_TICK_BUDGET_NS = TimeUnit.MILLISECONDS.toNanos(6);
@@ -70,10 +74,12 @@ public class MainThreadChunkApplier {
     private static final int STARTUP_MAX_TASKS_PER_TICK = 64;
     private static final int MAX_CREATE_CHUNK_REFRESH_PER_TICK = 4;
     private static final int MAX_CREATE_BLOCK_REFRESH_PER_TICK = 4;
+    private static final int MAX_RS_CHUNK_REFRESH_PER_TICK = 8;
     private static final int MAX_TICKER_REREGISTER_PER_TICK = 16;
     private static final long AUX_DRAIN_BUDGET_NS_PLAYERS = TimeUnit.MILLISECONDS.toNanos(1);
     private static final long AUX_DRAIN_BUDGET_NS_STARTUP = TimeUnit.MILLISECONDS.toNanos(3);
     private static final boolean CREATE_PRESENT = ModList.get().isLoaded("create");
+    private static final boolean REFINED_STORAGE_PRESENT = ModList.get().isLoaded("refinedstorage");
     private static final ResourceLocation CREATE_WHEEL_BE_ID = ResourceLocation.fromNamespaceAndPath("create", "crushing_wheel");
     private static final ResourceLocation CREATE_WHEEL_BLOCK_ID = ResourceLocation.fromNamespaceAndPath("create", "crushing_wheel");
     private static final ResourceLocation CREATE_WHEEL_CONTROLLER_BLOCK_ID =
@@ -89,6 +95,19 @@ public class MainThreadChunkApplier {
         new java.util.concurrent.ConcurrentHashMap<>();
     private static final java.util.concurrent.PriorityBlockingQueue<CreateRefreshTask> CREATE_REFRESH_TASKS =
         new java.util.concurrent.PriorityBlockingQueue<>(64, Comparator.comparingLong(CreateRefreshTask::readyTick));
+    private static final String RS_NETWORK_NODE_BE_CLASS_NAME = "com.refinedmods.refinedstorage.blockentity.NetworkNodeBlockEntity";
+    private static final String RS_ACTION_CLASS_NAME = "com.refinedmods.refinedstorage.api.util.Action";
+    private static volatile Class<?> RS_NETWORK_NODE_BE_CLASS;
+    private static volatile java.lang.reflect.Method RS_ON_LOAD_METHOD;
+    private static volatile java.lang.reflect.Method RS_GET_NODE_METHOD;
+    private static volatile Class<?> RS_ACTION_CLASS;
+    private static volatile Object RS_ACTION_PERFORM;
+
+    private record RefinedStorageChunkRefreshTask(ChunkCoord chunk, long readyTick) {}
+    private static final java.util.concurrent.PriorityBlockingQueue<RefinedStorageChunkRefreshTask> RS_CHUNK_REFRESH_TASKS =
+        new java.util.concurrent.PriorityBlockingQueue<>(64, Comparator.comparingLong(RefinedStorageChunkRefreshTask::readyTick));
+    private static final java.util.concurrent.ConcurrentHashMap<ChunkCoord, Boolean> RS_REFRESH_PENDING =
+        new java.util.concurrent.ConcurrentHashMap<>();
 
     private record TickerReRegisterTask(ChunkCoord chunk, long readyTick) {}
     private static final java.util.concurrent.PriorityBlockingQueue<TickerReRegisterTask> TICKER_REREGISTER_TASKS =
@@ -106,6 +125,7 @@ public class MainThreadChunkApplier {
         }
 
         if (!ServerRescheduler.isServerAvailable() && shouldRunInlineClient()) {
+            long startNs = System.nanoTime();
             try {
                 applicationTask.run();
                 APPLIED_CHUNKS.put(chunk, Boolean.TRUE);
@@ -113,6 +133,7 @@ public class MainThreadChunkApplier {
                 LC2H.LOGGER.error("[LC2H] Failed to apply chunk {} on client thread: {}", chunk, t.getMessage());
                 LC2H.LOGGER.debug("[LC2H] Apply error", t);
             } finally {
+                Lc2hTimingRegistry.record("main_thread_apply.inline_client", System.nanoTime() - startNs);
                 PENDING_TASKS.remove(chunk);
             }
             return;
@@ -248,6 +269,7 @@ public class MainThreadChunkApplier {
             drain(server);
             drainTickerReRegister(server);
             drainCreateRefresh(server);
+            drainRefinedStorageRefresh(server);
         }
     }
 
@@ -354,11 +376,13 @@ public class MainThreadChunkApplier {
                     boolean hasCreate = chunkHasCreate(server, chunk);
                     if (!hasCreate) {
                         ViewCullingStats.recordMainThreadApply(1);
+                        TOTAL_CULLED.increment();
                         continue;
                     }
                 }
             }
 
+            long taskStartNs = System.nanoTime();
             try {
                 task.run();
                 enqueueTickerReRegister(server, chunk);
@@ -366,9 +390,12 @@ public class MainThreadChunkApplier {
             } catch (Throwable t) {
                 LC2H.LOGGER.error("[LC2H] Failed to apply chunk {} on main thread: {}", chunk, t.getMessage());
                 LC2H.LOGGER.debug("[LC2H] Apply error", t);
+            } finally {
+                Lc2hTimingRegistry.record("main_thread_apply.task", System.nanoTime() - taskStartNs);
             }
 
             applied++;
+            TOTAL_APPLIED.increment();
             if (budgetNs > 0 && (System.nanoTime() - start) >= budgetNs) {
                 break;
             }
@@ -402,6 +429,24 @@ public class MainThreadChunkApplier {
             return;
         }
         enqueueCreateRefresh(new ChunkCoord(level.dimension(), pos.x, pos.z));
+    }
+
+    private static void enqueueRefinedStorageRefresh(ChunkCoord chunk) {
+        if (chunk == null || !REFINED_STORAGE_PRESENT) {
+            return;
+        }
+        MinecraftServer server = ServerRescheduler.getServer();
+        long nowTick = 0L;
+        try {
+            if (server != null) {
+                nowTick = server.getTickCount();
+            }
+        } catch (Throwable ignored) {
+        }
+        if (RS_REFRESH_PENDING.putIfAbsent(chunk, Boolean.TRUE) != null) {
+            return;
+        }
+        RS_CHUNK_REFRESH_TASKS.offer(new RefinedStorageChunkRefreshTask(chunk, nowTick + 1L));
     }
 
     private static void drainCreateRefresh(MinecraftServer server) {
@@ -480,6 +525,54 @@ public class MainThreadChunkApplier {
         }
     }
 
+    private static void drainRefinedStorageRefresh(MinecraftServer server) {
+        if (server == null || !REFINED_STORAGE_PRESENT) {
+            return;
+        }
+        long budgetNs = computeAuxDrainBudgetNs(server);
+        long startNs = System.nanoTime();
+        int processed = 0;
+        long nowTick = 0L;
+        try {
+            nowTick = server.getTickCount();
+        } catch (Throwable ignored) {
+        }
+
+        while (processed < MAX_RS_CHUNK_REFRESH_PER_TICK) {
+            if (budgetNs > 0 && (System.nanoTime() - startNs) >= budgetNs) {
+                break;
+            }
+            RefinedStorageChunkRefreshTask task = RS_CHUNK_REFRESH_TASKS.peek();
+            if (task == null || task.readyTick() > nowTick) {
+                break;
+            }
+            RS_CHUNK_REFRESH_TASKS.poll();
+            ChunkCoord coord = task.chunk();
+            if (coord == null || coord.dimension() == null) {
+                processed++;
+                continue;
+            }
+
+            boolean refreshed = false;
+            try {
+                ServerLevel level = server.getLevel(coord.dimension());
+                if (level != null) {
+                    LevelChunk levelChunk = level.getChunkSource().getChunkNow(coord.chunkX(), coord.chunkZ());
+                    if (levelChunk != null) {
+                        refreshed = refreshRefinedStorageNodes(level, levelChunk);
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+
+            RS_REFRESH_PENDING.remove(coord);
+            if (!refreshed) {
+                enqueueRefinedStorageRefresh(coord);
+            }
+            processed++;
+        }
+    }
+
     private static void reRegisterBlockEntityTickers(MinecraftServer server, ChunkCoord chunk) {
         if (server == null || chunk == null || chunk.dimension() == null) {
             return;
@@ -512,6 +605,9 @@ public class MainThreadChunkApplier {
         try {
             levelChunk.registerAllBlockEntitiesAfterLevelLoad();
         } catch (Throwable t) {
+        }
+        if (chunkHasRefinedStorageNetworkNodes(levelChunk)) {
+            enqueueRefinedStorageRefresh(chunk);
         }
     }
 
@@ -702,6 +798,14 @@ public class MainThreadChunkApplier {
         return APPLICATION_QUEUE.size();
     }
 
+    public static long getTotalAppliedCount() {
+        return TOTAL_APPLIED.sum();
+    }
+
+    public static long getTotalCulledCount() {
+        return TOTAL_CULLED.sum();
+    }
+
     private static boolean shouldRunInlineClient() {
         if (FMLEnvironment.dist != Dist.CLIENT) {
             return false;
@@ -747,6 +851,202 @@ public class MainThreadChunkApplier {
             }
         }
         return false;
+    }
+
+    private static boolean chunkHasRefinedStorageNetworkNodes(LevelChunk levelChunk) {
+        if (!REFINED_STORAGE_PRESENT || levelChunk == null) {
+            return false;
+        }
+        for (BlockEntity blockEntity : levelChunk.getBlockEntities().values()) {
+            if (isRefinedStorageNetworkNodeBlockEntity(blockEntity)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean refreshRefinedStorageNodes(ServerLevel level, LevelChunk levelChunk) {
+        if (level == null || levelChunk == null || !REFINED_STORAGE_PRESENT) {
+            return false;
+        }
+        boolean found = false;
+        boolean pending = false;
+        for (BlockEntity blockEntity : levelChunk.getBlockEntities().values()) {
+            if (!isRefinedStorageNetworkNodeBlockEntity(blockEntity)) {
+                continue;
+            }
+            found = true;
+            BlockPos pos = blockEntity.getBlockPos();
+            if (pos == null || !level.isLoaded(pos)) {
+                pending = true;
+                continue;
+            }
+            try {
+                invokeRefinedStorageOnLoad(blockEntity);
+                Object node = invokeRefinedStorageGetNode(blockEntity);
+                invalidateRefinedStorageGraph(node);
+                BlockState state = blockEntity.getBlockState();
+                level.sendBlockUpdated(pos, state, state, Block.UPDATE_ALL);
+                level.updateNeighborsAt(pos, state.getBlock());
+                level.blockUpdated(pos, state.getBlock());
+                blockEntity.setChanged();
+            } catch (Throwable ignored) {
+                pending = true;
+            }
+        }
+        return found && !pending;
+    }
+
+    private static boolean isRefinedStorageNetworkNodeBlockEntity(BlockEntity blockEntity) {
+        if (blockEntity == null || !REFINED_STORAGE_PRESENT) {
+            return false;
+        }
+        Class<?> baseClass = getRefinedStorageNetworkNodeBlockEntityClass();
+        return baseClass != null && baseClass.isInstance(blockEntity);
+    }
+
+    private static Class<?> getRefinedStorageNetworkNodeBlockEntityClass() {
+        Class<?> cached = RS_NETWORK_NODE_BE_CLASS;
+        if (cached != null) {
+            return cached;
+        }
+        try {
+            cached = Class.forName(RS_NETWORK_NODE_BE_CLASS_NAME);
+            RS_NETWORK_NODE_BE_CLASS = cached;
+            return cached;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static void invokeRefinedStorageOnLoad(BlockEntity blockEntity) throws ReflectiveOperationException {
+        java.lang.reflect.Method method = RS_ON_LOAD_METHOD;
+        if (method == null) {
+            method = resolveRefinedStorageMethod(blockEntity.getClass(), "onLoad", "m_6339_");
+            if (method != null) {
+                RS_ON_LOAD_METHOD = method;
+            }
+        }
+        if (method != null) {
+            method.invoke(blockEntity);
+        }
+    }
+
+    private static Object invokeRefinedStorageGetNode(BlockEntity blockEntity) throws ReflectiveOperationException {
+        java.lang.reflect.Method method = RS_GET_NODE_METHOD;
+        if (method == null) {
+            method = resolveRefinedStorageMethod(blockEntity.getClass(), "getNode");
+            if (method != null) {
+                RS_GET_NODE_METHOD = method;
+            }
+        }
+        return method == null ? null : method.invoke(blockEntity);
+    }
+
+    private static void invalidateRefinedStorageGraph(Object node) {
+        if (node == null) {
+            return;
+        }
+        try {
+            java.lang.reflect.Method getNetwork = resolveRefinedStorageMethod(node.getClass(), "getNetwork");
+            if (getNetwork == null) {
+                return;
+            }
+            Object network = getNetwork.invoke(node);
+            if (network == null) {
+                return;
+            }
+
+            java.lang.reflect.Method getNodeGraph = resolveRefinedStorageMethod(network.getClass(), "getNodeGraph");
+            java.lang.reflect.Method getLevel = resolveRefinedStorageMethod(network.getClass(), "getLevel");
+            java.lang.reflect.Method getPosition = resolveRefinedStorageMethod(network.getClass(), "getPosition");
+            Object actionPerform = getRefinedStorageActionPerform();
+            if (getNodeGraph == null || getLevel == null || getPosition == null || actionPerform == null) {
+                return;
+            }
+
+            Object graph = getNodeGraph.invoke(network);
+            Object graphLevel = getLevel.invoke(network);
+            Object graphPos = getPosition.invoke(network);
+            if (graph == null || graphLevel == null || graphPos == null) {
+                return;
+            }
+
+            java.lang.reflect.Method invalidate =
+                graph.getClass().getMethod("invalidate", getRefinedStorageActionClass(), net.minecraft.world.level.Level.class, net.minecraft.core.BlockPos.class);
+            invalidate.setAccessible(true);
+            invalidate.invoke(graph, actionPerform, graphLevel, graphPos);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static Class<?> getRefinedStorageActionClass() {
+        Class<?> cached = RS_ACTION_CLASS;
+        if (cached != null) {
+            return cached;
+        }
+        try {
+            cached = Class.forName(RS_ACTION_CLASS_NAME);
+            RS_ACTION_CLASS = cached;
+            return cached;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object getRefinedStorageActionPerform() {
+        Object cached = RS_ACTION_PERFORM;
+        if (cached != null) {
+            return cached;
+        }
+        Class<?> actionClass = getRefinedStorageActionClass();
+        if (actionClass == null) {
+            return null;
+        }
+        try {
+            Object perform = findEnumConstant(actionClass, "PERFORM");
+            RS_ACTION_PERFORM = perform;
+            return perform;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object findEnumConstant(Class<?> enumClass, String name) {
+        if (enumClass == null || name == null || !enumClass.isEnum()) {
+            return null;
+        }
+        Object[] constants = enumClass.getEnumConstants();
+        if (constants == null) {
+            return null;
+        }
+        for (Object constant : constants) {
+            if (constant instanceof Enum<?> enumValue && name.equals(enumValue.name())) {
+                return constant;
+            }
+        }
+        return null;
+    }
+
+    private static java.lang.reflect.Method resolveRefinedStorageMethod(Class<?> type, String... names) {
+        if (type == null || names == null) {
+            return null;
+        }
+        for (String name : names) {
+            try {
+                java.lang.reflect.Method method = type.getMethod(name);
+                method.setAccessible(true);
+                return method;
+            } catch (Throwable ignored) {
+            }
+            try {
+                java.lang.reflect.Method method = type.getDeclaredMethod(name);
+                method.setAccessible(true);
+                return method;
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
     }
 
     private static net.minecraft.world.level.block.entity.BlockEntityType<?> getCreateWheelType() {

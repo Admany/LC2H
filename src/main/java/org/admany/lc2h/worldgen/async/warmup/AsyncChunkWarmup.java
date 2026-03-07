@@ -18,7 +18,10 @@ import org.admany.lc2h.worldgen.async.planner.AsyncTerrainFeaturePlanner;
 import org.admany.lc2h.worldgen.coord.RegionCoord;
 import org.admany.lc2h.worldgen.gpu.RegionProcessingGPUTask;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
+import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
+import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.admany.lc2h.util.server.ServerTickLoad;
+import org.admany.lc2h.worldgen.lostcities.DeferredTreeQueue;
 import org.admany.quantified.api.opencl.QuantifiedOpenCL;
 import org.admany.quantified.core.common.opencl.core.OpenCLManager;
 import org.admany.quantified.core.common.util.TaskScheduler;
@@ -301,6 +304,7 @@ public final class AsyncChunkWarmup {
     }
 
     private static void flushRegionBatch() {
+        long flushStartNs = System.nanoTime();
         if (REGION_BUFFER_SIZE.get() == 0) {
             return;
         }
@@ -355,7 +359,15 @@ public final class AsyncChunkWarmup {
                 }
                 regionBatchTasks.add(new TaskBatchItem<Boolean>(
                     "region-" + region,
-                    () -> { processEntireRegion(provider, region); return true; },
+                    () -> {
+                        long taskStartNs = System.nanoTime();
+                        try {
+                            processEntireRegion(provider, region);
+                            return true;
+                        } finally {
+                            Lc2hTimingRegistry.record("warmup.region_task", System.nanoTime() - taskStartNs);
+                        }
+                    },
                     gpuTask,
                     CHUNKS_PER_REGION * 2048L, 
                     CHUNKS_PER_REGION * 256   
@@ -398,6 +410,8 @@ public final class AsyncChunkWarmup {
             }
         } catch (Throwable t) {
             LC2H.LOGGER.error("Region flush batch failed: {}", t.getMessage());
+        } finally {
+            Lc2hTimingRegistry.record("warmup.flush_region_batch", System.nanoTime() - flushStartNs);
         }
     }
 
@@ -453,6 +467,13 @@ public final class AsyncChunkWarmup {
         } else if (tickMs >= 35.0D) {
             base = Math.max(1, (int) Math.round(base * 0.75));
         }
+        int pendingScans = ChunkPostProcessor.getPendingScanCount();
+        int deferredTrees = DeferredTreeQueue.pendingCountAll() + DeferredTreeQueue.readyCountAll();
+        if (pendingScans >= 24 || deferredTrees >= 64 || tickMs >= 28.0D) {
+            base = Math.max(1, base / 2);
+        } else if (pendingScans >= 12 || deferredTrees >= 32 || tickMs >= 24.0D) {
+            base = Math.max(1, (int) Math.round(base * 0.75D));
+        }
         return Math.max(1, base);
     }
 
@@ -466,6 +487,11 @@ public final class AsyncChunkWarmup {
             base = Math.max(1, base / 2);
         } else if (tickMs >= 35.0D) {
             base = Math.max(1, (int) Math.round(base * 0.75));
+        }
+        int pendingScans = ChunkPostProcessor.getPendingScanCount();
+        int deferredTrees = DeferredTreeQueue.pendingCountAll() + DeferredTreeQueue.readyCountAll();
+        if (pendingScans >= 16 || deferredTrees >= 48 || tickMs >= 24.0D) {
+            base = 1;
         }
         return Math.max(1, base);
     }

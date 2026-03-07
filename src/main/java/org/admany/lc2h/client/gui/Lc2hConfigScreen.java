@@ -236,6 +236,7 @@ public class Lc2hConfigScreen extends Screen {
     private EditBox blendWidthBox;
     private EditBox blendSoftnessBox;
     private EditBox blendTreeSeamBufferBox;
+    private EditBox treeSeamRadiusMultiplierBox;
     private EditBox seamOwnershipMaxIntentsBox;
     private EditBox seamOwnershipIntentTtlMsBox;
     private EditBox highwaySupportMaxDepthBox;
@@ -564,6 +565,10 @@ private Component unsavedDiscardLabel = Component.empty();
                 tr("lc2h.config.option.city_blend_tree_seam_buffer.desc"),
                 String.valueOf(working.cityBlendTreeSeamBuffer), Lc2hConfigController.RESTART_CITY_EDGE);
         this.blendTreeSeamBufferBox.setFilter(this::isNumericInput);
+        this.treeSeamRadiusMultiplierBox = addNumberField(layout,
+                tr("lc2h.config.option.tree_seam_radius_multiplier.title"),
+                tr("lc2h.config.option.tree_seam_radius_multiplier.desc"),
+                String.valueOf(working.treeSeamRadiusMultiplier), Lc2hConfigController.RESTART_CITY_EDGE);
         this.seamOwnershipMaxIntentsBox = addNumberField(layout,
                 tr("lc2h.config.option.seam_ownership_max_intents.title"),
                 tr("lc2h.config.option.seam_ownership_max_intents.desc"),
@@ -1740,6 +1745,7 @@ private Component unsavedDiscardLabel = Component.empty();
                 blendWidthBox.getValue(),
                 blendSoftnessBox.getValue(),
                 blendTreeSeamBufferBox == null ? null : blendTreeSeamBufferBox.getValue(),
+                treeSeamRadiusMultiplierBox == null ? null : treeSeamRadiusMultiplierBox.getValue(),
                 seamOwnershipMaxIntentsBox == null ? null : seamOwnershipMaxIntentsBox.getValue(),
                 seamOwnershipIntentTtlMsBox == null ? null : seamOwnershipIntentTtlMsBox.getValue(),
                 highwaySupportMaxDepthBox == null ? null : highwaySupportMaxDepthBox.getValue(),

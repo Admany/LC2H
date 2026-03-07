@@ -15,6 +15,7 @@ import org.admany.lc2h.mixin.accessor.minecraft.WorldGenRegionAccessor;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -26,6 +27,7 @@ public final class SeamOwnershipJournal {
 
     private static final ConcurrentHashMap<SeamChunkKey, ConcurrentHashMap<Long, SeamWriteIntent>> JOURNAL =
         new ConcurrentHashMap<>();
+    private static final Set<SeamChunkKey> ACTIVE_PASSES = ConcurrentHashMap.newKeySet();
 
     private record GenerationContext(WorldGenRegion region, ResourceLocation dimension, int centerChunkX, int centerChunkZ) {
     }
@@ -60,6 +62,7 @@ public final class SeamOwnershipJournal {
             }
             ResourceLocation dim = level.dimension().location();
             net.minecraft.world.level.ChunkPos center = region.getCenter();
+            ACTIVE_PASSES.add(new SeamChunkKey(dim, center.x, center.z));
             CONTEXT.set(new GenerationContext(region, dim, center.x, center.z));
         } catch (Throwable ignored) {
             CONTEXT.remove();
@@ -76,6 +79,14 @@ public final class SeamOwnershipJournal {
             applyForRegionWindow(region);
         } catch (Throwable ignored) {
         } finally {
+            try {
+                ServerLevel level = resolveServerLevel(region);
+                if (level != null) {
+                    net.minecraft.world.level.ChunkPos center = region.getCenter();
+                    ACTIVE_PASSES.remove(new SeamChunkKey(level.dimension().location(), center.x, center.z));
+                }
+            } catch (Throwable ignored) {
+            }
             CONTEXT.remove();
         }
     }
@@ -355,6 +366,7 @@ public final class SeamOwnershipJournal {
     @SubscribeEvent
     public static void onServerStopped(ServerStoppedEvent event) {
         JOURNAL.clear();
+        ACTIVE_PASSES.clear();
         CONTEXT.remove();
         OVERFLOW_LOGGED.set(false);
         APPLY_FAIL_LOGGED.set(false);
@@ -372,5 +384,38 @@ public final class SeamOwnershipJournal {
             }
         }
         return total;
+    }
+
+    public static boolean hasPendingWrites(ResourceLocation dimension, int chunkX, int chunkZ) {
+        if (dimension == null) {
+            return false;
+        }
+        ConcurrentHashMap<Long, SeamWriteIntent> intents = JOURNAL.get(new SeamChunkKey(dimension, chunkX, chunkZ));
+        return intents != null && !intents.isEmpty();
+    }
+
+    public static boolean hasActivePassNearby(ResourceLocation dimension, int chunkX, int chunkZ, int radiusChunks) {
+        if (dimension == null) {
+            return false;
+        }
+        int radius = Math.max(0, radiusChunks);
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                if (ACTIVE_PASSES.contains(new SeamChunkKey(dimension, chunkX + dx, chunkZ + dz))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public static boolean isChunkReadyForTreeReplay(ResourceLocation dimension, int chunkX, int chunkZ) {
+        if (dimension == null) {
+            return true;
+        }
+        if (hasPendingWrites(dimension, chunkX, chunkZ)) {
+            return false;
+        }
+        return !hasActivePassNearby(dimension, chunkX, chunkZ, 1);
     }
 }
