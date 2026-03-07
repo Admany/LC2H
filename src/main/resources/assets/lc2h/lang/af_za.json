@@ -1,4 +1,4 @@
-{
+﻿{
     "lc2h.chat.prefix": "[LC2H] ",
     "lc2h.ui.warning": "WARNING:",
     "lc2h.ui.enabled": "Enabled",
@@ -53,8 +53,7 @@
     "lc2h.config.option.city_blend_tree_seam_fix.title": "Prevent Half-Trees At City Seam",
     "lc2h.config.option.city_blend_tree_seam_fix.desc": "Stops trees from spawning across city/vanilla chunk seams so you don't get cut-off trees.",
     "lc2h.config.option.city_blend_tree_seam_buffer.title": "Tree Seam Buffer (blocks)",
-    "lc2h.config.option.city_blend_tree_seam_buffer.desc": "How close to a chunk edge a tree can start before it\u0027s blocked at a city seam.",
-
+    "lc2h.config.option.city_blend_tree_seam_buffer.desc": "How close to a chunk edge a tree can start before it's blocked at a city seam.",
     "lc2h.config.option.tree_seam_radius_multiplier.title": "Tree Seam Radius Multiplier",
     "lc2h.config.option.tree_seam_radius_multiplier.desc": "Scales auto-detected tree spread at seams. Raise this if giant modded trees still get clipped.",
     "lc2h.config.option.city_blend_width.title": "Blend Width (blocks)",
