@@ -7,6 +7,7 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.CommonLevelAccessor;
 import org.admany.lc2h.log.LCLogger;
+import org.admany.lc2h.util.ResourceLocations;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -22,22 +23,22 @@ import java.util.function.Function;
 public abstract class MixinRegistryAssetRegistryWorldStyleFallback {
 
     @Unique
-    private static final ResourceLocation LC2H_WORLDSTYLES_REGISTRY_ID = ResourceLocation.fromNamespaceAndPath("lostcities", "worldstyles");
+    private static final ResourceLocation LC2H_WORLDSTYLES_REGISTRY_ID = ResourceLocations.of("lostcities", "worldstyles");
 
     @Unique
-    private static final ResourceLocation LC2H_WORLDSTYLE_STANDARD = ResourceLocation.fromNamespaceAndPath("lostcities", "standard");
+    private static final ResourceLocation LC2H_WORLDSTYLE_STANDARD = ResourceLocations.of("lostcities", "standard");
 
     @Unique
-    private static final ResourceLocation LC2H_WORLDSTYLE_STANDARD_EVERYWHERE = ResourceLocation.fromNamespaceAndPath("lostcities", "standard_everywhere");
+    private static final ResourceLocation LC2H_WORLDSTYLE_STANDARD_EVERYWHERE = ResourceLocations.of("lostcities", "standard_everywhere");
 
     @Unique
-    private static final ResourceLocation LC2H_CITYSTYLES_REGISTRY_ID = ResourceLocation.fromNamespaceAndPath("lostcities", "citystyles");
+    private static final ResourceLocation LC2H_CITYSTYLES_REGISTRY_ID = ResourceLocations.of("lostcities", "citystyles");
 
     @Unique
-    private static final ResourceLocation LC2H_CITYSTYLE_STANDARD = ResourceLocation.fromNamespaceAndPath("lostcities", "citystyle_standard");
+    private static final ResourceLocation LC2H_CITYSTYLE_STANDARD = ResourceLocations.of("lostcities", "citystyle_standard");
 
     @Unique
-    private static final ResourceLocation LC2H_CITYSTYLE_BORDER = ResourceLocation.fromNamespaceAndPath("lostcities", "citystyle_border");
+    private static final ResourceLocation LC2H_CITYSTYLE_BORDER = ResourceLocations.of("lostcities", "citystyle_border");
 
     @Shadow @Final private Map<ResourceLocation, Object> assets;
     @Shadow @Final private ResourceKey<Registry<Object>> registryKey;
@@ -91,14 +92,26 @@ public abstract class MixinRegistryAssetRegistryWorldStyleFallback {
                 asset.setRegistryName(chosen);
             }
             Object built = assetConstructor.apply(fallback);
-            assets.put(name, built);
             if (built instanceof ILostCityAsset asset) {
                 asset.init(level);
             }
-            if (isWorldStyle) {
-                LCLogger.warn("[LC2H] [LostCities] Worldstyle '{}' not found; falling back to '{}'", name, chosen);
-            } else {
-                LCLogger.warn("[LC2H] [LostCities] Citystyle '{}' not found; falling back to '{}'", name, chosen);
+
+            // Only cache the fallback and emit a warning once the registry has been fully loaded
+            // (indicated by lostcities:standard being present in assets from loadAll()).
+            // If assets is still empty we're in early startup: datapacks may not have loaded yet,
+            // so a registry miss here is a false alarm. Don't cache — loadAll() will populate it
+            // correctly later. If the asset is still missing after loadAll(), the next call will
+            // hit this branch again, log once, and cache permanently.
+            boolean registryLoaded = isWorldStyle
+                ? (assets.containsKey(LC2H_WORLDSTYLE_STANDARD) || assets.containsKey(LC2H_WORLDSTYLE_STANDARD_EVERYWHERE))
+                : (assets.containsKey(LC2H_CITYSTYLE_STANDARD) || assets.containsKey(LC2H_CITYSTYLE_BORDER));
+            if (registryLoaded) {
+                assets.put(name, built);
+                if (isWorldStyle) {
+                    LCLogger.warn("[LC2H] [LostCities] Worldstyle '{}' not found; falling back to '{}'", name, chosen);
+                } else {
+                    LCLogger.warn("[LC2H] [LostCities] Citystyle '{}' not found; falling back to '{}'", name, chosen);
+                }
             }
             cir.setReturnValue((ILostCityAsset) built);
         } catch (Throwable t) {

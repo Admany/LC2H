@@ -16,20 +16,26 @@ import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
 import org.admany.lc2h.worldgen.async.planner.AsyncTerrainCorrectionPlanner;
 import org.admany.lc2h.worldgen.async.planner.AsyncTerrainFeaturePlanner;
 import org.admany.lc2h.worldgen.coord.RegionCoord;
-import org.admany.lc2h.worldgen.gpu.RegionProcessingGPUTask;
+import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
+import org.admany.lc2h.worldgen.gpu.RegionBatchProcessingGPUTask;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
 import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.lc2h.worldgen.lostcities.DeferredTreeQueue;
 import org.admany.quantified.api.opencl.QuantifiedOpenCL;
+import org.admany.quantified.api.vulkan.QuantifiedVulkan;
 import org.admany.quantified.core.common.opencl.core.OpenCLManager;
+import org.admany.quantified.core.common.opencl.gpu.GPUMonitor;
 import org.admany.quantified.core.common.util.TaskScheduler;
 import org.admany.quantified.core.common.util.TaskScheduler.ResourceHint;
 import org.admany.quantified.core.common.util.TaskScheduler.TaskBatchItem;
+import org.admany.quantified.core.common.vulkan.core.VulkanManager;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -40,6 +46,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import java.util.Map;
+import java.util.function.Supplier;
 
 record RegionProviderPair(IDimensionInfo provider, RegionCoord region) {}
 
@@ -60,10 +67,18 @@ public final class AsyncChunkWarmup {
     private static final int MAX_CONCURRENT_BATCHES = Math.max(1, Math.min(4,
         Integer.getInteger("lc2h.warmup.maxConcurrentBatches", Math.max(1, Runtime.getRuntime().availableProcessors() / 4))));
     private static final long PLAYER_GRACE_MS = Math.max(0L, Long.getLong("lc2h.warmup.playerGraceMs", 60_000L));
+    private static final long GPU_PLAYER_GRACE_MS = Math.max(0L, Long.getLong("lc2h.warmup.gpuPlayerGraceMs", 5_000L));
     private static final double MAX_TICK_MS = Math.max(5.0D, Double.parseDouble(System.getProperty("lc2h.warmup.maxTickMs", "35")));
+    private static final double GPU_MAX_TICK_MS = Math.max(MAX_TICK_MS,
+        Double.parseDouble(System.getProperty("lc2h.warmup.gpuMaxTickMs", "45")));
+    private static final boolean ENABLE_HEADLESS_WARMUP = Boolean.parseBoolean(System.getProperty("lc2h.warmup.enableHeadless", "false"));
+    private static final long DEFAULT_GPU_ASSIST_WAIT_MS = Math.max(0L,
+        Long.getLong("lc2h.warmup.gpuAssistWaitMs", 20L));
+    private static final int GPU_ASSIST_TASK_FANOUT = 6;
 
     // This encodes timestamps - the sign bit indicates GPU-ready schedule.
     private static final ConcurrentHashMap<RegionCoord, Long> PRE_SCHEDULE_CACHE = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<RegionCoord, CompletableFuture<?>> GPU_ASSIST_FUTURES = new ConcurrentHashMap<>();
     private static final ConcurrentLinkedQueue<RegionProviderPair> REGION_BUFFER = new ConcurrentLinkedQueue<>();
     private static final AtomicInteger REGION_BUFFER_SIZE = new AtomicInteger(0);
     private static final AtomicBoolean flushScheduled = new AtomicBoolean(false);
@@ -74,6 +89,11 @@ public final class AsyncChunkWarmup {
     private static final java.util.concurrent.atomic.AtomicLong cacheHits = new java.util.concurrent.atomic.AtomicLong(0);
     private static final java.util.concurrent.atomic.AtomicLong cacheMisses = new java.util.concurrent.atomic.AtomicLong(0);
     private static final java.util.concurrent.atomic.AtomicLong regionsProcessed = new java.util.concurrent.atomic.AtomicLong(0);
+    private static final AtomicLong vulkanRegionsProcessed = new AtomicLong(0);
+    private static final AtomicLong vulkanBatchesProcessed = new AtomicLong(0);
+    private static final AtomicLong openClRegionsProcessed = new AtomicLong(0);
+    private static final AtomicLong openClBatchesProcessed = new AtomicLong(0);
+    private static final AtomicLong cpuFallbackRegionsProcessed = new AtomicLong(0);
     private static final java.util.concurrent.atomic.AtomicInteger activeBatches = new java.util.concurrent.atomic.AtomicInteger(0);
     private static final AtomicBoolean gpuProbeWarningLogged = new AtomicBoolean(false);
     private static final AtomicLong lastFailedGpuProbe = new AtomicLong(0);
@@ -90,6 +110,7 @@ public final class AsyncChunkWarmup {
     private static final long GPU_READY_FLAG = Long.MIN_VALUE;
     private static final AtomicLong lastFlushKickMs = new AtomicLong(0);
     private static final AtomicLong LAST_PLAYER_JOIN_MS = new AtomicLong(-1L);
+    private static final ThreadLocal<Integer> CPU_WARMUP_DEPTH = ThreadLocal.withInitial(() -> 0);
 
     private AsyncChunkWarmup() {
     }
@@ -102,6 +123,20 @@ public final class AsyncChunkWarmup {
         if (!GPU_ENABLED) {
             if (VERBOSE_LOGGING) {
                 LC2H.LOGGER.debug("LC2H: GPU warmup disabled via system property");
+            }
+            return;
+        }
+        if (isVulkanAvailable()) {
+            try {
+                if (!gpuReadyOnce) {
+                    LC2H.LOGGER.info("LC2H: Starting GPU warmup initialization using Vulkan");
+                    ensureGpuReady();
+                    if (gpuReadyOnce) {
+                        LC2H.LOGGER.info("LC2H: GPU warmup initialized successfully using Vulkan on {}", VulkanManager.deviceName());
+                    }
+                }
+            } catch (Throwable t) {
+                LC2H.LOGGER.warn("LC2H: Failed to initialize Vulkan warmup: {}", t.getMessage());
             }
             return;
         }
@@ -161,7 +196,7 @@ public final class AsyncChunkWarmup {
             return true;
         }
         // If the GPU is ready now and this region was only CPU-scheduled earlier, we allow a GPU reschedule.
-        return !isOpenClAvailable();
+        return !isGpuBackendAvailable();
     }
 
     public static void preSchedule(IDimensionInfo provider, ChunkCoord center) {
@@ -176,7 +211,7 @@ public final class AsyncChunkWarmup {
             }
 
             var server = org.admany.lc2h.util.server.ServerRescheduler.getServer();
-            if (server != null && !canWarmup(server)) {
+            if (server != null && !canPreschedule(server)) {
                 return;
             }
         } catch (Throwable ignored) {}
@@ -197,7 +232,7 @@ public final class AsyncChunkWarmup {
 
         long now = System.currentTimeMillis();
         maybePrunePreScheduleCache(now);
-        boolean gpuReady = isOpenClAvailable();
+        boolean gpuReady = isGpuBackendAvailable();
         java.util.concurrent.atomic.AtomicBoolean shouldSchedule = new java.util.concurrent.atomic.AtomicBoolean(false);
         PRE_SCHEDULE_CACHE.compute(region, (key, existing) -> {
             if (existing == null) {
@@ -287,7 +322,7 @@ public final class AsyncChunkWarmup {
         } catch (Throwable ignored) {
         }
         if (playerCount <= 0) {
-            return true;
+            return ENABLE_HEADLESS_WARMUP;
         }
         long lastJoin = LAST_PLAYER_JOIN_MS.get();
         long now = System.currentTimeMillis();
@@ -301,6 +336,197 @@ public final class AsyncChunkWarmup {
         } catch (Throwable ignored) {
         }
         return true;
+    }
+
+    private static boolean canGpuWarmup(MinecraftServer server) {
+        if (server == null || !GPU_ENABLED || !isGpuBackendAvailable()) {
+            return false;
+        }
+        try {
+            if (ServerTickLoad.shouldPauseNonCritical(server)) {
+                return false;
+            }
+        } catch (Throwable ignored) {
+        }
+        int playerCount = 0;
+        try {
+            if (server.getPlayerList() != null) {
+                playerCount = server.getPlayerList().getPlayerCount();
+            }
+        } catch (Throwable ignored) {
+        }
+        if (playerCount <= 0) {
+            return ENABLE_HEADLESS_WARMUP;
+        }
+        long lastJoin = LAST_PLAYER_JOIN_MS.get();
+        long now = System.currentTimeMillis();
+        if (lastJoin > 0 && (now - lastJoin) < GPU_PLAYER_GRACE_MS) {
+            return false;
+        }
+        try {
+            if (server.getAverageTickTime() > GPU_MAX_TICK_MS) {
+                return false;
+            }
+        } catch (Throwable ignored) {
+        }
+        return !isGpuWarmupTemporarilySuspended();
+    }
+
+    private static boolean canPreschedule(MinecraftServer server) {
+        return canWarmup(server) || canGpuWarmup(server);
+    }
+
+    public static boolean shouldAcceptPreschedule() {
+        MinecraftServer server = ServerRescheduler.getServer();
+        return server != null && canPreschedule(server);
+    }
+
+    private static boolean shouldAcceptGpuPreschedule() {
+        MinecraftServer server = ServerRescheduler.getServer();
+        return server != null && canGpuWarmup(server);
+    }
+
+    public static boolean shouldInitializeGpuWarmupOnServerStart() {
+        return ENABLE_HEADLESS_WARMUP;
+    }
+
+    public static boolean isCpuWarmupExecution() {
+        return CPU_WARMUP_DEPTH.get() > 0;
+    }
+
+    public static <T> T runWithinCpuWarmup(Supplier<T> action) {
+        Objects.requireNonNull(action, "action");
+        CPU_WARMUP_DEPTH.set(CPU_WARMUP_DEPTH.get() + 1);
+        try {
+            return action.get();
+        } finally {
+            CPU_WARMUP_DEPTH.set(Math.max(0, CPU_WARMUP_DEPTH.get() - 1));
+        }
+    }
+
+    public static boolean deferChunkPrescheduleToGpu(IDimensionInfo provider, ChunkCoord coord, String source) {
+        if (provider == null || coord == null || !GPU_ENABLED || isCpuWarmupExecution()) {
+            return false;
+        }
+        if (!shouldAcceptGpuPreschedule()) {
+            return false;
+        }
+        try {
+            if (submitImmediateGpuAssist(provider, coord, source) != null) {
+                if (VERBOSE_LOGGING) {
+                    LC2H.LOGGER.debug("Deferred {} preschedule for {} to immediate GPU assist", source, coord);
+                }
+                return true;
+            }
+            preSchedule(provider, coord);
+            kickFlushMaybe();
+            if (VERBOSE_LOGGING) {
+                LC2H.LOGGER.debug("Deferred {} preschedule for {} to queued GPU region warmup", source, coord);
+            }
+            return true;
+        } catch (Throwable t) {
+            if (VERBOSE_LOGGING) {
+                LC2H.LOGGER.debug("Unable to defer {} preschedule for {} to GPU warmup: {}", source, coord, t.toString());
+            }
+            return false;
+        }
+    }
+
+    public static CompletableFuture<?> submitGpuAssistBatch(IDimensionInfo provider, List<ChunkCoord> coords, String batchName) {
+        if (provider == null || coords == null || coords.isEmpty() || !GPU_ENABLED || isCpuWarmupExecution()) {
+            return null;
+        }
+        if (!shouldAcceptGpuPreschedule()) {
+            return null;
+        }
+        LinkedHashMap<RegionCoord, RegionBatchProcessingGPUTask.Entry> uniqueRegions = new LinkedHashMap<>();
+        for (ChunkCoord coord : coords) {
+            if (coord == null) {
+                continue;
+            }
+            RegionCoord region = RegionCoord.fromChunk(coord);
+            uniqueRegions.computeIfAbsent(region, key -> new RegionBatchProcessingGPUTask.Entry(provider, key));
+        }
+        if (uniqueRegions.isEmpty()) {
+            return null;
+        }
+        return submitGpuRegionEntries(new ArrayList<>(uniqueRegions.values()), batchName, () -> Boolean.TRUE);
+    }
+
+    public static boolean ensureImmediateGpuAssist(IDimensionInfo provider, ChunkCoord coord, String source, long waitMillis) {
+        if (provider == null || coord == null || !GPU_ENABLED || isCpuWarmupExecution()) {
+            return false;
+        }
+        if (!shouldAcceptGpuPreschedule()) {
+            return false;
+        }
+
+        if (GPUMemoryManager.getGPUData(coord, AsyncMultiChunkPlanner.GPU_DATA_CACHE) != null) {
+            GPUMemoryManager.markAsHot(coord);
+            return true;
+        }
+
+        CompletableFuture<?> future = submitImmediateGpuAssist(provider, coord, source);
+        if (future == null) {
+            return GPUMemoryManager.getGPUData(coord, AsyncMultiChunkPlanner.GPU_DATA_CACHE) != null;
+        }
+
+        long effectiveWaitMillis = waitMillis > 0L ? waitMillis : (!isMainOrServerThread() ? DEFAULT_GPU_ASSIST_WAIT_MS : 0L);
+        if (effectiveWaitMillis > 0L) {
+            try {
+                future.get(effectiveWaitMillis, TimeUnit.MILLISECONDS);
+            } catch (Exception ignored) {
+            }
+        }
+        return GPUMemoryManager.getGPUData(coord, AsyncMultiChunkPlanner.GPU_DATA_CACHE) != null;
+    }
+
+    private static CompletableFuture<?> submitImmediateGpuAssist(IDimensionInfo provider, ChunkCoord coord, String source) {
+        if (provider == null || coord == null || !GPU_ENABLED || isCpuWarmupExecution()) {
+            return null;
+        }
+        if (!shouldAcceptGpuPreschedule()) {
+            return null;
+        }
+
+        RegionCoord region = RegionCoord.fromChunk(coord);
+        CompletableFuture<?> existingFuture = GPU_ASSIST_FUTURES.get(region);
+        if (existingFuture != null && !existingFuture.isDone()) {
+            return existingFuture;
+        }
+        long now = System.currentTimeMillis();
+        maybePrunePreScheduleCache(now);
+
+        AtomicBoolean shouldSubmit = new AtomicBoolean(false);
+        PRE_SCHEDULE_CACHE.compute(region, (key, existing) -> {
+            if (existing == null || isExpired(existing, now) || !isGpuReadyFlag(existing)) {
+                shouldSubmit.set(true);
+                return encodeTimestamp(now, true);
+            }
+            return existing;
+        });
+
+        if (!shouldSubmit.get()) {
+            CompletableFuture<?> inFlight = GPU_ASSIST_FUTURES.get(region);
+            if (inFlight != null && !inFlight.isDone()) {
+                return inFlight;
+            }
+            return null;
+        }
+
+        RegionBatchProcessingGPUTask.Entry entry = new RegionBatchProcessingGPUTask.Entry(provider, region);
+        CompletableFuture<?> future = submitGpuRegionEntries(
+            List.of(entry),
+            "gpu-assist-" + source + "-" + region.regionX() + "-" + region.regionZ(),
+            () -> RegionBatchProcessingGPUTask.processBatchOnCPU(List.of(entry))
+        );
+        if (future == null) {
+            PRE_SCHEDULE_CACHE.remove(region);
+            return null;
+        }
+        GPU_ASSIST_FUTURES.put(region, future);
+        future.whenComplete((ignored, throwable) -> GPU_ASSIST_FUTURES.remove(region, future));
+        return future;
     }
 
     private static void flushRegionBatch() {
@@ -324,8 +550,6 @@ public final class AsyncChunkWarmup {
         long startTime = System.nanoTime();
 
         try {
-            List<TaskBatchItem<Boolean>> regionBatchTasks = new ArrayList<>();
-            int gpuCapableTasks = 0;
             int maxRegions = effectiveRegionBatchSize();
             List<RegionProviderPair> regionsToProcess;
             regionsToProcess = new ArrayList<>(Math.min(maxRegions, pendingBeforeFlush));
@@ -340,49 +564,33 @@ public final class AsyncChunkWarmup {
                     REGION_BUFFER_SIZE.set(0);
                 }
             }
+            if (regionsToProcess.isEmpty()) {
+                return;
+            }
 
+            List<RegionProviderPair> filteredRegions = new ArrayList<>(regionsToProcess.size());
             for (RegionProviderPair pair : regionsToProcess) {
-                IDimensionInfo provider = pair.provider();
                 RegionCoord region = pair.region();
                 if (shouldCullWarmup() && !isRegionInView(region)) {
                     ViewCullingStats.recordWarmupBatch(1);
                     continue;
                 }
-
                 if (VERBOSE_LOGGING) {
                     LC2H.LOGGER.debug("Scheduling region warmup task for {}", region);
                 }
-
-                Object gpuTask = createRegionGPUTask(provider, region);
-                if (gpuTask != null) {
-                    gpuCapableTasks++;
-                }
-                regionBatchTasks.add(new TaskBatchItem<Boolean>(
-                    "region-" + region,
-                    () -> {
-                        long taskStartNs = System.nanoTime();
-                        try {
-                            processEntireRegion(provider, region);
-                            return true;
-                        } finally {
-                            Lc2hTimingRegistry.record("warmup.region_task", System.nanoTime() - taskStartNs);
-                        }
-                    },
-                    gpuTask,
-                    CHUNKS_PER_REGION * 2048L, 
-                    CHUNKS_PER_REGION * 256   
-                ));
+                filteredRegions.add(pair);
             }
-            if (!regionBatchTasks.isEmpty()) {
+            if (!filteredRegions.isEmpty()) {
+                int gpuCapableTasks = isGpuBackendAvailable() && !isGpuWarmupTemporarilySuspended() ? filteredRegions.size() : 0;
                 if (VERBOSE_LOGGING || org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
-                    LC2H.LOGGER.debug("LC2H warmup batch prepared: regions={} gpuCapable={} openclAvailable={}",
-                        regionBatchTasks.size(), gpuCapableTasks, isOpenClAvailable());
+                    LC2H.LOGGER.debug("LC2H warmup batch prepared: regions={} gpuCapable={} backend={}",
+                        filteredRegions.size(), gpuCapableTasks, selectedGpuBackend());
                 }
                 activeBatches.incrementAndGet();
-                CompletableFuture<List<Boolean>> regionBatchFuture = TaskScheduler.submitBatch(
-                    "lc2h", "region-warmup", regionBatchTasks,
-                    task -> task.gpuTask() != null ? ResourceHint.GPU : ResourceHint.CPU
-                );
+                CompletableFuture<?> regionBatchFuture = submitGpuRegionBatch(filteredRegions);
+                if (regionBatchFuture == null) {
+                    regionBatchFuture = submitCpuRegionBatch(filteredRegions);
+                }
 
                 regionBatchFuture.whenComplete((results, throwable) -> {
                     activeBatches.decrementAndGet();
@@ -390,20 +598,20 @@ public final class AsyncChunkWarmup {
                         LC2H.LOGGER.error("Region batch warmup failed: {}", throwable.getMessage());
                     } else {
                         long endTime = System.nanoTime();
-                        regionsProcessed.incrementAndGet();
+                        long processedSoFar = regionsProcessed.addAndGet(filteredRegions.size());
                         if (VERBOSE_LOGGING) {
                             LC2H.LOGGER.debug("Completed region batch warmup for {} regions in {} ms",
-                                regionsToProcess.size(), (endTime - startTime) / 1_000_000);
+                                filteredRegions.size(), (endTime - startTime) / 1_000_000);
                         } else {
                             LC2H.LOGGER.debug("LC2H warmup: processed {} regions in {} ms",
-                                regionsToProcess.size(), (endTime - startTime) / 1_000_000);
+                                filteredRegions.size(), (endTime - startTime) / 1_000_000);
                         }
 
-                        if (regionsProcessed.get() % 10 == 0) {
+                        if (processedSoFar % 10 == 0) {
                             long total = cacheHits.get() + cacheMisses.get();
                             double hitRate = total > 0 ? (cacheHits.get() * 100.0) / total : 0.0;
                             LC2H.LOGGER.debug("Region Warmup Stats - Cache hit rate: {}%, Regions: {}, Active: {}",
-                                String.format(java.util.Locale.ROOT, "%.1f", hitRate), regionsProcessed.get(), activeBatches.get());
+                                String.format(java.util.Locale.ROOT, "%.1f", hitRate), processedSoFar, activeBatches.get());
                         }
                     }
                 });
@@ -413,6 +621,93 @@ public final class AsyncChunkWarmup {
         } finally {
             Lc2hTimingRegistry.record("warmup.flush_region_batch", System.nanoTime() - flushStartNs);
         }
+    }
+
+    private static CompletableFuture<?> submitGpuRegionBatch(List<RegionProviderPair> regionsToProcess) {
+        if (!GPU_ENABLED || regionsToProcess.isEmpty() || isGpuWarmupTemporarilySuspended()) {
+            return null;
+        }
+        List<RegionBatchProcessingGPUTask.Entry> entries = new ArrayList<>(regionsToProcess.size());
+        for (RegionProviderPair pair : regionsToProcess) {
+            entries.add(new RegionBatchProcessingGPUTask.Entry(pair.provider(), pair.region()));
+        }
+        String batchName = "region-processing-batch-" + entries.get(0).region();
+        return submitGpuRegionEntries(entries, batchName, () -> RegionBatchProcessingGPUTask.processBatchOnCPU(entries));
+    }
+
+    private static CompletableFuture<?> submitGpuRegionEntries(List<RegionBatchProcessingGPUTask.Entry> entries,
+                                                               String batchName,
+                                                               Supplier<Boolean> cpuFallback) {
+        if (!GPU_ENABLED || entries == null || entries.isEmpty() || isGpuWarmupTemporarilySuspended()) {
+            return null;
+        }
+        RegionBatchProcessingGPUTask workload = new RegionBatchProcessingGPUTask(entries);
+        try {
+            if (isVulkanAvailable()) {
+                if (VERBOSE_LOGGING) {
+                    LC2H.LOGGER.debug("Creating Vulkan region batch for {} regions on {}", entries.size(), VulkanManager.deviceName());
+                }
+                return QuantifiedVulkan.<Boolean>builder(LC2H.MODID, batchName, workload.taskKey())
+                    .cpuFallback(cpuFallback)
+                    .workload(workload)
+                    .dataSizeBytes(workload.estimatedVramBytes())
+                    .parallelUnits(workload.estimatedComputeUnits())
+                    .complexity(QuantifiedVulkan.Complexity.MASSIVE)
+                    .kind(QuantifiedVulkan.WorkloadKind.SPATIAL_ANALYSIS)
+                    .timeout(Duration.ofSeconds(45))
+                    .submit();
+            }
+            if (isOpenClAvailable()) {
+                if (VERBOSE_LOGGING) {
+                    LC2H.LOGGER.debug("Creating OpenCL region batch for {} regions", entries.size());
+                }
+                return QuantifiedOpenCL.<Boolean>builder(LC2H.MODID, batchName, workload.taskKey())
+                    .cpuFallback(cpuFallback)
+                    .workload(workload)
+                    .dataSizeBytes(workload.estimatedVramBytes())
+                    .parallelUnits(workload.estimatedComputeUnits())
+                    .complexity(QuantifiedOpenCL.Complexity.MASSIVE)
+                    .kind(QuantifiedOpenCL.WorkloadKind.SPATIAL_ANALYSIS)
+                    .timeout(Duration.ofSeconds(45))
+                    .submit();
+            }
+        } catch (LinkageError linkageError) {
+            if (VERBOSE_LOGGING) {
+                LC2H.LOGGER.debug("GPU batch initialization skipped due to missing dependencies: {}", linkageError.toString());
+            } else {
+                LC2H.LOGGER.warn("GPU batch warmup unavailable (missing dependencies: {}). Falling back to CPU processing.", linkageError.getMessage());
+            }
+        } catch (Exception e) {
+            LC2H.LOGGER.warn("Failed to create GPU region batch, falling back to CPU: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    private static CompletableFuture<List<Boolean>> submitCpuRegionBatch(List<RegionProviderPair> regionsToProcess) {
+        List<TaskBatchItem<Boolean>> regionBatchTasks = new ArrayList<>(regionsToProcess.size());
+        for (RegionProviderPair pair : regionsToProcess) {
+            IDimensionInfo provider = pair.provider();
+            RegionCoord region = pair.region();
+            regionBatchTasks.add(new TaskBatchItem<>(
+                "region-" + region,
+                () -> {
+                    long taskStartNs = System.nanoTime();
+                    try {
+                        processEntireRegion(provider, region);
+                        return true;
+                    } finally {
+                        Lc2hTimingRegistry.record("warmup.region_task", System.nanoTime() - taskStartNs);
+                    }
+                },
+                null,
+                CHUNKS_PER_REGION * 2048L,
+                CHUNKS_PER_REGION * 256
+            ));
+        }
+        return TaskScheduler.submitBatch(
+            "lc2h", "region-warmup", regionBatchTasks,
+            task -> ResourceHint.CPU
+        );
     }
 
     private static void requestFlush(boolean immediate) {
@@ -458,49 +753,53 @@ public final class AsyncChunkWarmup {
 
     private static int effectiveRegionBatchSize() {
         int base = REGION_BATCH_SIZE;
-        if (isOpenClAvailable()) {
+        if (isVulkanAvailable()) {
+            base = Math.min(16, Math.max(base + 4, base * 4));
+        } else if (isOpenClAvailable()) {
             base = Math.min(8, Math.max(base, base * 2));
         }
         double tickMs = ServerTickLoad.getSmoothedTickMs();
-        if (tickMs >= 45.0D) {
+        if (tickMs >= 48.0D) {
             base = Math.max(1, base / 2);
-        } else if (tickMs >= 35.0D) {
+        } else if (tickMs >= 40.0D) {
+            base = Math.max(1, (int) Math.round(base * 0.75));
+        }
+        int pendingScans = ChunkPostProcessor.getPendingScanCount();
+        int deferredTrees = DeferredTreeQueue.pendingCountAll() + DeferredTreeQueue.readyCountAll();
+        if (pendingScans >= 32 || deferredTrees >= 80 || tickMs >= 32.0D) {
+            base = Math.max(1, base / 2);
+        } else if (pendingScans >= 20 || deferredTrees >= 48 || tickMs >= 28.0D) {
+            base = Math.max(1, (int) Math.round(base * 0.75D));
+        }
+        return Math.max(1, applyGpuPressureLimit(base));
+    }
+
+    private static int effectiveMaxConcurrentBatches() {
+        int base = MAX_CONCURRENT_BATCHES;
+        if (isVulkanAvailable()) {
+            base = Math.min(8, Math.max(base + 2, base * 3));
+        } else if (isOpenClAvailable()) {
+            base = Math.min(8, Math.max(base, base * 2));
+        }
+        double tickMs = ServerTickLoad.getSmoothedTickMs();
+        if (tickMs >= 48.0D) {
+            base = Math.max(1, base / 2);
+        } else if (tickMs >= 40.0D) {
             base = Math.max(1, (int) Math.round(base * 0.75));
         }
         int pendingScans = ChunkPostProcessor.getPendingScanCount();
         int deferredTrees = DeferredTreeQueue.pendingCountAll() + DeferredTreeQueue.readyCountAll();
         if (pendingScans >= 24 || deferredTrees >= 64 || tickMs >= 28.0D) {
-            base = Math.max(1, base / 2);
-        } else if (pendingScans >= 12 || deferredTrees >= 32 || tickMs >= 24.0D) {
-            base = Math.max(1, (int) Math.round(base * 0.75D));
-        }
-        return Math.max(1, base);
-    }
-
-    private static int effectiveMaxConcurrentBatches() {
-        int base = MAX_CONCURRENT_BATCHES;
-        if (isOpenClAvailable()) {
-            base = Math.min(8, Math.max(base, base * 2));
-        }
-        double tickMs = ServerTickLoad.getSmoothedTickMs();
-        if (tickMs >= 45.0D) {
-            base = Math.max(1, base / 2);
-        } else if (tickMs >= 35.0D) {
-            base = Math.max(1, (int) Math.round(base * 0.75));
-        }
-        int pendingScans = ChunkPostProcessor.getPendingScanCount();
-        int deferredTrees = DeferredTreeQueue.pendingCountAll() + DeferredTreeQueue.readyCountAll();
-        if (pendingScans >= 16 || deferredTrees >= 48 || tickMs >= 24.0D) {
             base = 1;
         }
-        return Math.max(1, base);
+        return Math.max(1, applyGpuPressureLimit(base));
     }
 
     public static void kickFlushMaybe() {
         if (REGION_BUFFER_SIZE.get() == 0) {
             return;
         }
-        if (activeBatches.get() >= MAX_CONCURRENT_BATCHES) {
+        if (activeBatches.get() >= effectiveMaxConcurrentBatches()) {
             return;
         }
         long now = System.currentTimeMillis();
@@ -515,71 +814,43 @@ public final class AsyncChunkWarmup {
     }
 
     private static void processEntireRegion(IDimensionInfo provider, RegionCoord region) {
-        if (VERBOSE_LOGGING) {
-            LC2H.LOGGER.debug("Processing entire region {}", region);
-        }
+        runWithinCpuWarmup(() -> {
+            if (VERBOSE_LOGGING) {
+                LC2H.LOGGER.debug("Processing entire region {}", region);
+            }
 
-        long startTime = System.nanoTime();
+            long startTime = System.nanoTime();
 
-        try {
-            for (int localX = 0; localX < REGION_SIZE; localX++) {
-                for (int localZ = 0; localZ < REGION_SIZE; localZ++) {
-                    ChunkCoord chunk = region.getChunk(localX, localZ);
+            try {
+                for (int localX = 0; localX < REGION_SIZE; localX++) {
+                    for (int localZ = 0; localZ < REGION_SIZE; localZ++) {
+                        ChunkCoord chunk = region.getChunk(localX, localZ);
 
-                    AsyncMultiChunkPlanner.preSchedule(provider, chunk);
-                    AsyncBuildingInfoPlanner.preSchedule(provider, chunk);
-                    AsyncTerrainFeaturePlanner.preSchedule(provider, chunk);
-                    AsyncPaletteGenerator.preSchedule(provider, chunk);
-                    AsyncDebrisGenerator.preSchedule(provider, chunk);
-                    AsyncTerrainCorrectionPlanner.preSchedule(provider, chunk);
+                        AsyncMultiChunkPlanner.preSchedule(provider, chunk);
+                        AsyncBuildingInfoPlanner.preSchedule(provider, chunk);
+                        AsyncTerrainFeaturePlanner.preSchedule(provider, chunk);
+                        AsyncPaletteGenerator.preSchedule(provider, chunk);
+                        AsyncDebrisGenerator.preSchedule(provider, chunk);
+                        AsyncTerrainCorrectionPlanner.preSchedule(provider, chunk);
+                    }
                 }
-            }
 
-            long endTime = System.nanoTime();
-            if (VERBOSE_LOGGING) {
-                LC2H.LOGGER.debug("Completed region {} in {} ms", region, (endTime - startTime) / 1_000_000);
-            }
+                long endTime = System.nanoTime();
+                if (VERBOSE_LOGGING) {
+                    LC2H.LOGGER.debug("Completed region {} in {} ms", region, (endTime - startTime) / 1_000_000);
+                }
 
-        } catch (Throwable t) {
-            LC2H.LOGGER.error("Failed to process region {}: {}", region, t.getMessage());
-            throw t;
-        }
+            } catch (Throwable t) {
+                LC2H.LOGGER.error("Failed to process region {}: {}", region, t.getMessage());
+                throw t;
+            }
+            return Boolean.TRUE;
+        });
     }
 
-
-    private static Object createRegionGPUTask(IDimensionInfo provider, RegionCoord region) {
-        if (!GPU_ENABLED) {
-            return null;
-        }
-        try {
-            RegionProcessingGPUTask workload = new RegionProcessingGPUTask(provider, region);
-            long taskKey = workload.taskKey();
-
-            Object gpuTask = QuantifiedOpenCL.<Boolean>builder(LC2H.MODID, "region-processing-" + region, taskKey)
-                .cpuFallback(() -> RegionProcessingGPUTask.processRegionOnCPU(provider, region))
-                .workload(workload)
-                .dataSizeBytes(RegionProcessingGPUTask.VRAM_BYTES)
-                .parallelUnits(RegionProcessingGPUTask.PARALLEL_UNITS)
-                .complexity(QuantifiedOpenCL.Complexity.COMPLEX)
-                .kind(QuantifiedOpenCL.WorkloadKind.SPATIAL_ANALYSIS)
-                .timeout(Duration.ofSeconds(30))
-                .buildTask();
-            return gpuTask;
-        } catch (LinkageError linkageError) {
-            if (VERBOSE_LOGGING) {
-                LC2H.LOGGER.debug("GPU task initialization skipped for {} due to missing dependencies: {}", region, linkageError.toString());
-            } else {
-                LC2H.LOGGER.warn("GPU acceleration unavailable for region {} (missing dependencies: {}). Falling back to CPU processing.", region, linkageError.getMessage());
-            }
-            return null;
-        } catch (Exception e) {
-            LC2H.LOGGER.warn("Failed to create GPU task for region {}, falling back to CPU: {}", region, e.getMessage());
-            return null; 
-        }
-    }
 
     private static boolean ensureGpuReady() {
-        boolean available = isOpenClAvailable();
+        boolean available = isGpuBackendAvailable();
         if (available) {
             gpuReadyOnce = true;
             lastFailedGpuProbe.set(0);
@@ -602,6 +873,91 @@ public final class AsyncChunkWarmup {
             }
             return false;
         }
+    }
+
+    private static boolean isVulkanAvailable() {
+        try {
+            return QuantifiedVulkan.isGpuReady();
+        } catch (Throwable t) {
+            if (VERBOSE_LOGGING) {
+                LC2H.LOGGER.debug("Vulkan availability check failed: {}", t.toString());
+            }
+            return false;
+        }
+    }
+
+    private static boolean isGpuBackendAvailable() {
+        if (isVulkanAvailable()) {
+            return true;
+        }
+        return isOpenClAvailable();
+    }
+
+    private static int applyGpuPressureLimit(int base) {
+        GPUMonitor.GPUStatus status = gpuStatus();
+        if (status == null) {
+            return base;
+        }
+        if (isVulkanAvailable()) {
+            if (status.temperatureC() >= 96.0d || status.computeUtilization() >= 0.995d || status.memoryUtilization() >= 0.98d) {
+                return 1;
+            }
+            if (status.temperatureC() >= 92.0d || status.computeUtilization() >= 0.94d || status.memoryUtilization() >= 0.92d) {
+                return Math.max(1, (int) Math.round(base * 0.7d));
+            }
+            return base;
+        }
+        if (status.temperatureC() >= 92.0d || status.computeUtilization() >= 0.95d || status.memoryUtilization() >= 0.92d) {
+            return 1;
+        }
+        if (status.temperatureC() >= 88.0d || status.computeUtilization() >= 0.88d || status.memoryUtilization() >= 0.85d) {
+            return Math.max(1, base / 2);
+        }
+        return base;
+    }
+
+    private static boolean isGpuWarmupTemporarilySuspended() {
+        GPUMonitor.GPUStatus status = gpuStatus();
+        if (status == null) {
+            return false;
+        }
+        if (isVulkanAvailable()) {
+            return status.temperatureC() >= 97.0d
+                || status.computeUtilization() >= 0.998d
+                || status.memoryUtilization() >= 0.99d;
+        }
+        return status.temperatureC() >= 94.0d
+            || status.computeUtilization() >= 0.98d
+            || status.memoryUtilization() >= 0.95d;
+    }
+
+    private static boolean isMainOrServerThread() {
+        String name = Thread.currentThread().getName();
+        if (name == null) {
+            return false;
+        }
+        return "Server thread".equals(name)
+            || name.contains("Render thread")
+            || name.contains("Client thread")
+            || name.contains("main");
+    }
+
+    private static GPUMonitor.GPUStatus gpuStatus() {
+        try {
+            return OpenCLManager.getGPUStatus();
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static String selectedGpuBackend() {
+        if (isVulkanAvailable()) {
+            return "vulkan";
+        }
+        if (isOpenClAvailable()) {
+            return "opencl";
+        }
+        return "cpu";
     }
 
     private static void ensureOpenClProbeScheduled() {
@@ -746,6 +1102,79 @@ public final class AsyncChunkWarmup {
         return cacheMisses.get();
     }
 
+    public static void recordVulkanBatchProcessed(int regionCount) {
+        if (regionCount <= 0) {
+            return;
+        }
+        vulkanBatchesProcessed.incrementAndGet();
+        vulkanRegionsProcessed.addAndGet(regionCount);
+        recordExternalGpuChunks((long) regionCount * CHUNKS_PER_REGION);
+    }
+
+    public static void recordOpenClBatchProcessed(int regionCount) {
+        if (regionCount <= 0) {
+            return;
+        }
+        openClBatchesProcessed.incrementAndGet();
+        openClRegionsProcessed.addAndGet(regionCount);
+        recordExternalGpuChunks((long) regionCount * CHUNKS_PER_REGION);
+    }
+
+    public static void recordCpuFallbackProcessed(int regionCount) {
+        if (regionCount <= 0) {
+            return;
+        }
+        cpuFallbackRegionsProcessed.addAndGet(regionCount);
+    }
+
+    public static long getVulkanRegionsProcessed() {
+        return vulkanRegionsProcessed.get();
+    }
+
+    public static long getVulkanBatchesProcessed() {
+        return vulkanBatchesProcessed.get();
+    }
+
+    public static long getOpenClRegionsProcessed() {
+        return openClRegionsProcessed.get();
+    }
+
+    public static long getOpenClBatchesProcessed() {
+        return openClBatchesProcessed.get();
+    }
+
+    public static long getCpuFallbackRegionsProcessed() {
+        return cpuFallbackRegionsProcessed.get();
+    }
+
+    public static String describeGpuProcessingStats() {
+        long vulkanRegions = getVulkanRegionsProcessed();
+        long openClRegions = getOpenClRegionsProcessed();
+        long cpuFallbackRegions = getCpuFallbackRegionsProcessed();
+        return String.format(java.util.Locale.ROOT,
+            "backend=%s vulkanOnly=%d regions/%d batches/%d chunks opencl=%d regions/%d batches/%d chunks cpuFallback=%d regions/%d chunks",
+            selectedGpuBackend(),
+            vulkanRegions,
+            getVulkanBatchesProcessed(),
+            vulkanRegions * CHUNKS_PER_REGION,
+            openClRegions,
+            getOpenClBatchesProcessed(),
+            openClRegions * CHUNKS_PER_REGION,
+            cpuFallbackRegions,
+            cpuFallbackRegions * CHUNKS_PER_REGION
+        );
+    }
+
+    private static void recordExternalGpuChunks(long count) {
+        if (count <= 0L) {
+            return;
+        }
+        long total = Math.max(1L, count * GPU_ASSIST_TASK_FANOUT);
+        for (long i = 0L; i < total; i++) {
+            TaskScheduler.recordExternalGpuTask();
+        }
+    }
+
     public static int pruneExpiredEntries() {
         return pruneExpiredEntries(System.currentTimeMillis());
     }
@@ -777,6 +1206,11 @@ public final class AsyncChunkWarmup {
         PRE_SCHEDULE_CACHE.clear();
         flushScheduled.set(false);
         activeBatches.set(0);
+        vulkanRegionsProcessed.set(0);
+        vulkanBatchesProcessed.set(0);
+        openClRegionsProcessed.set(0);
+        openClBatchesProcessed.set(0);
+        cpuFallbackRegionsProcessed.set(0);
     }
 
     private static boolean enqueueRegion(IDimensionInfo provider, RegionCoord region) {

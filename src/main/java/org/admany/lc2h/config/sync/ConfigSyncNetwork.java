@@ -8,10 +8,10 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.network.NetworkEvent;
 import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.PacketDistributor;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 import org.admany.lc2h.config.ConfigManager;
+import org.admany.lc2h.util.ResourceLocations;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -24,7 +24,7 @@ public final class ConfigSyncNetwork {
     private static final Logger LOGGER = LogManager.getLogger();
     private static final String PROTOCOL = "1";
     private static final SimpleChannel CHANNEL = NetworkRegistry.ChannelBuilder
-        .named(ResourceLocation.fromNamespaceAndPath("lc2h", "config_sync"))
+        .named(ResourceLocations.of("lc2h", "config_sync"))
         .networkProtocolVersion(() -> PROTOCOL)
         .clientAcceptedVersions(PROTOCOL::equals)
         .serverAcceptedVersions(PROTOCOL::equals)

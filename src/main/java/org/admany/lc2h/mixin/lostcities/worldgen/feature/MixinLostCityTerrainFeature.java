@@ -12,7 +12,6 @@ import mcjty.lostcities.worldgen.lost.Explosion;
 import mcjty.lostcities.worldgen.lost.cityassets.CompiledPalette;
 import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.ServerLevelAccessor;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.mixin.accessor.lostcities.BuildingInfoAccessor;
@@ -130,14 +129,10 @@ public class MixinLostCityTerrainFeature {
             org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityTerrainFeature.generate begin coord={} thread={}", coord, Thread.currentThread().getName());
 	        }
 
-        try {
-            if (region != null && chunk != null) {
-                var token = LostCitiesGenerationLocks.acquireChunkStripeLock(((ServerLevelAccessor) region).getLevel().dimension(),
-                    chunk.getPos().x, chunk.getPos().z);
-                LC2H_GENERATE_LOCK.set(token);
-            }
-        } catch (Throwable ignored) {
-        }
+        // NOTE: The stripe lock is already acquired by MixinLostCityFeature.lc2h$wrapGenerateWithStripeLock
+        // via withChunkStripeLock (try-finally, exception-safe). Acquiring it again here via
+        // acquireChunkStripeLock + @RETURN release was causing a lock leak: on exception exit,
+        // @RETURN doesn't fire but the outer withChunkStripeLock finally does, leaving hold count=1.
 
         ChunkGenTracker.recordGenerateStart(coord);
 

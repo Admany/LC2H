@@ -6,6 +6,7 @@ import org.admany.lc2h.LC2H;
 import org.admany.lc2h.util.cache.CacheTtl;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
+import org.admany.quantified.core.common.util.TaskScheduler;
 
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,6 +33,16 @@ public final class AsyncTerrainFeaturePlanner {
         Objects.requireNonNull(provider, "provider");
         Objects.requireNonNull(coord, "coord");
 
+        float[] gpuData = GPUMemoryManager.getGPUData(coord, GPU_DATA_CACHE);
+        if (gpuData != null) {
+            GPUMemoryManager.markAsHot(coord);
+            TaskScheduler.recordExternalGpuTask();
+            return;
+        }
+        if (!AsyncChunkWarmup.shouldAcceptPreschedule()) {
+            return;
+        }
+
         long now = System.currentTimeMillis();
         if (CacheTtl.markIfFresh(COMPUTATION_CACHE, coord, COMPUTATION_CACHE_TTL_MS, now)) {
             return;
@@ -45,14 +56,7 @@ public final class AsyncTerrainFeaturePlanner {
         }
         long startTime = System.nanoTime();
 
-        float[] gpuData = GPUMemoryManager.getGPUData(coord, GPU_DATA_CACHE);
-        if (gpuData != null) {
-            injectGPUData(coord, gpuData, provider);
-            if (debugLogging) {
-                LC2H.LOGGER.debug("Used GPU data for terrain features in {}", coord);
-                long endTime = System.nanoTime();
-                LC2H.LOGGER.debug("Finished preSchedule for {} in {} ms", coord, (endTime - startTime) / 1_000_000);
-            }
+        if (AsyncChunkWarmup.deferChunkPrescheduleToGpu(provider, coord, "terrain-feature")) {
             return;
         }
 
@@ -61,6 +65,13 @@ public final class AsyncTerrainFeaturePlanner {
     }
 
     private static void injectGPUData(ChunkCoord coord, float[] gpuData, IDimensionInfo provider) {
+        if (gpuData != null && gpuData.length >= 4 && gpuData.length < (16 * 16 * 4)) {
+            injectChunkSummary(coord, gpuData, provider);
+            return;
+        }
+        if (gpuData == null || gpuData.length < (16 * 16 * 4)) {
+            return;
+        }
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 int blockIndex = x * 16 + z;
@@ -93,6 +104,21 @@ public final class AsyncTerrainFeaturePlanner {
                 cacheConnectivityData(coord, x, z, connectedNorth, connectedSouth, connectedEast, connectedWest);
             }
         }
+    }
+
+    private static void injectChunkSummary(ChunkCoord coord, float[] gpuData, IDimensionInfo provider) {
+        int height = 62 + Math.round(gpuData[1]);
+        int excavation = Math.max(0, Math.round(gpuData[2]));
+        int flags = Math.round(gpuData[3]);
+        String ruinType = (flags & 0x1) != 0 ? determineRuinType(coord, 8, 8, provider) : null;
+        String palette = determineMaterialPaletteFromGPU((flags >> 1) & 0x3);
+
+        cacheHeightModification(coord, 8, 8, height);
+        cacheExcavationData(coord, 8, 8, excavation);
+        cacheRuinData(coord, 8, 8, ruinType);
+        cacheMaterialPalette(coord, 8, 8, palette);
+        cacheNoiseValue(coord, 8, 8, gpuData[0]);
+        cacheConnectivityData(coord, 8, 8, true, true, true, true);
     }
 
     private static String determineMaterialPaletteFromGPU(float paletteIndex) {
@@ -288,9 +314,6 @@ public final class AsyncTerrainFeaturePlanner {
     public static void shutdown() {
         try {
             LC2H.LOGGER.info("AsyncTerrainFeaturePlanner: Shutting down");
-
-            PlannerBatchQueue.flushKind(PlannerTaskKind.TERRAIN_FEATURE);
-
             COMPUTATION_CACHE.clear();
             GPU_DATA_CACHE.clear();
 
@@ -320,6 +343,8 @@ public final class AsyncTerrainFeaturePlanner {
         try {
             float[] gpuData = GPUMemoryManager.getGPUData(coord, GPU_DATA_CACHE);
             if (gpuData != null) {
+                GPUMemoryManager.markAsHot(coord);
+                TaskScheduler.recordExternalGpuTask();
                 injectGPUData(coord, gpuData, provider);
             } else {
                 computeTerrainModifications(coord, provider);

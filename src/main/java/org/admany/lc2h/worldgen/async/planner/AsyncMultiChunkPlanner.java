@@ -25,6 +25,7 @@ import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
 import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
+import org.admany.quantified.core.common.util.TaskScheduler;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -357,12 +358,18 @@ public final class AsyncMultiChunkPlanner {
             return;
         }
 
+        if (GPUMemoryManager.getGPUData(coord, GPU_DATA_CACHE) != null) {
+            GPUMemoryManager.markAsHot(coord);
+            TaskScheduler.recordExternalGpuTask();
+            return;
+        }
+        if (!AsyncChunkWarmup.shouldAcceptPreschedule()) {
+            return;
+        }
+
         boolean debugLogging = AsyncChunkWarmup.isWarmupDebugLoggingEnabled();
 
-        if (GPUMemoryManager.getGPUData(coord, GPU_DATA_CACHE) != null) {
-            if (debugLogging) {
-                LC2H.LOGGER.debug("Used GPU data for multichunk planning in {}", coord);
-            }
+        if (AsyncChunkWarmup.deferChunkPrescheduleToGpu(provider, coord, "multichunk")) {
             return;
         }
 
@@ -408,8 +415,12 @@ public final class AsyncMultiChunkPlanner {
             WARM_BUILDING_INFO_SUBMITTED.clear();
             GPU_DATA_CACHE.clear();
             if (MULTICHUNK_PRECOMPUTE_POOL != null) {
-                MULTICHUNK_PRECOMPUTE_POOL.shutdown();
+                MULTICHUNK_PRECOMPUTE_POOL.shutdownNow();
             }
+            PENDING.clear();
+            PENDING_SIZE.set(0);
+            PENDING_DRAINING.set(false);
+            PENDING_FLUSH_SCHEDULED.set(false);
 
             LC2H.LOGGER.info("AsyncMultiChunkPlanner: Shutdown complete");
         } catch (Exception e) {

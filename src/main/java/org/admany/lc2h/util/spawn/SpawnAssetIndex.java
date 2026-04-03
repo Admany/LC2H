@@ -8,6 +8,7 @@ import mcjty.lostcities.worldgen.lost.regassets.data.DataTools;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.CommonLevelAccessor;
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.util.ResourceLocations;
 
 import java.util.Collections;
 import java.util.HashSet;
@@ -17,12 +18,21 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class SpawnAssetIndex {
+    public enum AssetType {
+        BUILDING,
+        PART,
+        MULTI_BUILDING
+    }
+
     private static volatile Set<String> BUILDING_IDS = Set.of();
     private static volatile Set<String> PART_IDS = Set.of();
     private static volatile Set<String> MULTI_BUILDING_IDS = Set.of();
     private static volatile Map<String, String> BUILDING_ALIASES = Map.of();
     private static volatile Map<String, String> PART_ALIASES = Map.of();
     private static volatile Map<String, String> MULTI_BUILDING_ALIASES = Map.of();
+    private static final ConcurrentHashMap<String, Set<String>> VARIANT_CACHE = new ConcurrentHashMap<>(256);
+    private static final int PREFIX_SCAN_LIMIT = Math.max(256,
+        Integer.getInteger("lc2h.spawnAsset.prefixScanLimit", 2000));
     private static final AtomicBoolean LOADED = new AtomicBoolean(false);
 
     private SpawnAssetIndex() {
@@ -115,6 +125,7 @@ public final class SpawnAssetIndex {
         BUILDING_ALIASES = Collections.unmodifiableMap(buildingAliases);
         PART_ALIASES = Collections.unmodifiableMap(partAliases);
         MULTI_BUILDING_ALIASES = Collections.unmodifiableMap(multiAliases);
+        VARIANT_CACHE.clear();
         LOADED.set(true);
 
         LC2H.LOGGER.debug(
@@ -169,6 +180,62 @@ public final class SpawnAssetIndex {
         return resolveAlias(id, MULTI_BUILDING_IDS, MULTI_BUILDING_ALIASES);
     }
 
+    public static Set<String> resolveToVariantSet(String rawId, AssetType type) {
+        if (rawId == null || rawId.isBlank()) {
+            return Set.of();
+        }
+
+        String cacheKey = type.name() + ':' + rawId;
+        Set<String> cached = VARIANT_CACHE.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+
+        Set<String> known = switch (type) {
+            case BUILDING -> BUILDING_IDS;
+            case PART -> PART_IDS;
+            case MULTI_BUILDING -> MULTI_BUILDING_IDS;
+        };
+
+        Set<String> out = new HashSet<>(4);
+        if (known.contains(rawId)) {
+            addResolvedVariant(out, rawId);
+        }
+
+        String resolved = switch (type) {
+            case BUILDING -> resolveBuildingId(rawId);
+            case PART -> resolvePartId(rawId);
+            case MULTI_BUILDING -> resolveMultiBuildingId(rawId);
+        };
+        if (resolved != null && known.contains(resolved)) {
+            addResolvedVariant(out, resolved);
+        }
+
+        try {
+            java.util.List<String> suggestions = switch (type) {
+                case BUILDING -> suggestBuildingIds(rawId, 4);
+                case PART -> suggestPartIds(rawId, 4);
+                case MULTI_BUILDING -> suggestMultiBuildingIds(rawId, 4);
+            };
+            if (suggestions != null) {
+                for (String suggestion : suggestions) {
+                    if (suggestion != null && known.contains(suggestion)) {
+                        addResolvedVariant(out, suggestion);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+
+        if (out.isEmpty() && rawId.contains(":")) {
+            addResolvedVariant(out, rawId);
+        }
+
+        Set<String> result = Collections.unmodifiableSet(out);
+        Set<String> raced = VARIANT_CACHE.putIfAbsent(cacheKey, result);
+        return raced != null ? raced : result;
+    }
+
     private static void registerAlias(Map<String, String> aliases,
                                       Set<String> ambiguous,
                                       String alias,
@@ -193,9 +260,13 @@ public final class SpawnAssetIndex {
         if (known.contains(id)) {
             return id;
         }
+        String aliasHit = aliases.get(id);
+        if (aliasHit != null && known.contains(aliasHit)) {
+            return aliasHit;
+        }
         try {
             ResourceLocation canonical = id.contains(":")
-                ? ResourceLocation.fromNamespaceAndPath(id.substring(0, id.indexOf(':')), id.substring(id.indexOf(':') + 1))
+                ? ResourceLocations.of(id.substring(0, id.indexOf(':')), id.substring(id.indexOf(':') + 1))
                 : DataTools.fromName(id);
             if (canonical != null) {
                 String canonicalId = canonical.toString();
@@ -258,8 +329,7 @@ public final class SpawnAssetIndex {
                 }
             }
         }
-        String resolved = aliases.get(id);
-        return resolved != null ? resolved : id;
+        return aliasHit != null ? aliasHit : id;
     }
 
     public static java.util.List<String> suggestBuildingIds(String rawId, int limit) {
@@ -511,7 +581,11 @@ public final class SpawnAssetIndex {
         int bestScore = -1;
         String bestId = null;
         boolean tie = false;
+        int scanned = 0;
         for (String id : known) {
+            if (++scanned > PREFIX_SCAN_LIMIT) {
+                break;
+            }
             if (namespace != null && !namespace.isBlank()) {
                 int colon = id.indexOf(':');
                 if (colon <= 0 || !namespace.equals(id.substring(0, colon))) {
@@ -539,6 +613,30 @@ public final class SpawnAssetIndex {
             return null;
         }
         return bestId;
+    }
+
+    private static void addResolvedVariant(Set<String> variants, String value) {
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        variants.add(value);
+        variants.add(stripRotationSuffixFromId(value));
+        String fileName = extractFileName(value);
+        if (fileName != null && !fileName.isBlank()) {
+            variants.add(fileName);
+            variants.add(stripRotationSuffix(fileName));
+        }
+    }
+
+    private static String stripRotationSuffixFromId(String value) {
+        if (value == null || value.isBlank()) {
+            return value;
+        }
+        int slash = value.lastIndexOf('/');
+        if (slash < 0 || slash + 1 >= value.length()) {
+            return stripRotationSuffix(value);
+        }
+        return value.substring(0, slash + 1) + stripRotationSuffix(value.substring(slash + 1));
     }
 
     private static int prefixScore(String a, String b) {

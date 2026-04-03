@@ -15,6 +15,7 @@ import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.config.ConfigManager;
+import org.admany.lc2h.util.ResourceLocations;
 import org.lwjgl.glfw.GLFW;
 
 import com.google.gson.JsonElement;
@@ -690,7 +691,7 @@ private Component unsavedDiscardLabel = Component.empty();
             return List.of("en_us");
         }
 
-        ResourceLocation enLoc = ResourceLocation.fromNamespaceAndPath(LC2H.MODID, "lang/en_us.json");
+        ResourceLocation enLoc = ResourceLocations.of(LC2H.MODID, "lang/en_us.json");
         JsonObject en = loadLangJson(manager, enLoc);
         if (en == null || en.size() == 0) {
             return List.of("en_us");
@@ -725,7 +726,7 @@ private Component unsavedDiscardLabel = Component.empty();
                 continue;
             }
 
-            JsonObject candidate = loadLangJson(manager, ResourceLocation.fromNamespaceAndPath(LC2H.MODID, "lang/" + locale + ".json"));
+            JsonObject candidate = loadLangJson(manager, ResourceLocations.of(LC2H.MODID, "lang/" + locale + ".json"));
             if (candidate == null || candidate.size() == 0) {
                 continue;
             }

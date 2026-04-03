@@ -12,6 +12,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.TickingBlockEntity;
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.util.ResourceLocations;
 import net.minecraftforge.fml.ModList;
 import net.minecraftforge.registries.ForgeRegistries;
 
@@ -28,7 +29,7 @@ public final class BlockEntityTickWatch {
     private static final String CREATE_WHEEL_BE = "create:crushing_wheel";
     private static final String CREATE_WHEEL_CONTROLLER_BE = "create:crushing_wheel_controller";
     private static final ResourceLocation CREATE_WHEEL_CONTROLLER_BE_ID =
-        ResourceLocation.fromNamespaceAndPath("create", "crushing_wheel_controller");
+        ResourceLocations.of("create", "crushing_wheel_controller");
 
     private static final AtomicBoolean TICKER_REFLECTION_LOGGED = new AtomicBoolean(false);
 

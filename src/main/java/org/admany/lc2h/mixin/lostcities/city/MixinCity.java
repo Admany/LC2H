@@ -43,7 +43,11 @@ public abstract class MixinCity {
     @Unique
     private static volatile boolean LC2H_OCCUPIED_READY = false;
     @Unique
+    private static volatile Object LC2H_OCCUPIED_READY_KEY = null;
+    @Unique
     private static volatile boolean LC2H_PREDEFINED_READY = false;
+    @Unique
+    private static volatile Object LC2H_PREDEFINED_READY_KEY = null;
     @Unique
     private static final Object LC2H_PREDEFINED_CITY_LOCK = new Object();
     @Unique
@@ -106,7 +110,9 @@ public abstract class MixinCity {
         LC2H_CITY_RARITY_CACHE.clear();
         LostCitiesCacheBudgetManager.clear(LC2H_CITY_STYLE_BUDGET);
         LC2H_OCCUPIED_READY = false;
+        LC2H_OCCUPIED_READY_KEY = null;
         LC2H_PREDEFINED_READY = false;
+        LC2H_PREDEFINED_READY_KEY = null;
         LC2H_PREDEFINED_CITY_READY = false;
     }
 
@@ -166,34 +172,62 @@ public abstract class MixinCity {
     }
 
     private static void ensureOccupiedReady(IDimensionInfo provider) {
-        if (LC2H_OCCUPIED_READY) {
+        Object readyKey = occupiedKey(provider);
+        if (readyKey == null) {
+            return;
+        }
+        if (LC2H_OCCUPIED_READY && readyKey.equals(LC2H_OCCUPIED_READY_KEY)) {
             return;
         }
         if (provider == null || provider.getWorld() == null) {
             return;
         }
         synchronized (LC2H_OCCUPIED_LOCK) {
-            if (LC2H_OCCUPIED_READY) {
+            if (LC2H_OCCUPIED_READY && readyKey.equals(LC2H_OCCUPIED_READY_KEY)) {
                 return;
             }
             lc2h$calculateOccupied(provider);
             LC2H_OCCUPIED_READY = OCCUPIED_CHUNKS_BUILDING != null && OCCUPIED_CHUNKS_STREET != null;
+            LC2H_OCCUPIED_READY_KEY = LC2H_OCCUPIED_READY ? readyKey : null;
         }
     }
 
     private static void ensurePredefinedReady(CommonLevelAccessor level) {
-        if (LC2H_PREDEFINED_READY) {
+        Object readyKey = predefinedKey(level);
+        if (readyKey == null) {
+            return;
+        }
+        if (LC2H_PREDEFINED_READY && readyKey.equals(LC2H_PREDEFINED_READY_KEY)) {
             return;
         }
         if (level == null) {
             return;
         }
         synchronized (LC2H_OCCUPIED_LOCK) {
-            if (LC2H_PREDEFINED_READY) {
+            if (LC2H_PREDEFINED_READY && readyKey.equals(LC2H_PREDEFINED_READY_KEY)) {
                 return;
             }
             lc2h$calculateMap(level);
             LC2H_PREDEFINED_READY = predefinedBuildingMap != null && predefinedStreetMap != null;
+            LC2H_PREDEFINED_READY_KEY = LC2H_PREDEFINED_READY ? readyKey : null;
         }
+    }
+
+    @Unique
+    private static Object occupiedKey(IDimensionInfo provider) {
+        if (provider == null || provider.getWorld() == null) {
+            return null;
+        }
+        // WorldGenLevel in this mapping does not expose dimension(); use stable object identity.
+        return provider.getWorld();
+    }
+
+    @Unique
+    private static Object predefinedKey(CommonLevelAccessor level) {
+        if (level == null) {
+            return null;
+        }
+        // CommonLevelAccessor in this mapping does not expose dimension(); identity is sufficient.
+        return level;
     }
 }

@@ -13,8 +13,10 @@ import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.lc2h.util.log.RateLimitedLogger;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
+import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
 import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
+import org.admany.quantified.core.common.util.TaskScheduler;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -22,6 +24,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -135,8 +138,8 @@ public final class PlannerBatchQueue {
     }
 
     public static void shutdown() {
-        flushAll();
         BATCHES.clear();
+        DEFERRED_FLUSH_SCHEDULED.set(false);
         PENDING_TASKS.set(0);
         for (PlannerTaskKind kind : PlannerTaskKind.values()) {
             PENDING_BY_KIND.set(kind.ordinal(), 0);
@@ -181,6 +184,25 @@ public final class PlannerBatchQueue {
             LC2H.LOGGER.debug(log.toString());
         }
 
+        CompletableFuture<?> gpuAssist = submitGpuAssistIfEligible(key, filtered);
+        if (gpuAssist != null) {
+            gpuAssist.whenComplete((ignored, throwable) -> {
+                if (throwable != null) {
+                    LC2H.LOGGER.debug("Planner GPU assist failed for {}: {}", key.label(), throwable.toString());
+                    dispatchCpuBatch(key, filtered);
+                    return;
+                }
+                List<PlannerExecutable> remaining = filterGpuSatisfied(filtered);
+                if (!remaining.isEmpty()) {
+                    dispatchCpuBatch(key, remaining);
+                }
+            });
+            return;
+        }
+        dispatchCpuBatch(key, filtered);
+    }
+
+    private static void dispatchCpuBatch(PlannerBatchKey key, List<PlannerExecutable> filtered) {
         try {
             GPUMemoryManager.continuousCleanup();
         } catch (Throwable t) {
@@ -202,6 +224,58 @@ public final class PlannerBatchQueue {
                     LC2H.LOGGER.debug("Deferred cleanup skipped after planner batch: {}", t.toString());
                 }
             });
+    }
+
+    private static CompletableFuture<?> submitGpuAssistIfEligible(PlannerBatchKey key, List<PlannerExecutable> filtered) {
+        ArrayList<ChunkCoord> coords = new ArrayList<>(filtered.size());
+        for (PlannerExecutable exec : filtered) {
+            if (exec.coord == null) {
+                continue;
+            }
+            if (exec.kind == PlannerTaskKind.TERRAIN_FEATURE
+                || exec.kind == PlannerTaskKind.TERRAIN_CORRECTION
+                || exec.kind == PlannerTaskKind.BUILDING_INFO) {
+                coords.add(exec.coord);
+            }
+        }
+        if (coords.isEmpty()) {
+            return null;
+        }
+        return AsyncChunkWarmup.submitGpuAssistBatch(key.provider, coords, "planner-gpu-assist-" + key.label());
+    }
+
+    private static List<PlannerExecutable> filterGpuSatisfied(List<PlannerExecutable> filtered) {
+        ArrayList<PlannerExecutable> remaining = new ArrayList<>(filtered.size());
+        for (PlannerExecutable exec : filtered) {
+            if (!consumeGpuSatisfied(exec)) {
+                remaining.add(exec);
+            }
+        }
+        return remaining;
+    }
+
+    private static boolean consumeGpuSatisfied(PlannerExecutable exec) {
+        if (exec == null || exec.coord == null) {
+            return false;
+        }
+        return switch (exec.kind) {
+            case BUILDING_INFO -> AsyncBuildingInfoPlanner.consumeGpuWarmup(exec.coord);
+            case TERRAIN_FEATURE -> consumeGpuMarker(exec.coord, AsyncTerrainFeaturePlanner.GPU_DATA_CACHE);
+            case TERRAIN_CORRECTION -> consumeGpuMarker(exec.coord, AsyncTerrainCorrectionPlanner.GPU_DATA_CACHE);
+            default -> false;
+        };
+    }
+
+    private static boolean consumeGpuMarker(ChunkCoord coord, ConcurrentHashMap<ChunkCoord, float[]> cache) {
+        if (coord == null || cache == null) {
+            return false;
+        }
+        if (GPUMemoryManager.getGPUData(coord, cache) == null) {
+            return false;
+        }
+        GPUMemoryManager.markAsHot(coord);
+        TaskScheduler.recordExternalGpuTask();
+        return true;
     }
 
     private static void runExecutable(PlannerTaskKind kind, PlannerExecutable exec) {

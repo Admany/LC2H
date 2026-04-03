@@ -5,6 +5,8 @@ import mcjty.lostcities.worldgen.IDimensionInfo;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.util.cache.CacheTtl;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
+import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
+import org.admany.quantified.core.common.util.TaskScheduler;
 
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -31,6 +33,15 @@ public final class AsyncDebrisGenerator {
         Objects.requireNonNull(provider, "provider");
         Objects.requireNonNull(coord, "coord");
 
+        if (GPUMemoryManager.getGPUData(coord, GPU_DATA_CACHE) != null) {
+            GPUMemoryManager.markAsHot(coord);
+            TaskScheduler.recordExternalGpuTask();
+            return;
+        }
+        if (!AsyncChunkWarmup.shouldAcceptPreschedule()) {
+            return;
+        }
+
         long now = System.currentTimeMillis();
         if (CacheTtl.markIfFresh(COMPUTATION_CACHE, coord, COMPUTATION_CACHE_TTL_MS, now)) {
             return;
@@ -39,10 +50,7 @@ public final class AsyncDebrisGenerator {
 
         boolean debugLogging = AsyncChunkWarmup.isWarmupDebugLoggingEnabled();
 
-        if (GPU_DATA_CACHE.containsKey(coord)) {
-            if (debugLogging) {
-                LC2H.LOGGER.debug("Used GPU data for debris generation in {}", coord);
-            }
+        if (AsyncChunkWarmup.deferChunkPrescheduleToGpu(provider, coord, "debris")) {
             return;
         }
 

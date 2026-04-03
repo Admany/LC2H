@@ -8,6 +8,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -98,6 +99,7 @@ public class ChunkPostProcessor {
     );
     private static final int MAX_PENDING_FLOATING_CHECKS = Math.max(256, Integer.getInteger("lc.floating.max_pending_checks", 8192));
     private static final int MAX_FLOATING_CHECKS_PER_TICK = Math.max(8, Integer.getInteger("lc.floating.max_checks_per_tick", 128));
+    private static final int MAX_SHADOW_REMOVALS_PER_TICK = Math.max(32, Integer.getInteger("lc.floating.max_shadow_removals_per_tick", 256));
     private static final int MAX_FLUID_CLUSTER_SCAN = Math.max(16, Integer.getInteger("lc.floating.max_fluid_cluster_scan", 96));
     private static final int CITY_FLOATING_SOURCE_MIN_HEIGHT =
         Math.max(4, Integer.getInteger("lc.floating.city_source_column_min_height", 8));
@@ -117,6 +119,7 @@ public class ChunkPostProcessor {
     private static final boolean ENABLE_FLOATING_SCAN = Boolean.getBoolean("lc.floating.enable_scan");
     private static final int SAFE_SET_FLAGS = 2;
     private static final BlockState AIR_STATE = Blocks.AIR.defaultBlockState();
+    private static final int SHADOW_Y_OFFSET = 1024;
     private static final ThreadLocal<BlockPos.MutableBlockPos> LOCAL_SCAN_POS =
         ThreadLocal.withInitial(BlockPos.MutableBlockPos::new);
     private static final ThreadLocal<BlockPos.MutableBlockPos> LOCAL_BELOW_POS =
@@ -124,6 +127,8 @@ public class ChunkPostProcessor {
 
     private static final String DATA_ROOT = "lc2h";
     private static final String DATA_FLAG = "doubleblock_repaired";
+    private static final String DATA_SCAN_VERSION_FLAG = "postprocess_scan_version";
+    private static final int CURRENT_SCAN_VERSION = 2;
 
     private static final Map<ChunkScanKey, ScanCursor> CHUNK_SCAN_PROGRESS = new ConcurrentHashMap<>();
     private static final Set<ChunkScanKey> INFLIGHT_CHUNK_SCANS = Collections.newSetFromMap(new ConcurrentHashMap<>());
@@ -133,7 +138,9 @@ public class ChunkPostProcessor {
     private static final AtomicBoolean LOGGED_FLOATING_QUEUE_HARD_LIMIT = new AtomicBoolean(false);
     private static final AtomicBoolean BATCH_IN_FLIGHT = new AtomicBoolean(false);
     private static final AtomicBoolean FLOATING_DRAIN_REQUESTED = new AtomicBoolean(false);
+    private static final AtomicBoolean SHADOW_REMOVAL_DRAIN_REQUESTED = new AtomicBoolean(false);
     private static volatile long LAST_FLOATING_DRAIN_TICK = -1L;
+    private static volatile long LAST_SHADOW_REMOVAL_DRAIN_TICK = -1L;
     private static volatile boolean RESCAN_TRIGGERED = false;
     private static volatile boolean RESCAN_IN_PROGRESS = false;
     private static volatile long RESCAN_START_TICK = 0;
@@ -143,6 +150,7 @@ public class ChunkPostProcessor {
     private static volatile double ADAPTIVE_WORK_BUDGET_MS = 1.5D;
 
     private static final ConcurrentHashMap<ResourceKey<Level>, PendingCheckQueue> PENDING_FLOATING = new ConcurrentHashMap<>();
+    private static final ConcurrentLinkedQueue<ShadowRemovalBatch> SHADOW_REMOVAL_QUEUE = new ConcurrentLinkedQueue<>();
     private static final ConcurrentHashMap<ResourceKey<Level>, IDimensionInfo> DIMENSION_INFO_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<ChunkScanKey, Boolean> CITY_CHUNK_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<ChunkScanKey, Long> RECENT_SCAN_ENQUEUE_MS = new ConcurrentHashMap<>();
@@ -155,6 +163,23 @@ public class ChunkPostProcessor {
         private final ConcurrentHashMap<Long, Boolean> dedupe = new ConcurrentHashMap<>();
         private volatile ResourceKey<Level> dimensionKey;
         private volatile ServerLevel level;
+    }
+
+    private static final class ShadowRemovalBatch {
+        private final ServerLevel level;
+        private final ChunkPos chunkPos;
+        private final int[] packedPositions;
+        private int cursor;
+
+        private ShadowRemovalBatch(ServerLevel level, ChunkPos chunkPos, int[] packedPositions) {
+            this.level = level;
+            this.chunkPos = chunkPos;
+            this.packedPositions = packedPositions;
+        }
+
+        private boolean hasRemaining() {
+            return cursor < packedPositions.length;
+        }
     }
 
     private record ScanCursor(int x, int y, int z) {
@@ -252,12 +277,38 @@ public class ChunkPostProcessor {
             return shouldRemoveTallCityFluidSource(level, pos, state);
         }
         if (isHorrorElementBlock(state)) {
-            return isFullySurroundedByVanillaAir(level, pos);
+            return shouldRemoveFloatingHorrorElement(level, pos, state, unsupported);
         }
         if (isTracked(state.getBlock())) {
             return unsupported;
         }
         return false;
+    }
+
+    private static boolean shouldRemoveFloatingHorrorElement(ServerLevel level,
+                                                             BlockPos pos,
+                                                             BlockState state,
+                                                             boolean unsupported) {
+        if (level == null || pos == null || state == null || !unsupported) {
+            return false;
+        }
+        if (isFullySurroundedByVanillaAir(level, pos)) {
+            return true;
+        }
+        return !hasStableNeighborAnchor(level, pos);
+    }
+
+    private static boolean shouldRemoveFloatingHorrorElement(net.minecraft.server.level.WorldGenRegion region,
+                                                             BlockPos pos,
+                                                             BlockState state,
+                                                             boolean unsupported) {
+        if (region == null || pos == null || state == null || !unsupported) {
+            return false;
+        }
+        if (isFullySurroundedByVanillaAir(region, pos)) {
+            return true;
+        }
+        return !hasStableNeighborAnchor(region, pos);
     }
 
     private static boolean isFullySurroundedByVanillaAir(ServerLevel level, BlockPos pos) {
@@ -288,6 +339,49 @@ public class ChunkPostProcessor {
             }
         }
         return true;
+    }
+
+    private static boolean hasStableNeighborAnchor(ServerLevel level, BlockPos pos) {
+        if (level == null || pos == null) {
+            return false;
+        }
+        for (Direction direction : Direction.values()) {
+            BlockPos neighborPos = pos.relative(direction);
+            if (!level.isLoaded(neighborPos)) {
+                continue;
+            }
+            BlockState neighborState = level.getBlockState(neighborPos);
+            if (neighborState.isAir() || neighborState.canBeReplaced()) {
+                continue;
+            }
+            if (shouldWatchFloatingCandidate(neighborState)) {
+                continue;
+            }
+            if (isSolidOrFixedBlock(level, neighborPos, neighborState)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasStableNeighborAnchor(net.minecraft.server.level.WorldGenRegion region, BlockPos pos) {
+        if (region == null || pos == null) {
+            return false;
+        }
+        for (Direction direction : Direction.values()) {
+            BlockPos neighborPos = pos.relative(direction);
+            BlockState neighborState = region.getBlockState(neighborPos);
+            if (neighborState.isAir() || neighborState.canBeReplaced()) {
+                continue;
+            }
+            if (shouldWatchFloatingCandidate(neighborState)) {
+                continue;
+            }
+            if (isSolidOrFixedBlock(region, neighborPos, neighborState)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean isFloatingFluidDisconnected(ServerLevel level, BlockPos pos, BlockState state) {
@@ -484,7 +578,7 @@ public class ChunkPostProcessor {
         }
         int chunkX = pos.getX() >> 4;
         int chunkZ = pos.getZ() >> 4;
-        if (!isCityChunkCached(level, chunkX, chunkZ)) {
+        if (!isCleanupRelevantChunkCached(level, chunkX, chunkZ)) {
             return false;
         }
 
@@ -509,6 +603,47 @@ public class ChunkPostProcessor {
 
         int depth = countFreeHangingFluidColumnDepth(level, pos, sourceFluid);
         return depth >= CITY_FLOATING_SOURCE_MIN_HEIGHT;
+    }
+
+    private static int removeFloatingCandidate(ServerLevel level, BlockPos pos, BlockState state) {
+        if (level == null || pos == null || state == null) {
+            return 0;
+        }
+        if (isPotentialFloatingSourceFluid(state)) {
+            return removeFloatingFluidColumn(level, pos, state.getFluidState());
+        }
+        level.removeBlockEntity(pos);
+        level.setBlock(pos, AIR_STATE, SAFE_SET_FLAGS);
+        return 1;
+    }
+
+    private static int removeFloatingFluidColumn(ServerLevel level,
+                                                 BlockPos origin,
+                                                 net.minecraft.world.level.material.FluidState sourceFluid) {
+        if (level == null || origin == null || sourceFluid == null || sourceFluid.isEmpty()) {
+            return 0;
+        }
+
+        java.util.ArrayList<Integer> packedPositions = new java.util.ArrayList<>();
+        int maxDepth = Math.max(CITY_FLOATING_SOURCE_MAX_DEPTH, MAX_FLUID_CLUSTER_SCAN);
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos().set(origin);
+        while (packedPositions.size() < maxDepth) {
+            if (!level.isLoaded(cursor)) {
+                break;
+            }
+            BlockState state = level.getBlockState(cursor);
+            net.minecraft.world.level.material.FluidState fluid = state.getFluidState();
+            if (fluid == null || fluid.isEmpty() || !isSameFloatingFluidFamily(sourceFluid, fluid)) {
+                break;
+            }
+            packedPositions.add(packShadowRemoval(cursor));
+            cursor.move(Direction.DOWN);
+        }
+        if (packedPositions.isEmpty()) {
+            return 0;
+        }
+        enqueueShadowRemovalBatch(level, new ChunkPos(origin), packedPositions);
+        return packedPositions.size();
     }
 
     private static int countFreeHangingFluidColumnDepth(ServerLevel level,
@@ -652,7 +787,7 @@ public class ChunkPostProcessor {
                 }
             }
         } else if (isHorrorElementBlock(state)) {
-            enqueue = isFullySurroundedByVanillaAir(region, pos);
+            enqueue = shouldRemoveFloatingHorrorElement(region, pos, state, unsupported);
         } else if (isTracked(state.getBlock())) {
             enqueue = unsupported;
         }
@@ -779,7 +914,7 @@ public class ChunkPostProcessor {
         }
 
         ChunkScanKey key = chunkKey(level.dimension().location(), chunk.getPos().x, chunk.getPos().z);
-        boolean cityChunk = floatingScanEnabled && isCityChunkCached(level, chunk.getPos().x, chunk.getPos().z);
+        boolean cityChunk = floatingScanEnabled && shouldScanFloatingInChunk(level, chunk.getPos().x, chunk.getPos().z);
         boolean effectiveFloating = floatingScanEnabled && cityChunk;
 
         // If we already marked this chunk complete, don't enqueue it again.
@@ -867,7 +1002,7 @@ public class ChunkPostProcessor {
             return;
         }
         CompoundTag root = event.getData().getCompound(DATA_ROOT);
-        if (root.getBoolean(DATA_FLAG)) {
+        if (root.getInt(DATA_SCAN_VERSION_FLAG) >= CURRENT_SCAN_VERSION && root.getBoolean(DATA_FLAG)) {
             COMPLETED_CHUNKS.add(chunkKey(chunk.getLevel().dimension().location(), chunk.getPos().x, chunk.getPos().z));
         }
     }
@@ -885,6 +1020,7 @@ public class ChunkPostProcessor {
         CompoundTag data = event.getData();
         CompoundTag root = data.getCompound(DATA_ROOT);
         root.putBoolean(DATA_FLAG, true);
+        root.putInt(DATA_SCAN_VERSION_FLAG, CURRENT_SCAN_VERSION);
         data.put(DATA_ROOT, root);
     }
 
@@ -907,6 +1043,10 @@ public class ChunkPostProcessor {
         if (FLOATING_DRAIN_REQUESTED.get() && LAST_FLOATING_DRAIN_TICK != tick) {
             LAST_FLOATING_DRAIN_TICK = tick;
             drainFloatingChecks(level.getServer());
+        }
+        if (SHADOW_REMOVAL_DRAIN_REQUESTED.get() && LAST_SHADOW_REMOVAL_DRAIN_TICK != tick) {
+            LAST_SHADOW_REMOVAL_DRAIN_TICK = tick;
+            drainShadowRemovals(level.getServer());
         }
         boolean canAutoRescan = AUTO_RESCAN_STARTUP || level.getServer().getPlayerCount() > 0;
         if (!RESCAN_TRIGGERED && canAutoRescan && tick > 100) { // ~5 seconds after server start (or after first join)
@@ -971,7 +1111,7 @@ public class ChunkPostProcessor {
             ScanCursor cursor = entry.getValue();
             if (ENABLE_THREADED_SCAN) {
                 if (INFLIGHT_CHUNK_SCANS.add(key)) {
-                    boolean allowFloating = floatingScanEnabled && isCityChunkCached(level, chunkX, chunkZ);
+                    boolean allowFloating = floatingScanEnabled && shouldScanFloatingInChunk(level, chunkX, chunkZ);
                     submitAsyncScan(level, key, chunk, cursor, allowFloating, scanSamplesPerTask);
                     processed++;
                 }
@@ -980,7 +1120,7 @@ public class ChunkPostProcessor {
                 }
                 continue;
             }
-            boolean allowFloating = floatingScanEnabled && isCityChunkCached(level, chunkX, chunkZ);
+            boolean allowFloating = floatingScanEnabled && shouldScanFloatingInChunk(level, chunkX, chunkZ);
             ScanCursor next = processChunk(level, chunk, cursor, deadlineNs, allowFloating, scanSamplesPerTask);
             if (next == null) {
                 markChunkComplete(chunk);
@@ -1049,10 +1189,8 @@ public class ChunkPostProcessor {
                 boolean remove = shouldRemoveFloatingCandidate(level, pos, state);
                 Lc2hTimingRegistry.record("chunk_post.floating_candidate_check", System.nanoTime() - floatingStartNs);
                 if (remove) {
-                    level.removeBlockEntity(pos);
-                    level.setBlock(pos, AIR_STATE, SAFE_SET_FLAGS);
+                    FIXED_FLOATING += removeFloatingCandidate(level, pos, state);
                     LCLogger.debug("Removed floating vegetation on chunk scan at {}", pos);
-                    FIXED_FLOATING++;
                 }
             }
 
@@ -1209,9 +1347,7 @@ public class ChunkPostProcessor {
             boolean remove = shouldRemoveFloatingCandidate(level, pos, state);
             Lc2hTimingRegistry.record("chunk_post.apply_floating_candidate", System.nanoTime() - floatingStartNs);
             if (remove) {
-                level.removeBlockEntity(pos);
-                level.setBlock(pos, AIR_STATE, SAFE_SET_FLAGS);
-                FIXED_FLOATING++;
+                FIXED_FLOATING += removeFloatingCandidate(level, pos, state);
             }
         }
 
@@ -1373,7 +1509,7 @@ public class ChunkPostProcessor {
                 long deadlineNs = System.nanoTime() + (long) (Math.max(2.0D, ADAPTIVE_WORK_BUDGET_MS * 4.0D) * 1_000_000.0);
                 boolean allowFloating = ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL
                     && ENABLE_FLOATING_SCAN
-                    && isCityChunkCached(level, chunkX, chunkZ);
+                    && shouldScanFloatingInChunk(level, chunkX, chunkZ);
                 int playerCount = 0;
                 try {
                     playerCount = level.getServer().getPlayerCount();
@@ -1443,7 +1579,7 @@ public class ChunkPostProcessor {
                 for (net.minecraft.server.level.ChunkHolder holder : holders) {
                     LevelChunk chunk = holder.getTickingChunk();
                     if (chunk != null) {
-                        boolean cityChunk = floatingScanEnabled && isCityChunkCached(level, chunk.getPos().x, chunk.getPos().z);
+                        boolean cityChunk = floatingScanEnabled && shouldScanFloatingInChunk(level, chunk.getPos().x, chunk.getPos().z);
                         boolean effectiveFloating = floatingScanEnabled && cityChunk;
                         if (!chunkHasInterestingBlocks(chunk, effectiveFloating, doubleBlockEnabled)) {
                             ChunkScanKey key = chunkKey(level.dimension().location(), chunk.getPos().x, chunk.getPos().z);
@@ -1770,9 +1906,7 @@ public class ChunkPostProcessor {
                 }
                 BlockState state = level.getBlockState(pos);
                 if (shouldRemoveFloatingCandidate(level, pos, state)) {
-                    level.removeBlockEntity(pos);
-                    level.setBlock(pos, AIR_STATE, SAFE_SET_FLAGS);
-                    FIXED_FLOATING++;
+                    FIXED_FLOATING += removeFloatingCandidate(level, pos, state);
                 }
                 remainingBudget--;
             }
@@ -1787,6 +1921,69 @@ public class ChunkPostProcessor {
         FLOATING_DRAIN_REQUESTED.set(false);
     }
 
+    private static void drainShadowRemovals(MinecraftServer server) {
+        if (!ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL) {
+            SHADOW_REMOVAL_DRAIN_REQUESTED.set(false);
+            return;
+        }
+        if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+            SHADOW_REMOVAL_DRAIN_REQUESTED.set(true);
+            return;
+        }
+
+        int remainingBudget = MAX_SHADOW_REMOVALS_PER_TICK;
+        int deferredTrees = DeferredTreeQueue.pendingCountAll() + DeferredTreeQueue.readyCountAll();
+        if (deferredTrees >= 96) {
+            remainingBudget = Math.max(16, remainingBudget / 4);
+        } else if (deferredTrees >= 48) {
+            remainingBudget = Math.max(16, remainingBudget / 2);
+        }
+
+        boolean pending = false;
+        while (remainingBudget > 0) {
+            ShadowRemovalBatch batch = SHADOW_REMOVAL_QUEUE.poll();
+            if (batch == null) {
+                break;
+            }
+            ServerLevel level = batch.level;
+            if (level == null || !level.hasChunk(batch.chunkPos.x, batch.chunkPos.z)) {
+                pending = pending || batch.hasRemaining();
+                continue;
+            }
+            LevelChunk chunk = level.getChunkSource().getChunkNow(batch.chunkPos.x, batch.chunkPos.z);
+            if (chunk == null) {
+                pending = true;
+                SHADOW_REMOVAL_QUEUE.add(batch);
+                break;
+            }
+
+            BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+            while (remainingBudget > 0 && batch.hasRemaining()) {
+                unpackShadowRemoval(batch.chunkPos, batch.packedPositions[batch.cursor++], cursor);
+                try {
+                    BlockState state = chunk.getBlockState(cursor);
+                    if (!state.isAir()) {
+                        level.removeBlockEntity(cursor);
+                        level.setBlock(cursor, AIR_STATE, SAFE_SET_FLAGS);
+                    }
+                } catch (Throwable ignored) {
+                }
+                remainingBudget--;
+                if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+                    break;
+                }
+            }
+
+            if (batch.hasRemaining()) {
+                pending = true;
+                SHADOW_REMOVAL_QUEUE.add(batch);
+                break;
+            }
+        }
+
+        SHADOW_REMOVAL_DRAIN_REQUESTED.set(pending || !SHADOW_REMOVAL_QUEUE.isEmpty());
+    }
+
     private static boolean shouldScanFloatingInChunk(ServerLevel level, int cx, int cz) {
         if (level == null) {
             return false;
@@ -1794,7 +1991,43 @@ public class ChunkPostProcessor {
         if (!ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL || !ENABLE_FLOATING_SCAN) {
             return false;
         }
-        return isCityChunkCached(level, cx, cz);
+        return isCleanupRelevantChunkCached(level, cx, cz);
+    }
+
+    private static void enqueueShadowRemovalBatch(ServerLevel level, ChunkPos chunkPos, List<Integer> packedPositions) {
+        if (level == null || chunkPos == null || packedPositions == null || packedPositions.isEmpty()) {
+            return;
+        }
+        int[] packed = packedPositions.stream().mapToInt(Integer::intValue).toArray();
+        SHADOW_REMOVAL_QUEUE.add(new ShadowRemovalBatch(level, chunkPos, packed));
+        SHADOW_REMOVAL_DRAIN_REQUESTED.set(true);
+    }
+
+    private static int packShadowRemoval(BlockPos pos) {
+        int localX = pos.getX() & 15;
+        int localZ = pos.getZ() & 15;
+        int y = pos.getY() + SHADOW_Y_OFFSET;
+        return (y << 8) | (localX << 4) | localZ;
+    }
+
+    private static void unpackShadowRemoval(ChunkPos chunkPos, int packed, BlockPos.MutableBlockPos target) {
+        int localZ = packed & 15;
+        int localX = (packed >>> 4) & 15;
+        int y = (packed >>> 8) - SHADOW_Y_OFFSET;
+        target.set(chunkPos.getMinBlockX() + localX, y, chunkPos.getMinBlockZ() + localZ);
+    }
+
+    private static boolean isCleanupRelevantChunkCached(ServerLevel level, int cx, int cz) {
+        if (level == null) {
+            return false;
+        }
+        if (isCityChunkCached(level, cx, cz)) {
+            return true;
+        }
+        return isCityChunkCached(level, cx + 1, cz)
+            || isCityChunkCached(level, cx - 1, cz)
+            || isCityChunkCached(level, cx, cz + 1)
+            || isCityChunkCached(level, cx, cz - 1);
     }
 
     private static IDimensionInfo getDimensionInfo(ServerLevel level) {
