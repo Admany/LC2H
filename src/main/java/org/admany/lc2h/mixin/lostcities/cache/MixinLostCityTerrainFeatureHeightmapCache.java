@@ -11,6 +11,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.Unique;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -43,6 +44,24 @@ public class MixinLostCityTerrainFeatureHeightmapCache {
     private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_HEIGHTMAP_BUDGET =
         LostCitiesCacheBudgetManager.register("lc_heightmap", 2048, 1024, MixinLostCityTerrainFeatureHeightmapCache::evictHeightmap);
 
+    private static final ThreadLocal<net.minecraft.world.level.WorldGenLevel> LC2H_HEIGHTMAP_WORLD_CONTEXT =
+        ThreadLocal.withInitial(() -> null);
+
+    @Unique
+    private static String scopedHeightmapCacheKey(String cacheType, ChunkCoord coord, net.minecraft.world.level.WorldGenLevel world) {
+        if (world == null || coord == null) {
+            return null;
+        }
+        String dimension = "<unknown-dim>";
+        long seed = 0L;
+        try {
+            dimension = world.toString();
+            seed = world.getSeed();
+        } catch (Throwable ignored) {
+        }
+        return cacheType + '|' + dimension + '|' + seed + '|' + coord;
+    }
+
     @Inject(method = "<init>", at = @At("RETURN"))
     private void lc2h$initHeightmapCache(CallbackInfo ci) {
         Object cache = lc2h$getHeightmapCache();
@@ -69,15 +88,21 @@ public class MixinLostCityTerrainFeatureHeightmapCache {
         if (chunk == null) {
             return;
         }
-        ChunkHeightmap cached = LOCAL_HEIGHTMAP_CACHE.get().get(chunk);
-        if (cached != null) {
-            cir.setReturnValue(cached);
-            return;
-        }
-        ChunkHeightmap disk = LostCitiesCacheBridge.getDisk("heightmap", chunk, ChunkHeightmap.class);
-        if (disk != null) {
-            LOCAL_HEIGHTMAP_CACHE.get().put(chunk, disk);
-            cir.setReturnValue(disk);
+        LC2H_HEIGHTMAP_WORLD_CONTEXT.set(world);
+        try {
+            ChunkHeightmap cached = LOCAL_HEIGHTMAP_CACHE.get().get(chunk);
+            if (cached != null) {
+                cir.setReturnValue(cached);
+                return;
+            }
+            String diskKey = scopedHeightmapCacheKey("heightmap", chunk, world);
+            ChunkHeightmap disk = diskKey != null ? LostCitiesCacheBridge.getDisk("heightmap", diskKey, ChunkHeightmap.class) : null;
+            if (disk != null) {
+                LOCAL_HEIGHTMAP_CACHE.get().put(chunk, disk);
+                cir.setReturnValue(disk);
+            }
+        } finally {
+            LC2H_HEIGHTMAP_WORLD_CONTEXT.set(null);
         }
     }
 
@@ -113,7 +138,11 @@ public class MixinLostCityTerrainFeatureHeightmapCache {
         LostCitiesCacheBudgetManager.recordPut(LC2H_HEIGHTMAP_BUDGET, key, LC2H_HEIGHTMAP_BUDGET.defaultEntryBytes(), prev == null);
         if (key instanceof ChunkCoord coord && value instanceof ChunkHeightmap heightmap) {
             LOCAL_HEIGHTMAP_CACHE.get().put(coord, heightmap);
-            LostCitiesCacheBridge.putDisk("heightmap", coord, heightmap);
+            net.minecraft.world.level.WorldGenLevel world = LC2H_HEIGHTMAP_WORLD_CONTEXT.get();
+            String diskKey = scopedHeightmapCacheKey("heightmap", coord, world);
+            if (diskKey != null) {
+                LostCitiesCacheBridge.putDisk("heightmap", diskKey, heightmap);
+            }
         }
         return prev;
     }
@@ -156,7 +185,11 @@ public class MixinLostCityTerrainFeatureHeightmapCache {
         cache.put(coord, heightmap);
         LostCitiesCacheBudgetManager.recordPut(LC2H_HEIGHTMAP_BUDGET, key, LC2H_HEIGHTMAP_BUDGET.defaultEntryBytes(), inserted);
         LOCAL_HEIGHTMAP_CACHE.get().put(coord, heightmap);
-        LostCitiesCacheBridge.putDisk("heightmap", coord, heightmap);
+        net.minecraft.world.level.WorldGenLevel world = LC2H_HEIGHTMAP_WORLD_CONTEXT.get();
+        String diskKey = scopedHeightmapCacheKey("heightmap", coord, world);
+        if (diskKey != null) {
+            LostCitiesCacheBridge.putDisk("heightmap", diskKey, heightmap);
+        }
     }
 
     private static boolean evictHeightmap(Object key) {

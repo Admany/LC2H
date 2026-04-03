@@ -334,6 +334,28 @@ public abstract class MixinBuildingInfo {
         }
     }
 
+    @Unique
+    private static String scopedCacheKey(String cacheName, ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile) {
+        String dimension = "<unknown-dim>";
+        String profileName = safeProfileName(profile);
+        long seed = 0L;
+
+        try {
+            if (provider != null) {
+                seed = provider.getSeed();
+                if (provider.getType() != null) {
+                    dimension = provider.getType().toString();
+                }
+                if ((profileName == null || profileName.startsWith("<")) && provider.getProfile() != null) {
+                    profileName = safeProfileName(provider.getProfile());
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+
+        return cacheName + '|' + dimension + '|' + profileName + '|' + seed + '|' + coord;
+    }
+
     /**
      * This removes global sync and uses a concurrent cache for GUI characteristics.
      *
@@ -347,16 +369,16 @@ public abstract class MixinBuildingInfo {
             LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_INFO_BUDGET, key);
             return cached;
         }
-        LostChunkCharacteristics disk = LostCitiesCacheBridge.getDisk("city_info", key, LostChunkCharacteristics.class);
+        int chunkX = key.chunkX();
+        int chunkZ = key.chunkZ();
+        LostCityProfile profile = getProfile(key, provider);
+        String cityInfoDiskKey = scopedCacheKey("city_info", key, provider, profile);
+        LostChunkCharacteristics disk = LostCitiesCacheBridge.getDisk("city_info", cityInfoDiskKey, LostChunkCharacteristics.class);
         if (disk != null) {
             LostChunkCharacteristics prev = LC2H_CITY_INFO_MAP.putIfAbsent(key, disk);
             LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, key, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
             return prev != null ? prev : disk;
         }
-
-        int chunkX = key.chunkX();
-        int chunkZ = key.chunkZ();
-        LostCityProfile profile = getProfile(key, provider);
         LostChunkCharacteristics characteristics = new LostChunkCharacteristics();
 
         characteristics.isCity = isCityRaw(key, provider, profile);
@@ -366,7 +388,7 @@ public abstract class MixinBuildingInfo {
 
         LostChunkCharacteristics prev = LC2H_CITY_INFO_MAP.putIfAbsent(key, characteristics);
         LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, key, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
-        LostCitiesCacheBridge.putDisk("city_info", key, characteristics);
+        LostCitiesCacheBridge.putDisk("city_info", cityInfoDiskKey, characteristics);
         return characteristics;
     }
 
@@ -385,16 +407,16 @@ public abstract class MixinBuildingInfo {
             LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_INFO_BUDGET, coord);
             return cached;
         }
-        LostChunkCharacteristics disk = LostCitiesCacheBridge.getDisk("city_info", coord, LostChunkCharacteristics.class);
+        int chunkX = coord.chunkX();
+        int chunkZ = coord.chunkZ();
+        LostCityProfile profile = getProfile(coord, provider);
+        String cityInfoDiskKey = scopedCacheKey("city_info", coord, provider, profile);
+        LostChunkCharacteristics disk = LostCitiesCacheBridge.getDisk("city_info", cityInfoDiskKey, LostChunkCharacteristics.class);
         if (disk != null) {
             LostChunkCharacteristics prev = LC2H_CITY_INFO_MAP.putIfAbsent(coord, disk);
             LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, coord, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
             return prev != null ? prev : disk;
         }
-
-        int chunkX = coord.chunkX();
-        int chunkZ = coord.chunkZ();
-        LostCityProfile profile = getProfile(coord, provider);
         LostChunkCharacteristics characteristics = new LostChunkCharacteristics();
 
         WorldGenLevel world = provider.getWorld();
@@ -471,7 +493,7 @@ public abstract class MixinBuildingInfo {
                         characteristics.buildingType = fallbackName != null ? resolveBuildingWithFallback(world, fallbackName) : null;
                         LostChunkCharacteristics prev = LC2H_CITY_INFO_MAP.putIfAbsent(coord, characteristics);
                         LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, coord, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
-                        LostCitiesCacheBridge.putDisk("city_info", coord, characteristics);
+                        LostCitiesCacheBridge.putDisk("city_info", cityInfoDiskKey, characteristics);
                         return characteristics;
                     }
                     characteristics.multiPos = new MultiPos(predefinedBuilding.relChunkX(), predefinedBuilding.relChunkZ(), characteristics.multiBuilding.getDimX(), characteristics.multiBuilding.getDimZ());
@@ -496,7 +518,7 @@ public abstract class MixinBuildingInfo {
                             characteristics.buildingType = buildingName != null ? resolveBuildingWithFallback(world, buildingName) : null;
                             LostChunkCharacteristics prev = LC2H_CITY_INFO_MAP.putIfAbsent(coord, characteristics);
                             LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, coord, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
-                            LostCitiesCacheBridge.putDisk("city_info", coord, characteristics);
+                            LostCitiesCacheBridge.putDisk("city_info", cityInfoDiskKey, characteristics);
                             return characteristics;
                         }
                         characteristics.multiPos = new MultiPos(0, 0, characteristics.multiBuilding.getDimX(), characteristics.multiBuilding.getDimZ());
@@ -519,7 +541,7 @@ public abstract class MixinBuildingInfo {
 
         LostChunkCharacteristics prev = LC2H_CITY_INFO_MAP.putIfAbsent(coord, characteristics);
         LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, coord, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
-        LostCitiesCacheBridge.putDisk("city_info", coord, characteristics);
+        LostCitiesCacheBridge.putDisk("city_info", cityInfoDiskKey, characteristics);
         return characteristics;
     }
 
@@ -662,7 +684,8 @@ public abstract class MixinBuildingInfo {
             LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_LEVEL_BUDGET, key);
             return cached;
         }
-        Integer disk = LostCitiesCacheBridge.getDisk("city_level", key, Integer.class);
+        String cityLevelDiskKey = scopedCacheKey("city_level", key, provider, provider != null ? provider.getProfile() : null);
+        Integer disk = LostCitiesCacheBridge.getDisk("city_level", cityLevelDiskKey, Integer.class);
         if (disk != null) {
             Integer prev = LC2H_CITY_LEVEL_CACHE.putIfAbsent(key, disk);
             LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_LEVEL_BUDGET, key, LC2H_CITY_LEVEL_BUDGET.defaultEntryBytes(), prev == null);
@@ -680,7 +703,7 @@ public abstract class MixinBuildingInfo {
         }
         Integer prev = LC2H_CITY_LEVEL_CACHE.putIfAbsent(key, result);
         LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_LEVEL_BUDGET, key, LC2H_CITY_LEVEL_BUDGET.defaultEntryBytes(), prev == null);
-        LostCitiesCacheBridge.putDisk("city_level", key, result);
+        LostCitiesCacheBridge.putDisk("city_level", cityLevelDiskKey, result);
         return prev != null ? prev : result;
     }
 
@@ -714,7 +737,8 @@ public abstract class MixinBuildingInfo {
             cir.setReturnValue(cached);
             return;
         }
-        Boolean disk = LostCitiesCacheBridge.getDisk("city_raw", coord, Boolean.class);
+        String cityRawDiskKey = scopedCacheKey("city_raw", coord, provider, profile);
+        Boolean disk = LostCitiesCacheBridge.getDisk("city_raw", cityRawDiskKey, Boolean.class);
         if (disk != null) {
             Boolean prev = LC2H_IS_CITY_RAW_CACHE.putIfAbsent(coord, disk);
             LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_RAW_BUDGET, coord, LC2H_CITY_RAW_BUDGET.defaultEntryBytes(), prev == null);
@@ -730,6 +754,7 @@ public abstract class MixinBuildingInfo {
         }
         Boolean prev = LC2H_IS_CITY_RAW_CACHE.putIfAbsent(coord, cir.getReturnValue());
         LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_RAW_BUDGET, coord, LC2H_CITY_RAW_BUDGET.defaultEntryBytes(), prev == null);
-        LostCitiesCacheBridge.putDisk("city_raw", coord, cir.getReturnValue());
+        String cityRawDiskKey = scopedCacheKey("city_raw", coord, provider, profile);
+        LostCitiesCacheBridge.putDisk("city_raw", cityRawDiskKey, cir.getReturnValue());
     }
 }
