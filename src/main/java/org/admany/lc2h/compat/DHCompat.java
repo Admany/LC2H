@@ -15,6 +15,7 @@ import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.fml.ModList;
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.util.ResourceLocations;
 import org.admany.lc2h.util.server.ServerTickLoad;
 
 import java.lang.reflect.Field;
@@ -292,8 +293,8 @@ public class DHCompat {
         private final Map<Holder<Biome>, Object> biomeWrapperCache = new ConcurrentHashMap<>();
         private final Object defaultBiomeWrapper;
         private final Object defaultSolidWrapper;
-        private final ResourceLocation plainsId = ResourceLocation.parse("minecraft:plains");
-        private final ResourceLocation stoneId = ResourceLocation.parse("minecraft:stone");
+        private final ResourceLocation plainsId = ResourceLocations.of("minecraft", "plains");
+        private final ResourceLocation stoneId = ResourceLocations.of("minecraft", "stone");
 
         private LevelIntegration(Object levelWrapper, Object wrapperFactory) throws Exception {
             this.levelWrapper = levelWrapper;

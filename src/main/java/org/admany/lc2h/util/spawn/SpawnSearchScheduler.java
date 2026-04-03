@@ -11,6 +11,7 @@ import mcjty.lostcities.worldgen.lost.cityassets.BuildingPart;
 import mcjty.lostcities.worldgen.lost.cityassets.MultiBuilding;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.ServerLevelData;
 import org.admany.lc2h.LC2H;
@@ -72,9 +73,15 @@ public final class SpawnSearchScheduler {
     private static final AtomicLong SPAWN_PROGRESS_CITIES_SIGNATURE_REJECTED = new AtomicLong(0L);
     private static final AtomicLong SPAWN_PROGRESS_CITY_CHUNKS_WITH_BUILDING_ID = new AtomicLong(0L);
     private static final AtomicLong SPAWN_PROGRESS_CITY_CHUNKS_WITH_BUILDING_CANDIDATE = new AtomicLong(0L);
+    private static final AtomicLong SPAWN_PROGRESS_PENDING_BACKPRESSURE = new AtomicLong(0L);
+    private static volatile String SPAWN_PROGRESS_RAW_BUILDINGS = "";
+    private static volatile String SPAWN_PROGRESS_RAW_PARTS = "";
+    private static volatile String SPAWN_PROGRESS_RESOLVED_BUILDINGS = "";
+    private static volatile String SPAWN_PROGRESS_RESOLVED_PARTS = "";
     private static volatile String SPAWN_PROGRESS_REQUIRED_BUILDINGS = "";
     private static volatile String SPAWN_PROGRESS_REQUIRED_PARTS = "";
     private static volatile String SPAWN_PROGRESS_SAMPLE_BUILDINGS = "";
+    private static volatile String SPAWN_PROGRESS_STAGE = "init";
     private static final int CITY_SAMPLE_LIMIT = Math.max(1,
         Integer.getInteger("lc2h.spawnsearch.citySampleLimit", 8));
     private static final long CITY_SAMPLE_RETRY_MS = Math.max(50L,
@@ -84,6 +91,13 @@ public final class SpawnSearchScheduler {
     private static final long PENDING_TTL_MS = Math.max(250L,
         Long.getLong("lc2h.spawnsearch.pendingTtlMs", 2_000L));
     private static final ConcurrentHashMap<SpawnChunkKey, Long> PENDING = new ConcurrentHashMap<>();
+    private static final boolean ALLOW_SYNC_BUILDINGINFO_FALLBACK =
+        Boolean.getBoolean("lc2h.spawnsearch.allowSyncBuildingInfoFallback");
+    private static final int[] BUILDING_SAMPLE_OFFSETS = new int[] {2, 4, 6, 8, 10, 12, 14};
+    private static final int DEFERRED_CHUNK_VALIDATION_LIMIT = Math.max(1,
+        Integer.getInteger("lc2h.spawnsearch.deferredChunkValidationLimit", 8));
+    private static final long PENDING_BACKPRESSURE_SLEEP_MS = Math.max(1L,
+        Long.getLong("lc2h.spawnsearch.pendingBackpressureSleepMs", 8L));
 
     private SpawnSearchScheduler() {
     }
@@ -101,15 +115,24 @@ public final class SpawnSearchScheduler {
             throw new IllegalStateException("Spawn search requires a valid Lost City profile");
         }
 
+        resetSpawnProgress();
         SpawnAssetIndex.ensureLoaded(provider.getWorld());
 
         String[] buildingArray = profile.FORCE_SPAWN_BUILDINGS != null ? profile.FORCE_SPAWN_BUILDINGS : new String[0];
         String[] partArray = profile.FORCE_SPAWN_PARTS != null ? profile.FORCE_SPAWN_PARTS : new String[0];
-        Set<String> rawBuildings = new HashSet<>(Arrays.asList(buildingArray));
         Set<String> rawParts = new HashSet<>(Arrays.asList(partArray));
-        Set<String> requiredBuildings = new HashSet<>(rawBuildings);
-        Set<String> requiredParts = new HashSet<>(rawParts);
-        Set<String> resolvedBuildings = resolveIds(requiredBuildings, value -> {
+        // FORCE_SPAWN_BUILDINGS may use "namespace:building/partVariant" composite syntax.
+        // The asset index registers buildings by their base ID only (without the /variant suffix),
+        // so strip the suffix here. Do NOT forward these to rawParts — that pollutes the part
+        // filter with non-part IDs and causes bad auto-resolve suggestions. The LC isSuitable
+        // predicate already handles part-level filtering independently.
+        Set<String> rawBuildings = new HashSet<>(buildingArray.length);
+        for (String entry : buildingArray) {
+            if (entry == null || entry.isBlank()) continue;
+            int slash = entry.indexOf('/');
+            rawBuildings.add(slash > 0 ? entry.substring(0, slash) : entry);
+        }
+        Set<String> resolvedBuildings = resolveIds(rawBuildings, value -> {
             String building = SpawnAssetIndex.resolveBuildingId(value);
             if (building != null && !building.equals(value)) {
                 return building;
@@ -117,21 +140,31 @@ public final class SpawnSearchScheduler {
             String multi = SpawnAssetIndex.resolveMultiBuildingId(value);
             return multi != null ? multi : value;
         });
-        Set<String> resolvedParts = resolveIds(requiredParts, SpawnAssetIndex::resolvePartId);
-        if (!resolvedBuildings.equals(requiredBuildings) || !resolvedParts.equals(requiredParts)) {
+        Set<String> resolvedParts = resolveIds(rawParts, SpawnAssetIndex::resolvePartId);
+        Set<String> requiredBuildings = autoResolveMissing(rawBuildings, resolvedBuildings, true);
+        Set<String> requiredParts = autoResolveMissing(rawParts, resolvedParts, false);
+        ResolvedAssetFilter assetFilter = ResolvedAssetFilter.resolve(requiredBuildings, requiredParts, java.util.Collections.emptySet());
+        SPAWN_PROGRESS_RAW_BUILDINGS = formatIdSet(rawBuildings);
+        SPAWN_PROGRESS_RAW_PARTS = formatIdSet(rawParts);
+        SPAWN_PROGRESS_RESOLVED_BUILDINGS = formatIdSet(resolvedBuildings);
+        SPAWN_PROGRESS_RESOLVED_PARTS = formatIdSet(resolvedParts);
+        if (!resolvedBuildings.equals(rawBuildings) || !resolvedParts.equals(rawParts)) {
             LC2H.LOGGER.info(
                 "[LC2H] Resolved spawn requirements: buildings={} -> {}, parts={} -> {}",
-                formatIdSample(requiredBuildings, 6),
+                formatIdSample(rawBuildings, 6),
                 formatIdSample(resolvedBuildings, 6),
-                formatIdSample(requiredParts, 6),
+                formatIdSample(rawParts, 6),
                 formatIdSample(resolvedParts, 6)
             );
         }
-        requiredBuildings = autoResolveMissing(requiredBuildings, resolvedBuildings, true);
-        requiredParts = autoResolveMissing(requiredParts, resolvedParts, false);
         writeSpawnDebugFile(provider, rawBuildings, rawParts, requiredBuildings, requiredParts);
-        boolean requiresBuilding = profile.FORCE_SPAWN_IN_BUILDING || !requiredBuildings.isEmpty() || !requiredParts.isEmpty();
-        if (profile.FORCE_SPAWN_IN_BUILDING && requiredBuildings.isEmpty() && requiredParts.isEmpty()) {
+        boolean buildingConstraintsConfigured = !rawBuildings.isEmpty() || !rawParts.isEmpty();
+        boolean requiresBuilding = profile.FORCE_SPAWN_IN_BUILDING
+            || buildingConstraintsConfigured
+            || !requiredBuildings.isEmpty()
+            || !requiredParts.isEmpty();
+        final boolean strictSpawnConstraints = !requiredBuildings.isEmpty() || !requiredParts.isEmpty();
+        if (requiresBuilding && requiredBuildings.isEmpty() && requiredParts.isEmpty()) {
             LC2H.LOGGER.warn("[LC2H] No valid spawn building/part IDs resolved; falling back to any building");
             requiresBuilding = true;
         }
@@ -140,19 +173,73 @@ public final class SpawnSearchScheduler {
         SPAWN_PROGRESS_REQUIRED_PARTS = formatIdSet(requiredParts);
         logMissingAssets(requiredBuildings, requiredParts);
 
+        BlockPos startPos = world.getSharedSpawnPos();
+        if (!requiredBuildings.isEmpty()) {
+            SPAWN_PROGRESS_STAGE = "exact-required-buildings";
+            BlockPos exactBuildingResult = findSpawnInRequiredBuildings(world, provider, profile, isSuitable,
+                isValidStandingPosition, requiredBuildings, requiredParts, assetFilter, constraintHash, startPos);
+            if (exactBuildingResult != null) {
+                return exactBuildingResult;
+            }
+        }
+
         if (requiresBuilding) {
-            BlockPos startPos = world.getSharedSpawnPos();
+            SPAWN_PROGRESS_STAGE = "city-building-search";
             BlockPos cityResult = findSpawnInCity(world, provider, profile, isSuitable, isValidStandingPosition,
-                requiredBuildings, requiredParts, constraintHash, startPos);
+                requiredBuildings, requiredParts, assetFilter, constraintHash, startPos);
             if (cityResult != null) {
                 return cityResult;
             }
         }
 
+        if (!requiredBuildings.isEmpty() || !requiredParts.isEmpty()) {
+            SPAWN_PROGRESS_STAGE = "relaxed-city-fallback";
+            LC2H.LOGGER.warn(
+                "[LC2H] Failed to find spawn in required buildings/parts {}; falling back to any valid city building near spawn",
+                formatIdSample(requiredBuildings.isEmpty() ? requiredParts : requiredBuildings, 6)
+            );
+            // The original isSuitable predicate may still be constrained to specific building types
+            // (e.g. from LC's FORCE_SPAWN_BUILDINGS profile). For a true relaxed fallback we need a
+            // permissive predicate that accepts any above-ground position inside any city building.
+            final IDimensionInfo relaxedProvider = provider;
+            Predicate<BlockPos> relaxedIsSuitable = pos -> {
+                ChunkCoord c = new ChunkCoord(relaxedProvider.getType(), pos.getX() >> 4, pos.getZ() >> 4);
+                try {
+                    BuildingInfo bi = BuildingInfo.getBuildingInfo(c, relaxedProvider);
+                    if (bi == null || !bi.isCity || !bi.hasBuilding) {
+                        return false;
+                    }
+                    int bottom = bi.getBuildingBottomHeight();
+                    return bottom != Integer.MIN_VALUE && pos.getY() >= bottom;
+                } catch (Throwable ignored) {
+                    return false;
+                }
+            };
+            BlockPos relaxedBuildingResult = findSpawnInCity(
+                world,
+                provider,
+                profile,
+                relaxedIsSuitable,
+                isValidStandingPosition,
+                java.util.Collections.emptySet(),
+                java.util.Collections.emptySet(),
+                ResolvedAssetFilter.NONE,
+                computeConstraintHash(profile, java.util.Collections.emptySet(), java.util.Collections.emptySet()),
+                startPos
+            );
+            if (relaxedBuildingResult != null) {
+                return relaxedBuildingResult;
+            }
+        }
+
         Random rand = new Random(provider.getSeed());
+        boolean didRelaxConstraints = false;
         int radius = profile.SPAWN_CHECK_RADIUS;
         int attempts = 0;
+        int maxAttempts = computeSpawnAttemptBudget(profile, requiresBuilding, requiredBuildings, requiredParts);
         Set<Long> localChecked = new HashSet<>();
+        java.util.ArrayList<SpawnCandidate> deferredCandidates = new java.util.ArrayList<>(DEFERRED_CHUNK_VALIDATION_LIMIT);
+        SPAWN_PROGRESS_STAGE = "generic-search";
 
         while (true) {
             for (int i = 0; i < 200; i++) {
@@ -169,6 +256,39 @@ public final class SpawnSearchScheduler {
                     continue;
                 }
 
+                ChunkCoord coord = new ChunkCoord(provider.getType(), chunkX, chunkZ);
+                if (requiresBuilding || !requiredBuildings.isEmpty() || !requiredParts.isEmpty()) {
+                    if (shouldSkip(world.dimension(), chunkX, chunkZ, constraintHash)) {
+                        continue;
+                    }
+                    if (shouldSkipRegion(world.dimension(), chunkX, chunkZ, constraintHash)) {
+                        continue;
+                    }
+                    BuildingInfo info = getBuildingInfoNow(provider, coord);
+                    if (info == null) {
+                        continue;
+                    }
+                    if (!passesBuildingInfo(info, true, assetFilter)) {
+                        recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                        SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
+                        logSpawnProgress(world.dimension());
+                        continue;
+                    }
+                    SpawnCandidate candidate = findInBuilding(info, x, z, isSuitable, requiredParts, assetFilter);
+                    if (candidate == null) {
+                        recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                        SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
+                        logSpawnProgress(world.dimension());
+                        continue;
+                    }
+                    BlockPos found = tryValidateSpawnCandidate(world, candidate, isValidStandingPosition, false);
+                    if (found != null) {
+                        return found;
+                    }
+                    queueDeferredCandidate(deferredCandidates, candidate);
+                    continue;
+                }
+
                 if (shouldSkip(world.dimension(), chunkX, chunkZ, constraintHash)) {
                     continue;
                 }
@@ -176,33 +296,20 @@ public final class SpawnSearchScheduler {
                     continue;
                 }
                 RegionScanCache scanCache = getRegionScan(world.dimension(), provider, chunkX, chunkZ, constraintHash,
-                    requiresBuilding, requiredBuildings, requiredParts);
+                    requiresBuilding, requiredBuildings, requiredParts, assetFilter);
                 if (scanCache != null) {
                     int regionIndex = scanCache.indexFor(chunkX, chunkZ);
                     if (!scanCache.candidates.get(regionIndex)) {
                         continue;
                     }
-                    if (scanCache.needsInfo.get(regionIndex)) {
-                        ChunkCoord coord = new ChunkCoord(provider.getType(), chunkX, chunkZ);
-                        if (shouldPending(world.dimension(), chunkX, chunkZ, constraintHash)) {
-                            continue;
-                        }
-                        Object ready = AsyncBuildingInfoPlanner.getIfReady(coord);
-                        if (ready == null) {
-                            AsyncBuildingInfoPlanner.preSchedulePriority(provider, coord);
-                            recordPending(world.dimension(), chunkX, chunkZ, constraintHash);
-                            continue;
-                        }
-                    }
                 } else {
                     maybePrefetchRegion(world.dimension(), provider, chunkX, chunkZ, constraintHash,
-                        requiresBuilding, requiredBuildings, requiredParts);
+                        requiresBuilding, requiredBuildings, requiredParts, assetFilter);
                 }
 
-                ChunkCoord coord = new ChunkCoord(provider.getType(), chunkX, chunkZ);
                 PrefilterDecision decision = scanCache != null
                     ? (scanCache.needsInfo.get(scanCache.indexFor(chunkX, chunkZ)) ? PrefilterDecision.NEED_INFO : PrefilterDecision.PASS)
-                    : prefilter(coord, provider, requiresBuilding, requiredBuildings, requiredParts);
+                    : prefilter(coord, provider, requiresBuilding, requiredBuildings, requiredParts, assetFilter);
                 if (decision == PrefilterDecision.FAIL) {
                     recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
                     SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
@@ -210,23 +317,28 @@ public final class SpawnSearchScheduler {
                     continue;
                 }
                 if (decision == PrefilterDecision.NEED_INFO) {
-                    BuildingInfo info = getBuildingInfoSync(provider, coord);
+                    BuildingInfo info = getBuildingInfoNow(provider, coord);
                     if (info == null) {
                         continue;
                     }
-                    if (!passesBuildingInfo(info, requiresBuilding, requiredBuildings, requiredParts)) {
+                    if (!passesBuildingInfo(info, requiresBuilding, assetFilter)) {
                         recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
                         SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
                         logSpawnProgress(world.dimension());
                         continue;
                     }
-                    BlockPos found = findInBuilding(world, info, x, z, isSuitable, isValidStandingPosition, requiredParts);
+                    SpawnCandidate candidate = findInBuilding(info, x, z, isSuitable, requiredParts, assetFilter);
+                    if (candidate == null) {
+                        recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                        SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
+                        logSpawnProgress(world.dimension());
+                        continue;
+                    }
+                    BlockPos found = tryValidateSpawnCandidate(world, candidate, isValidStandingPosition, false);
                     if (found != null) {
                         return found;
                     }
-                    recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
-                    SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
-                    logSpawnProgress(world.dimension());
+                    queueDeferredCandidate(deferredCandidates, candidate);
                     continue;
                 }
 
@@ -256,12 +368,143 @@ public final class SpawnSearchScheduler {
                 logSpawnProgress(world.dimension());
             }
 
+            BlockPos deferredFound = drainDeferredCandidates(world, deferredCandidates, isValidStandingPosition, constraintHash);
+            if (deferredFound != null) {
+                return deferredFound;
+            }
+
             radius += profile.SPAWN_RADIUS_INCREASE;
-            if (attempts > profile.SPAWN_CHECK_ATTEMPTS) {
-                LC2H.LOGGER.error("Can't find a valid spawn position!");
-                throw new RuntimeException("Can't find a valid spawn position!");
+            if (attempts > maxAttempts) {
+                if (!didRelaxConstraints && strictSpawnConstraints) {
+                    didRelaxConstraints = true;
+                    SPAWN_PROGRESS_STAGE = "generic-search-relaxed";
+                    LC2H.LOGGER.warn(
+                        "[LC2H] No constrained spawn found after {} attempts ({}); relaxing spawn constraints and retrying generic search",
+                        attempts,
+                        profile.SPAWN_CHECK_ATTEMPTS
+                    );
+                    requiresBuilding = false;
+                    requiredBuildings = java.util.Collections.emptySet();
+                    requiredParts = java.util.Collections.emptySet();
+                    assetFilter = ResolvedAssetFilter.NONE;
+                    constraintHash = computeConstraintHash(profile, requiredBuildings, requiredParts);
+                    maxAttempts = computeSpawnAttemptBudget(profile, requiresBuilding, requiredBuildings, requiredParts);
+                    attempts = 0;
+                    radius = Math.max(16, profile.SPAWN_CHECK_RADIUS);
+                    localChecked.clear();
+                    deferredCandidates.clear();
+                    SPAWN_PROGRESS_REQUIRED_BUILDINGS = formatIdSet(requiredBuildings);
+                    SPAWN_PROGRESS_REQUIRED_PARTS = formatIdSet(requiredParts);
+                    continue;
+                }
+                String failureDetails = buildSpawnFailureDetails(world.dimension(), attempts, maxAttempts, radius);
+                LC2H.LOGGER.error("Can't find a valid spawn position! {}", failureDetails);
+                throw new RuntimeException("Can't find a valid spawn position! " + failureDetails);
             }
         }
+    }
+
+    private static BlockPos findSpawnInRequiredBuildings(Level world,
+                                                         IDimensionInfo provider,
+                                                         LostCityProfile profile,
+                                                         Predicate<BlockPos> isSuitable,
+                                                         BiPredicate<Level, BlockPos> isValidStandingPosition,
+                                                         Set<String> requiredBuildings,
+                                                         Set<String> requiredParts,
+                                                         ResolvedAssetFilter assetFilter,
+                                                         int constraintHash,
+                                                         BlockPos startPos) {
+        int radiusBlocks = Math.max(16, profile.SPAWN_CHECK_RADIUS);
+        int maxAttempts = computeSpawnAttemptBudget(profile, true, requiredBuildings, requiredParts);
+        int radiusIncrease = Math.max(1, profile.SPAWN_RADIUS_INCREASE);
+        int originChunkX = startPos.getX() >> 4;
+        int originChunkZ = startPos.getZ() >> 4;
+        int radiusChunks = Math.max(1, radiusBlocks >> 4);
+        int attempts = 0;
+        Set<Long> visited = new HashSet<>();
+        while (attempts <= maxAttempts) {
+            for (int r = 0; r <= radiusChunks; r++) {
+                java.util.ArrayList<SpawnCandidate> deferredCandidates = new java.util.ArrayList<>(DEFERRED_CHUNK_VALIDATION_LIMIT);
+                for (int dx = -r; dx <= r; dx++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        if (Math.abs(dx) != r && Math.abs(dz) != r) {
+                            continue;
+                        }
+                        int chunkX = originChunkX + dx;
+                        int chunkZ = originChunkZ + dz;
+                        long packed = packChunkKey(chunkX, chunkZ);
+                        if (!visited.add(packed)) {
+                            continue;
+                        }
+                        attempts++;
+                        SPAWN_PROGRESS_CHUNKS_SCANNED.incrementAndGet();
+                        logSpawnProgress(world.dimension());
+                        if (attempts > maxAttempts) {
+                            break;
+                        }
+
+                        if (shouldSkip(world.dimension(), chunkX, chunkZ, constraintHash)) {
+                            continue;
+                        }
+                        if (shouldSkipRegion(world.dimension(), chunkX, chunkZ, constraintHash)) {
+                            continue;
+                        }
+                        ChunkCoord coord = new ChunkCoord(provider.getType(), chunkX, chunkZ);
+                        BuildingInfo info = getBuildingInfoNow(provider, coord);
+                        if (info == null) {
+                            continue;
+                        }
+                        if (!passesBuildingInfo(info, true, assetFilter)) {
+                            recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                            continue;
+                        }
+
+                        CityInfo cityInfo = getCachedCityInfo(world.dimension(), coord);
+                        if (cityInfo == null) {
+                            cityInfo = scanCity(provider, world.dimension(), coord, 512, 2048);
+                        }
+                        if (cityInfo != null) {
+                            if (cityInfo.quickReject(requiredBuildings, requiredParts, constraintHash)) {
+                                recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                                continue;
+                            }
+                            if (cityInfo.wasTried(constraintHash)) {
+                                recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                                continue;
+                            }
+                            BlockPos cityResult = searchCityCandidates(world, provider, cityInfo, isSuitable,
+                                isValidStandingPosition, requiredBuildings, requiredParts, assetFilter, constraintHash);
+                            cityInfo.recordDecision(constraintHash, cityResult != null);
+                            if (cityResult != null) {
+                                return cityResult;
+                            }
+                            recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                            continue;
+                        }
+
+                        SpawnCandidate candidate = findInBuildingChunk(info, chunkX, chunkZ, isSuitable, requiredParts, assetFilter);
+                        if (candidate == null) {
+                            recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                            continue;
+                        }
+
+                        BlockPos found = tryValidateSpawnCandidate(world, candidate, isValidStandingPosition, false);
+                        if (found != null) {
+                            return found;
+                        }
+
+                        queueDeferredCandidate(deferredCandidates, candidate);
+                    }
+                }
+                BlockPos deferredFound = drainDeferredCandidates(world, deferredCandidates, isValidStandingPosition, constraintHash);
+                if (deferredFound != null) {
+                    return deferredFound;
+                }
+            }
+            radiusChunks = Math.max(radiusChunks + (radiusIncrease >> 4), radiusChunks + 1);
+        }
+
+        return null;
     }
 
     private static BlockPos findSpawnInCity(Level world,
@@ -271,15 +514,13 @@ public final class SpawnSearchScheduler {
                                             BiPredicate<Level, BlockPos> isValidStandingPosition,
                                             Set<String> requiredBuildings,
                                             Set<String> requiredParts,
+                                            ResolvedAssetFilter assetFilter,
                                             int constraintHash,
                                             BlockPos startPos) {
         int radiusBlocks = Math.max(16, profile.SPAWN_CHECK_RADIUS);
-        int maxAttempts = Math.max(1, profile.SPAWN_CHECK_ATTEMPTS);
+        int maxAttempts = computeSpawnAttemptBudget(profile, true, requiredBuildings, requiredParts);
         int radiusIncrease = Math.max(1, profile.SPAWN_RADIUS_INCREASE);
-        int maxCityChunks = Math.max(128, Integer.getInteger("lc2h.spawnsearch.cityMaxChunks", 1024));
-        int maxCityChecks = Math.max(256, Integer.getInteger("lc2h.spawnsearch.cityMaxChecks", 4096));
-
-        Set<Long> visitedCityChunks = new HashSet<>();
+        Set<Long> visited = new HashSet<>();
         int attempts = 0;
 
         int originChunkX = startPos.getX() >> 4;
@@ -287,6 +528,7 @@ public final class SpawnSearchScheduler {
         int radiusChunks = Math.max(1, radiusBlocks >> 4);
         while (attempts <= maxAttempts) {
             for (int r = 0; r <= radiusChunks; r++) {
+                java.util.ArrayList<SpawnCandidate> deferredCandidates = new java.util.ArrayList<>(DEFERRED_CHUNK_VALIDATION_LIMIT);
                 for (int dx = -r; dx <= r; dx++) {
                     for (int dz = -r; dz <= r; dz++) {
                         if (Math.abs(dx) != r && Math.abs(dz) != r) {
@@ -295,55 +537,89 @@ public final class SpawnSearchScheduler {
                         int chunkX = originChunkX + dx;
                         int chunkZ = originChunkZ + dz;
                         long packed = packChunkKey(chunkX, chunkZ);
-                        if (!visitedCityChunks.add(packed)) {
+                        if (!visited.add(packed)) {
                             continue;
                         }
                         attempts++;
                         SPAWN_PROGRESS_CHUNKS_SCANNED.incrementAndGet();
                         logSpawnProgress(world.dimension());
+                        if (attempts > maxAttempts) {
+                            break;
+                        }
+
+                        if (shouldSkip(world.dimension(), chunkX, chunkZ, constraintHash)) {
+                            continue;
+                        }
+                        if (shouldSkipRegion(world.dimension(), chunkX, chunkZ, constraintHash)) {
+                            continue;
+                        }
+
                         ChunkCoord coord = new ChunkCoord(provider.getType(), chunkX, chunkZ);
+                        BuildingInfo info = getBuildingInfoNow(provider, coord);
+                        if (info == null) {
+                            continue;
+                        }
+
+                        if (!passesBuildingInfo(info, true, assetFilter)) {
+                            recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                            SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
+                            logSpawnProgress(world.dimension());
+                            continue;
+                        }
+
                         CityInfo cityInfo = getCachedCityInfo(world.dimension(), coord);
-                        if (cityInfo == null && !ChunkRoleProbe.isCity(provider, coord.dimension(), coord.chunkX(), coord.chunkZ())) {
-                            continue;
-                        }
                         if (cityInfo == null) {
-                            cityInfo = scanCity(provider, world.dimension(), coord, maxCityChunks, maxCityChecks);
+                            cityInfo = scanCity(provider, world.dimension(), coord, 512, 2048);
                         }
-                        if (cityInfo == null || cityInfo.cityChunks.isEmpty()) {
+                        if (cityInfo != null) {
+                            if (cityInfo.quickReject(requiredBuildings, requiredParts, constraintHash)) {
+                                recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                                SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
+                                SPAWN_PROGRESS_CITIES_FAILED.incrementAndGet();
+                                logSpawnProgress(world.dimension());
+                                continue;
+                            }
+                            if (cityInfo.wasTried(constraintHash)) {
+                                recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                                SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
+                                logSpawnProgress(world.dimension());
+                                continue;
+                            }
+                            if (cityInfo.needsBuildingIdSamples()) {
+                                cityInfo.ensureBuildingIdSamples(provider, requiredBuildings, requiredParts);
+                            }
+                            BlockPos cityResult = searchCityCandidates(world, provider, cityInfo, isSuitable,
+                                isValidStandingPosition, requiredBuildings, requiredParts, assetFilter, constraintHash);
+                            cityInfo.recordDecision(constraintHash, cityResult != null);
+                            if (cityResult != null) {
+                                return cityResult;
+                            }
+                            SPAWN_PROGRESS_CITIES_FAILED.incrementAndGet();
+                            logSpawnProgress(world.dimension());
+                            recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                            SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
                             continue;
                         }
-                        if (cityInfo.wasTried(constraintHash)) {
-                            SPAWN_PROGRESS_CITIES_FAILED.incrementAndGet();
+
+                        SpawnCandidate candidate = findInBuildingChunk(info, chunkX, chunkZ, isSuitable, requiredParts, assetFilter);
+                        if (candidate == null) {
+                            recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                            SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
                             logSpawnProgress(world.dimension());
                             continue;
                         }
-                        if (!requiredBuildings.isEmpty() && cityInfo.needsBuildingIdSamples()) {
-                            cityInfo.ensureBuildingIdSamples(provider, requiredBuildings, requiredParts);
-                        }
-                        if (cityInfo.quickReject(requiredBuildings, requiredParts, constraintHash)) {
-                            cityInfo.recordDecision(constraintHash, false);
-                            SPAWN_PROGRESS_CITIES_FAILED.incrementAndGet();
-                            logSpawnProgress(world.dimension());
-                            continue;
-                        }
-                        for (long cityChunk : cityInfo.cityChunks) {
-                            visitedCityChunks.add(cityChunk);
-                        }
-                        BlockPos found = searchCityCandidates(world, provider, cityInfo, isSuitable, isValidStandingPosition,
-                            requiredBuildings, requiredParts, constraintHash);
+
+                        BlockPos found = tryValidateSpawnCandidate(world, candidate, isValidStandingPosition, false);
                         if (found != null) {
-                            cityInfo.recordDecision(constraintHash, true);
                             return found;
                         }
-                        cityInfo.recordDecision(constraintHash, false);
-                        SPAWN_PROGRESS_CITIES_FAILED.incrementAndGet();
-                        logSpawnProgress(world.dimension());
-                        for (long cityChunk : cityInfo.cityChunks) {
-                            int cx = (int) (cityChunk >> 32);
-                            int cz = (int) cityChunk;
-                            recordSkip(world.dimension(), cx, cz, constraintHash);
-                        }
+
+                        queueDeferredCandidate(deferredCandidates, candidate);
                     }
+                }
+                BlockPos deferredFound = drainDeferredCandidates(world, deferredCandidates, isValidStandingPosition, constraintHash);
+                if (deferredFound != null) {
+                    return deferredFound;
                 }
             }
             radiusChunks = Math.max(radiusChunks + (radiusIncrease >> 4), radiusChunks + 1);
@@ -358,34 +634,33 @@ public final class SpawnSearchScheduler {
                                                  BiPredicate<Level, BlockPos> isValidStandingPosition,
                                                  Set<String> requiredBuildings,
                                                  Set<String> requiredParts,
+                                                 ResolvedAssetFilter assetFilter,
                                                  int constraintHash) {
-        java.util.ArrayList<ChunkCoord> candidates = buildCityCandidates(provider, city, requiredBuildings, requiredParts);
+        java.util.ArrayList<ChunkCoord> candidates = buildCityCandidates(provider, city, requiredBuildings, requiredParts, assetFilter);
         if (candidates.isEmpty()) {
             return null;
         }
-        int[] offsets = new int[] {4, 8, 12};
+        AsyncBuildingInfoPlanner.preSchedulePriorityBatch(provider, candidates);
+        java.util.ArrayList<SpawnCandidate> deferredCandidates = new java.util.ArrayList<>(DEFERRED_CHUNK_VALIDATION_LIMIT);
         for (ChunkCoord coord : candidates) {
-            BuildingInfo info = getBuildingInfoSync(provider, coord);
+            BuildingInfo info = getBuildingInfoNow(provider, coord);
             if (info == null) {
                 continue;
             }
-            if (!passesBuildingInfo(info, true, requiredBuildings, requiredParts)) {
+            if (!passesBuildingInfo(info, true, assetFilter)) {
                 continue;
             }
-            int baseX = coord.chunkX() << 4;
-            int baseZ = coord.chunkZ() << 4;
-            for (int dx : offsets) {
-                for (int dz : offsets) {
-                    int worldX = baseX + dx;
-                    int worldZ = baseZ + dz;
-                    BlockPos found = findInBuilding(world, info, worldX, worldZ, isSuitable, isValidStandingPosition, requiredParts);
-                    if (found != null) {
-                        return found;
-                    }
-                }
+            SpawnCandidate candidate = findInBuildingChunk(info, coord.chunkX(), coord.chunkZ(), isSuitable, requiredParts, assetFilter);
+            if (candidate == null) {
+                continue;
             }
+            BlockPos found = tryValidateSpawnCandidate(world, candidate, isValidStandingPosition, false);
+            if (found != null) {
+                return found;
+            }
+            queueDeferredCandidate(deferredCandidates, candidate);
         }
-        return null;
+        return drainDeferredCandidates(world, deferredCandidates, isValidStandingPosition, 0);
     }
 
     private static CityInfo getCachedCityInfo(ResourceKey<Level> dimension, ChunkCoord coord) {
@@ -485,13 +760,14 @@ public final class SpawnSearchScheduler {
     private static java.util.ArrayList<ChunkCoord> buildCityCandidates(IDimensionInfo provider,
                                                                        CityInfo city,
                                                                        Set<String> requiredBuildings,
-                                                                       Set<String> requiredParts) {
+                                                                       Set<String> requiredParts,
+                                                                       ResolvedAssetFilter assetFilter) {
         java.util.ArrayList<ChunkCoord> candidates = new java.util.ArrayList<>();
         for (long packed : city.cityChunks) {
             int cx = (int) (packed >> 32);
             int cz = (int) packed;
             ChunkCoord coord = new ChunkCoord(provider.getType(), cx, cz);
-            PrefilterDecision decision = prefilter(coord, provider, true, requiredBuildings, requiredParts);
+            PrefilterDecision decision = prefilter(coord, provider, true, requiredBuildings, requiredParts, assetFilter);
             if (decision != PrefilterDecision.FAIL) {
                 candidates.add(coord);
             }
@@ -499,12 +775,48 @@ public final class SpawnSearchScheduler {
         return candidates;
     }
 
-    private static BuildingInfo getBuildingInfoSync(IDimensionInfo provider, ChunkCoord coord) {
+    @SuppressWarnings("unused")
+    private static BuildingInfo getBuildingInfoReadyOrSchedule(IDimensionInfo provider, ChunkCoord coord) {
         try {
             Object ready = AsyncBuildingInfoPlanner.getIfReady(coord);
             if (ready instanceof BuildingInfo info) {
                 return info;
             }
+            if (AsyncBuildingInfoPlanner.isSpawnPrefetchSaturated()) {
+                applyPendingBackpressure();
+                ready = AsyncBuildingInfoPlanner.getIfReady(coord);
+                if (ready instanceof BuildingInfo info) {
+                    return info;
+                }
+            }
+            AsyncBuildingInfoPlanner.preSchedulePriority(provider, coord);
+            if (AsyncBuildingInfoPlanner.isSpawnPrefetchSaturated()) {
+                applyPendingBackpressure();
+                ready = AsyncBuildingInfoPlanner.getIfReady(coord);
+                if (ready instanceof BuildingInfo info) {
+                    return info;
+                }
+            }
+            if (!ALLOW_SYNC_BUILDINGINFO_FALLBACK) {
+                return null;
+            }
+            return BuildingInfo.getBuildingInfo(coord, provider);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * Tries the async BuildingInfo cache first. If not ready, schedules async pre-warm and
+     * immediately falls back to synchronous computation. Never sleeps the calling thread.
+     */
+    private static BuildingInfo getBuildingInfoNow(IDimensionInfo provider, ChunkCoord coord) {
+        try {
+            Object ready = AsyncBuildingInfoPlanner.getIfReady(coord);
+            if (ready instanceof BuildingInfo info) {
+                return info;
+            }
+            AsyncBuildingInfoPlanner.preSchedulePriority(provider, coord);
             return BuildingInfo.getBuildingInfo(coord, provider);
         } catch (Throwable t) {
             return null;
@@ -513,18 +825,17 @@ public final class SpawnSearchScheduler {
 
     private static boolean passesBuildingInfo(BuildingInfo info,
                                               boolean requiresBuilding,
-                                              Set<String> requiredBuildings,
-                                              Set<String> requiredParts) {
+                                              ResolvedAssetFilter assetFilter) {
         if (info == null) {
             return false;
         }
         if (!info.isCity || !info.hasBuilding) {
-            return !requiresBuilding && requiredBuildings.isEmpty() && requiredParts.isEmpty();
+            return !requiresBuilding && (assetFilter == null || assetFilter.isUnconstrained());
         }
-        if (!requiredBuildings.isEmpty()) {
+        if (assetFilter != null && assetFilter.hasBuildingConstraint()) {
             try {
                 String id = info.getBuildingId() != null ? info.getBuildingId().toString() : "";
-                if (!requiredBuildings.contains(id)) {
+                if (!assetFilter.buildingMatches(id)) {
                     return false;
                 }
             } catch (Throwable ignored) {
@@ -534,13 +845,12 @@ public final class SpawnSearchScheduler {
         return true;
     }
 
-    private static BlockPos findInBuilding(Level world,
-                                           BuildingInfo info,
-                                           int x,
-                                           int z,
-                                           Predicate<BlockPos> isSuitable,
-                                           BiPredicate<Level, BlockPos> isValidStandingPosition,
-                                           Set<String> requiredParts) {
+    private static SpawnCandidate findInBuilding(BuildingInfo info,
+                                                 int x,
+                                                 int z,
+                                                 Predicate<BlockPos> isSuitable,
+                                                 Set<String> requiredParts,
+                                                 ResolvedAssetFilter assetFilter) {
         int bottom = info.getBuildingBottomHeight();
         if (bottom == Integer.MIN_VALUE) {
             return null;
@@ -552,10 +862,10 @@ public final class SpawnSearchScheduler {
         int end = bottom + (floors * floorHeight) + 1;
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         for (int y = start; y <= end; y += floorHeight) {
-            if (!requiredParts.isEmpty()) {
+            if (!requiredParts.isEmpty() && assetFilter != null && assetFilter.hasPartConstraint()) {
                 BuildingPart part = info.getFloorAtY(bottom, y);
                 String partId = part != null ? part.getId().toString() : "";
-                if (!requiredParts.contains(partId)) {
+                if (!assetFilter.partMatches(partId)) {
                     continue;
                 }
             }
@@ -563,10 +873,105 @@ public final class SpawnSearchScheduler {
             if (!isSuitable.test(pos)) {
                 continue;
             }
-            if (isValidStandingPosition.test(world, pos)) {
-                return pos.above();
+            return new SpawnCandidate(pos.immutable(), x >> 4, z >> 4);
+        }
+        return null;
+    }
+
+    private static SpawnCandidate findInBuildingChunk(BuildingInfo info,
+                                                      int chunkX,
+                                                      int chunkZ,
+                                                      Predicate<BlockPos> isSuitable,
+                                                      Set<String> requiredParts,
+                                                      ResolvedAssetFilter assetFilter) {
+        int baseX = chunkX << 4;
+        int baseZ = chunkZ << 4;
+
+        for (int ox : BUILDING_SAMPLE_OFFSETS) {
+            for (int oz : BUILDING_SAMPLE_OFFSETS) {
+                SpawnCandidate found = findInBuilding(info, baseX + ox, baseZ + oz, isSuitable, requiredParts, assetFilter);
+                if (found != null) {
+                    return found;
+                }
             }
         }
+
+        for (int x = 1; x < 15; x++) {
+            for (int z = 1; z < 15; z++) {
+                SpawnCandidate found = findInBuilding(info, baseX + x, baseZ + z, isSuitable, requiredParts, assetFilter);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static BlockPos tryValidateSpawnCandidate(Level world,
+                                                      SpawnCandidate candidate,
+                                                      BiPredicate<Level, BlockPos> isValidStandingPosition,
+                                                      boolean forceChunkLoad) {
+        if (candidate == null) {
+            return null;
+        }
+        int chunkX = candidate.chunkX();
+        int chunkZ = candidate.chunkZ();
+
+        if (world instanceof ServerLevel serverLevel) {
+            if (!forceChunkLoad && serverLevel.getChunkSource().getChunkNow(chunkX, chunkZ) == null) {
+                return null;
+            }
+            if (forceChunkLoad) {
+                serverLevel.getChunk(chunkX, chunkZ);
+            }
+        } else {
+            if (!forceChunkLoad && !world.hasChunk(chunkX, chunkZ)) {
+                return null;
+            }
+            if (forceChunkLoad) {
+                world.getChunk(chunkX, chunkZ);
+            }
+        }
+
+        return isValidStandingPosition.test(world, candidate.pos()) ? candidate.pos().above() : null;
+    }
+
+    private static void queueDeferredCandidate(java.util.ArrayList<SpawnCandidate> deferredCandidates, SpawnCandidate candidate) {
+        if (candidate == null || deferredCandidates == null) {
+            return;
+        }
+        if (deferredCandidates.size() >= DEFERRED_CHUNK_VALIDATION_LIMIT) {
+            return;
+        }
+        deferredCandidates.add(candidate);
+    }
+
+    private static BlockPos drainDeferredCandidates(Level world,
+                                                    java.util.ArrayList<SpawnCandidate> deferredCandidates,
+                                                    BiPredicate<Level, BlockPos> isValidStandingPosition,
+                                                    int constraintHash) {
+        if (deferredCandidates == null || deferredCandidates.isEmpty()) {
+            return null;
+        }
+        for (SpawnCandidate candidate : deferredCandidates) {
+            // Never force-load chunks during spawn search. Forcing chunk gen on the server
+            // thread triggers LostCityFeature.generate() → withChunkStripeLock, but
+            // ForkJoin's work-stealing can leave a gen worker holding the stripe lock while
+            // parked in awaitWork, preventing any other worker from acquiring it → deadlock.
+            // Use forceChunkLoad=false; if the chunk is already resident, validate normally.
+            BlockPos found = tryValidateSpawnCandidate(world, candidate, isValidStandingPosition, false);
+            if (found != null) {
+                deferredCandidates.clear();
+                return found;
+            }
+            recordSkip(world.dimension(), candidate.chunkX(), candidate.chunkZ(), constraintHash);
+            SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
+            logSpawnProgress(world.dimension());
+        }
+        // Do not accept unloaded candidates blindly. A predicted BuildingInfo candidate can still
+        // drift versus final generated terrain/buildings and place spawn into an invalid location.
+        deferredCandidates.clear();
         return null;
     }
 
@@ -580,7 +985,8 @@ public final class SpawnSearchScheduler {
                                                IDimensionInfo provider,
                                                boolean requiresBuilding,
                                                Set<String> requiredBuildings,
-                                               Set<String> requiredParts) {
+                                               Set<String> requiredParts,
+                                               ResolvedAssetFilter assetFilter) {
         if (!requiresBuilding && requiredBuildings.isEmpty() && requiredParts.isEmpty()) {
         return PrefilterDecision.PASS;
     }
@@ -592,16 +998,16 @@ public final class SpawnSearchScheduler {
             if (!characteristics.isCity || !characteristics.couldHaveBuilding) {
                 return PrefilterDecision.FAIL;
             }
-            if (!requiredBuildings.isEmpty()) {
+            if (assetFilter != null && assetFilter.hasBuildingConstraint()) {
                 if (characteristics.buildingTypeId == null) {
                     return PrefilterDecision.NEED_INFO;
                 }
                 String buildingId = characteristics.buildingTypeId.toString();
-                if (!requiredBuildings.contains(buildingId)) {
+                if (!assetFilter.buildingMatches(buildingId)) {
                     return PrefilterDecision.FAIL;
                 }
             }
-            if (!requiredParts.isEmpty()) {
+            if (assetFilter != null && assetFilter.hasPartConstraint()) {
                 return PrefilterDecision.NEED_INFO;
             }
             return PrefilterDecision.PASS;
@@ -673,7 +1079,8 @@ public final class SpawnSearchScheduler {
                                                  int constraintHash,
                                                  boolean requiresBuilding,
                                                  Set<String> requiredBuildings,
-                                                 Set<String> requiredParts) {
+                                                 Set<String> requiredParts,
+                                                 ResolvedAssetFilter assetFilter) {
         int regionX = regionCoord(chunkX);
         int regionZ = regionCoord(chunkZ);
         SpawnRegionKey key = new SpawnRegionKey(dimension, regionX, regionZ, constraintHash);
@@ -684,7 +1091,7 @@ public final class SpawnSearchScheduler {
         }
 
         RegionScanCache built = buildRegionScan(provider, dimension, regionX, regionZ, constraintHash,
-            requiresBuilding, requiredBuildings, requiredParts, now);
+            requiresBuilding, requiredBuildings, requiredParts, assetFilter, now);
         if (built == null) {
             return null;
         }
@@ -700,6 +1107,7 @@ public final class SpawnSearchScheduler {
                                                    boolean requiresBuilding,
                                                    Set<String> requiredBuildings,
                                                    Set<String> requiredParts,
+                                                   ResolvedAssetFilter assetFilter,
                                                    long now) {
         BitSet candidates = new BitSet(REGION_SIZE_CHUNKS * REGION_SIZE_CHUNKS);
         BitSet needsInfo = new BitSet(REGION_SIZE_CHUNKS * REGION_SIZE_CHUNKS);
@@ -716,7 +1124,7 @@ public final class SpawnSearchScheduler {
                     continue;
                 }
                 ChunkCoord coord = new ChunkCoord(provider.getType(), cx, cz);
-                PrefilterDecision decision = prefilter(coord, provider, requiresBuilding, requiredBuildings, requiredParts);
+                PrefilterDecision decision = prefilter(coord, provider, requiresBuilding, requiredBuildings, requiredParts, assetFilter);
                 if (decision == PrefilterDecision.FAIL) {
                     continue;
                 }
@@ -750,7 +1158,8 @@ public final class SpawnSearchScheduler {
                                             int constraintHash,
                                             boolean requiresBuilding,
                                             Set<String> requiredBuildings,
-                                            Set<String> requiredParts) {
+                                            Set<String> requiredParts,
+                                            ResolvedAssetFilter assetFilter) {
         if (REGION_PREFETCH_LIMIT <= 0) {
             return;
         }
@@ -765,9 +1174,10 @@ public final class SpawnSearchScheduler {
         REGION_PREFETCH.put(key, now);
 
         buildRegionScan(provider, dimension, regionX, regionZ, constraintHash,
-            requiresBuilding, requiredBuildings, requiredParts, now);
+            requiresBuilding, requiredBuildings, requiredParts, assetFilter, now);
     }
 
+    @SuppressWarnings("unused")
     private static boolean shouldPending(ResourceKey<Level> dimension, int chunkX, int chunkZ, int constraintHash) {
         if (PENDING_TTL_MS <= 0L) {
             return false;
@@ -794,6 +1204,24 @@ public final class SpawnSearchScheduler {
         PENDING.put(new SpawnChunkKey(dimension, chunkX, chunkZ, constraintHash), System.currentTimeMillis());
     }
 
+    @SuppressWarnings("unused")
+    private static void handleUnavailableBuildingInfo(ResourceKey<Level> dimension, int chunkX, int chunkZ, int constraintHash) {
+        if (AsyncBuildingInfoPlanner.isSpawnPrefetchSaturated()) {
+            applyPendingBackpressure();
+            return;
+        }
+        recordPending(dimension, chunkX, chunkZ, constraintHash);
+    }
+
+    private static void applyPendingBackpressure() {
+        SPAWN_PROGRESS_PENDING_BACKPRESSURE.incrementAndGet();
+        try {
+            Thread.sleep(PENDING_BACKPRESSURE_SLEEP_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     private static int computeConstraintHash(LostCityProfile profile,
                                              Set<String> requiredBuildings,
                                              Set<String> requiredParts) {
@@ -804,6 +1232,25 @@ public final class SpawnSearchScheduler {
         hash = 31 * hash + profile.SPAWN_CHECK_RADIUS;
         hash = 31 * hash + profile.SPAWN_RADIUS_INCREASE;
         return hash;
+    }
+
+    private static int computeSpawnAttemptBudget(LostCityProfile profile,
+                                                 boolean requiresBuilding,
+                                                 Set<String> requiredBuildings,
+                                                 Set<String> requiredParts) {
+        int baseAttempts = Math.max(1, profile.SPAWN_CHECK_ATTEMPTS);
+        if (!requiresBuilding && (requiredBuildings == null || requiredBuildings.isEmpty()) && (requiredParts == null || requiredParts.isEmpty())) {
+            return baseAttempts;
+        }
+
+        int radiusChunks = Math.max(1, Math.max(16, profile.SPAWN_CHECK_RADIUS) >> 4);
+        int initialCoverage = (radiusChunks * 2) + 1;
+        initialCoverage *= initialCoverage;
+        int constrainedFloor = Math.max(4096, initialCoverage * 8);
+        if (requiredBuildings != null && !requiredBuildings.isEmpty()) {
+            constrainedFloor = Math.max(constrainedFloor, 8192);
+        }
+        return Math.max(baseAttempts, constrainedFloor);
     }
 
     private static long packChunkKey(int chunkX, int chunkZ) {
@@ -855,6 +1302,9 @@ public final class SpawnSearchScheduler {
     private record SpawnRegionBaseKey(ResourceKey<Level> dimension, int regionX, int regionZ) {
     }
 
+    private record SpawnCandidate(BlockPos pos, int chunkX, int chunkZ) {
+    }
+
     private record CityChunkKey(ResourceKey<Level> dimension, int chunkX, int chunkZ) {
     }
 
@@ -872,7 +1322,6 @@ public final class SpawnSearchScheduler {
         private volatile boolean sampledComplete = false;
         private volatile long sampleNextAttemptMs = 0L;
         private volatile long sampleFirstAttemptMs = 0L;
-        private volatile boolean sampleSyncTried = false;
         private final ConcurrentHashMap<Integer, Boolean> triedDecisions = new ConcurrentHashMap<>();
 
         private CityInfo(boolean hasRoofs,
@@ -935,24 +1384,6 @@ public final class SpawnSearchScheduler {
                 pending.add(coord);
             }
             if (!pending.isEmpty()) {
-                if (!sampleSyncTried && (now - sampleFirstAttemptMs) > CITY_SAMPLE_RETRY_MS) {
-                    sampleSyncTried = true;
-                    ChunkCoord coord = pending.get(0);
-                    try {
-                        BuildingInfo info = BuildingInfo.getBuildingInfo(coord, provider);
-                        if (info != null) {
-                            String id = info.getBuildingId() != null ? info.getBuildingId().toString() : "";
-                            if (!id.isBlank()) {
-                                sampledBuildingIds.add(id);
-                            }
-                        }
-                    } catch (Throwable ignored) {
-                    }
-                    if (!sampledBuildingIds.isEmpty()) {
-                        sampledComplete = true;
-                        return true;
-                    }
-                }
                 AsyncBuildingInfoPlanner.preSchedulePriorityBatch(provider, pending);
                 sampleNextAttemptMs = now + CITY_SAMPLE_RETRY_MS;
                 return false;
@@ -1077,9 +1508,11 @@ public final class SpawnSearchScheduler {
         long citiesSignatureRejected = SPAWN_PROGRESS_CITIES_SIGNATURE_REJECTED.get();
         long cityChunksWithBuildingId = SPAWN_PROGRESS_CITY_CHUNKS_WITH_BUILDING_ID.get();
         long cityChunksWithBuildingCandidate = SPAWN_PROGRESS_CITY_CHUNKS_WITH_BUILDING_CANDIDATE.get();
+        long pendingBackpressure = SPAWN_PROGRESS_PENDING_BACKPRESSURE.get();
         LC2H.LOGGER.debug(
-            "[LC2H] Spawn search progress (dim={}): chunksScanned={}, chunksRejected={}, citiesFound={}, citiesFailed={}, citiesSignatureRejected={}, cityChunksWithBuildingId={}, cityChunksWithBuildingCandidate={}, requiredBuildings={}, requiredParts={}, sampleCityBuildings={}, sampleCityBuildingsFromInfo={}",
+            "[LC2H] Spawn search progress (dim={} stage={}): chunksScanned={}, chunksRejected={}, citiesFound={}, citiesFailed={}, citiesSignatureRejected={}, cityChunksWithBuildingId={}, cityChunksWithBuildingCandidate={}, rawBuildings={}, resolvedBuildings={}, requiredBuildings={}, rawParts={}, resolvedParts={}, requiredParts={}, pending={}, spawnPrefetchInflight={}, pendingBackpressure={}, sampleCityBuildings={}, sampleCityBuildingsFromInfo={}",
             dimension.location(),
+            SPAWN_PROGRESS_STAGE,
             chunks,
             chunksRejected,
             citiesFound,
@@ -1087,11 +1520,68 @@ public final class SpawnSearchScheduler {
             citiesSignatureRejected,
             cityChunksWithBuildingId,
             cityChunksWithBuildingCandidate,
+            SPAWN_PROGRESS_RAW_BUILDINGS,
+            SPAWN_PROGRESS_RESOLVED_BUILDINGS,
             SPAWN_PROGRESS_REQUIRED_BUILDINGS,
+            SPAWN_PROGRESS_RAW_PARTS,
+            SPAWN_PROGRESS_RESOLVED_PARTS,
             SPAWN_PROGRESS_REQUIRED_PARTS,
+            PENDING.size(),
+            AsyncBuildingInfoPlanner.getSpawnPrefetchCount(),
+            pendingBackpressure,
             SPAWN_PROGRESS_SAMPLE_BUILDINGS,
             formatIdSampleFromCache(6)
         );
+    }
+
+    private static String buildSpawnFailureDetails(ResourceKey<Level> dimension,
+                                                   int attempts,
+                                                   int maxAttempts,
+                                                   int radius) {
+        return "dim=" + dimension.location()
+            + ",stage=" + SPAWN_PROGRESS_STAGE
+            + ",attempts=" + attempts + "/" + maxAttempts
+            + ",radius=" + radius
+            + ",chunksScanned=" + SPAWN_PROGRESS_CHUNKS_SCANNED.get()
+            + ",chunksRejected=" + SPAWN_PROGRESS_CHUNKS_REJECTED.get()
+            + ",citiesFound=" + SPAWN_PROGRESS_CITIES_FOUND.get()
+            + ",citiesFailed=" + SPAWN_PROGRESS_CITIES_FAILED.get()
+            + ",citiesSignatureRejected=" + SPAWN_PROGRESS_CITIES_SIGNATURE_REJECTED.get()
+            + ",cityChunksWithBuildingId=" + SPAWN_PROGRESS_CITY_CHUNKS_WITH_BUILDING_ID.get()
+            + ",cityChunksWithBuildingCandidate=" + SPAWN_PROGRESS_CITY_CHUNKS_WITH_BUILDING_CANDIDATE.get()
+            + ",pending=" + PENDING.size()
+            + ",spawnPrefetchInflight=" + AsyncBuildingInfoPlanner.getSpawnPrefetchCount()
+            + ",pendingBackpressure=" + SPAWN_PROGRESS_PENDING_BACKPRESSURE.get()
+            + ",skipCache=" + SKIPPED.size()
+            + ",regionSkipCache=" + REGION_SKIPPED.size()
+            + ",rawBuildings=" + SPAWN_PROGRESS_RAW_BUILDINGS
+            + ",resolvedBuildings=" + SPAWN_PROGRESS_RESOLVED_BUILDINGS
+            + ",requiredBuildings=" + SPAWN_PROGRESS_REQUIRED_BUILDINGS
+            + ",rawParts=" + SPAWN_PROGRESS_RAW_PARTS
+            + ",resolvedParts=" + SPAWN_PROGRESS_RESOLVED_PARTS
+            + ",requiredParts=" + SPAWN_PROGRESS_REQUIRED_PARTS
+            + ",sampleCityBuildings=" + SPAWN_PROGRESS_SAMPLE_BUILDINGS
+            + ",sampleCityBuildingsFromInfo=" + formatIdSampleFromCache(8);
+    }
+
+    private static void resetSpawnProgress() {
+        SPAWN_PROGRESS_LAST_LOG.set(0L);
+        SPAWN_PROGRESS_CHUNKS_SCANNED.set(0L);
+        SPAWN_PROGRESS_CITIES_FOUND.set(0L);
+        SPAWN_PROGRESS_CITIES_FAILED.set(0L);
+        SPAWN_PROGRESS_CHUNKS_REJECTED.set(0L);
+        SPAWN_PROGRESS_CITIES_SIGNATURE_REJECTED.set(0L);
+        SPAWN_PROGRESS_CITY_CHUNKS_WITH_BUILDING_ID.set(0L);
+        SPAWN_PROGRESS_CITY_CHUNKS_WITH_BUILDING_CANDIDATE.set(0L);
+        SPAWN_PROGRESS_PENDING_BACKPRESSURE.set(0L);
+        SPAWN_PROGRESS_RAW_BUILDINGS = "[]";
+        SPAWN_PROGRESS_RAW_PARTS = "[]";
+        SPAWN_PROGRESS_RESOLVED_BUILDINGS = "[]";
+        SPAWN_PROGRESS_RESOLVED_PARTS = "[]";
+        SPAWN_PROGRESS_REQUIRED_BUILDINGS = "[]";
+        SPAWN_PROGRESS_REQUIRED_PARTS = "[]";
+        SPAWN_PROGRESS_SAMPLE_BUILDINGS = "[]";
+        SPAWN_PROGRESS_STAGE = "init";
     }
 
     private static String formatIdSet(Set<String> values) {
@@ -1221,9 +1711,7 @@ public final class SpawnSearchScheduler {
                 continue;
             }
             String mapped = resolver.apply(value);
-            if (mapped != null && !mapped.isBlank()) {
-                resolved.add(mapped);
-            }
+            resolved.add((mapped != null && !mapped.isBlank()) ? mapped : value);
         }
         return resolved;
     }
@@ -1231,15 +1719,19 @@ public final class SpawnSearchScheduler {
     private static Set<String> autoResolveMissing(Set<String> original,
                                                   Set<String> resolved,
                                                   boolean isBuilding) {
-        if (resolved.isEmpty()) {
-            return resolved;
+        if ((original == null || original.isEmpty()) && (resolved == null || resolved.isEmpty())) {
+            return java.util.Collections.emptySet();
         }
-        Set<String> autoResolved = new HashSet<>(resolved);
+        Set<String> autoResolved = new HashSet<>();
+        if (resolved != null) {
+            autoResolved.addAll(resolved);
+        }
         java.util.Map<String, String> remapped = new java.util.HashMap<>();
         for (String value : original) {
             if (value == null || value.isBlank()) {
                 continue;
             }
+            autoResolved.add(value);
             boolean known = isBuilding ? SpawnAssetIndex.isBuildingKnown(value)
                 || SpawnAssetIndex.isMultiBuildingKnown(value)
                 : SpawnAssetIndex.isPartKnown(value);

@@ -23,6 +23,7 @@ import net.minecraftforge.fml.ModList;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.client.frustum.ChunkPriorityManager;
 import org.admany.lc2h.util.server.ServerTickLoad;
+import org.admany.lc2h.util.ResourceLocations;
 import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
 import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
@@ -80,10 +81,10 @@ public class MainThreadChunkApplier {
     private static final long AUX_DRAIN_BUDGET_NS_STARTUP = TimeUnit.MILLISECONDS.toNanos(3);
     private static final boolean CREATE_PRESENT = ModList.get().isLoaded("create");
     private static final boolean REFINED_STORAGE_PRESENT = ModList.get().isLoaded("refinedstorage");
-    private static final ResourceLocation CREATE_WHEEL_BE_ID = ResourceLocation.fromNamespaceAndPath("create", "crushing_wheel");
-    private static final ResourceLocation CREATE_WHEEL_BLOCK_ID = ResourceLocation.fromNamespaceAndPath("create", "crushing_wheel");
+    private static final ResourceLocation CREATE_WHEEL_BE_ID = ResourceLocations.of("create", "crushing_wheel");
+    private static final ResourceLocation CREATE_WHEEL_BLOCK_ID = ResourceLocations.of("create", "crushing_wheel");
     private static final ResourceLocation CREATE_WHEEL_CONTROLLER_BLOCK_ID =
-        ResourceLocation.fromNamespaceAndPath("create", "crushing_wheel_controller");
+        ResourceLocations.of("create", "crushing_wheel_controller");
     private static volatile net.minecraft.world.level.block.entity.BlockEntityType<?> CREATE_WHEEL_TYPE_CACHE;
     private static volatile Block CREATE_WHEEL_BLOCK_CACHE;
     private static volatile Block CREATE_WHEEL_CONTROLLER_BLOCK_CACHE;

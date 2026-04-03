@@ -16,6 +16,8 @@ import java.util.concurrent.CompletableFuture;
 @Mixin(ServerChunkCache.class)
 public class MixinServerChunkCache {
 
+    private static final boolean DEBUG_CHUNK_FUTURES = Boolean.getBoolean("lc2h.debugChunkFutures");
+
     @Inject(method = "getChunkFuture(IILnet/minecraft/world/level/chunk/ChunkStatus;Z)Ljava/util/concurrent/CompletableFuture;", at = @At("RETURN"))
     private void lc2h$logChunkFutureCompletion(int chunkX, int chunkZ, ChunkStatus status, boolean create, CallbackInfoReturnable<CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>> cir) {
         CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>> future = cir.getReturnValue();
@@ -23,9 +25,12 @@ public class MixinServerChunkCache {
             LC2H.LOGGER.warn("Chunk future null for ({}, {}) @ {} (create={})", chunkX, chunkZ, status, create);
             return;
         }
+        if (!DEBUG_CHUNK_FUTURES) {
+            return;
+        }
 
         long startNanos = System.nanoTime();
-        LC2H.LOGGER.info("Chunk future requested for ({}, {}) @ {} (create={})", chunkX, chunkZ, status, create);
+        LC2H.LOGGER.debug("Chunk future requested for ({}, {}) @ {} (create={})", chunkX, chunkZ, status, create);
 
         // This warns if the future is still not done after a short delay to pinpoint stuck coordinates.
         CompletableFuture.delayedExecutor(5, java.util.concurrent.TimeUnit.SECONDS).execute(() -> {
@@ -43,7 +48,7 @@ public class MixinServerChunkCache {
 
             boolean success = result != null && result.left().isPresent();
             boolean failed = result != null && result.right().isPresent();
-            LC2H.LOGGER.info("Chunk future completed for ({}, {}) @ {} (create={}) in {} ms: success={}, failure={}", chunkX, chunkZ, status, create, durationMs, success, failed);
+            LC2H.LOGGER.debug("Chunk future completed for ({}, {}) @ {} (create={}) in {} ms: success={}, failure={}", chunkX, chunkZ, status, create, durationMs, success, failed);
         });
     }
 }

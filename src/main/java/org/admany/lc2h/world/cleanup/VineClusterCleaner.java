@@ -4,6 +4,7 @@ import mcjty.lostcities.setup.Registration;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -23,7 +24,9 @@ import org.admany.quantified.api.model.QuantifiedTask;
 import org.admany.lc2h.concurrency.async.Priority;
 
 import java.util.ArrayDeque;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -43,7 +46,8 @@ public final class VineClusterCleaner {
     private static final int MAX_CHUNKS_PER_SCAN = 64;
     private static final int MAX_REMOVALS_PER_TICK = Math.max(16, Integer.getInteger("lc2h.vine.max_removals_per_tick", 128));
     private static final long MIN_RESCAN_INTERVAL_MS = 15_000L;
-    private static final int VINE_SCAN_BATCH_SIZE = 256;
+    private static final int VINE_SCAN_BATCH_SIZE = Math.max(512, Integer.getInteger("lc2h.vine.scan_batch_size", 2048));
+    private static final int VINE_SCAN_CACHE_VERSION = 2;
 
     private static final Map<ResourceKey<net.minecraft.world.level.Level>, Integer> CHUNK_CURSOR = new ConcurrentHashMap<>();
     private static final Map<ResourceKey<net.minecraft.world.level.Level>, Map<Long, Long>> LAST_SCAN = new ConcurrentHashMap<>();
@@ -55,8 +59,26 @@ public final class VineClusterCleaner {
     private static final AtomicBoolean SCAN_REQUESTED = new AtomicBoolean(false);
     private static volatile MinecraftServer LAST_SERVER;
 
-    private record RemovalTask(ServerLevel level, BlockPos pos) {}
-    private static final ConcurrentLinkedQueue<RemovalTask> REMOVAL_QUEUE = new ConcurrentLinkedQueue<>();
+    private static final int REMOVAL_Y_OFFSET = 1024;
+
+    private static final class RemovalBatch {
+        final ServerLevel level;
+        final ChunkPos chunkPos;
+        final int[] packedPositions;
+        int cursor;
+
+        RemovalBatch(ServerLevel level, ChunkPos chunkPos, int[] packedPositions) {
+            this.level = level;
+            this.chunkPos = chunkPos;
+            this.packedPositions = packedPositions;
+        }
+
+        boolean hasRemaining() {
+            return cursor < packedPositions.length;
+        }
+    }
+
+    private static final ConcurrentLinkedQueue<RemovalBatch> REMOVAL_QUEUE = new ConcurrentLinkedQueue<>();
     private static final AtomicBoolean REMOVAL_DRAIN_SCHEDULED = new AtomicBoolean(false);
 
     private static final class LevelChunkIndex {
@@ -178,7 +200,7 @@ public final class VineClusterCleaner {
             return;
         }
 
-        if (!isCityChunk(dimInfo, level.dimension(), chunkPos.x, chunkPos.z)) {
+        if (!isCleanupRelevantChunk(dimInfo, level.dimension(), chunkPos.x, chunkPos.z)) {
             FeatureCache.put(skipKey, Boolean.TRUE);
             return;
         }
@@ -245,6 +267,7 @@ public final class VineClusterCleaner {
                     runTurboScan(server);
                     return null;
                 })
+                .batchKey(AsyncManager.quantifiedBatchKey("vine_cleaner_tick", Priority.LOW))
         );
 
         future.whenComplete((r, t) -> {
@@ -326,7 +349,7 @@ public final class VineClusterCleaner {
                         if (FeatureCache.get(skipKey) != null) {
                             continue;
                         }
-                        if (!isCityChunk(dimInfo, level.dimension(), cx, cz)) {
+                        if (!isCleanupRelevantChunk(dimInfo, level.dimension(), cx, cz)) {
                             FeatureCache.put(skipKey, Boolean.TRUE);
                             continue;
                         }
@@ -381,7 +404,7 @@ public final class VineClusterCleaner {
                 exitScan();
             }
             return null;
-        });
+        }).batchKey(AsyncManager.quantifiedBatchKey("vine_cleanup", Priority.LOW));
 
         try {
             QuantifiedAPI.submit(builder);
@@ -472,15 +495,18 @@ public final class VineClusterCleaner {
     private static Set<BlockPos> collectVineStarts(LevelChunk chunk, int baseX, int baseZ, int minY, int maxY) {
         Set<BlockPos> vineStarts = new HashSet<>();
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        int boundedMaxY = Math.max(minY, maxY - 1);
 
-        for (int x = 0; x < 16; x += 2) {
-            for (int z = 0; z < 16; z += 2) {
-                for (int y = minY; y < maxY; y += 2) {
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                for (int y = minY; y <= boundedMaxY; y++) {
                     cursor.set(baseX + x, y, baseZ + z);
                     try {
-                        if (chunk.getBlockState(cursor).getBlock() == Blocks.VINE) {
+                        if (chunk.getBlockState(cursor).is(Blocks.VINE)) {
                             vineStarts.add(cursor.immutable());
-                            checkAdjacentVines(chunk, cursor, vineStarts, baseX, baseZ);
+                            if (vineStarts.size() >= VINE_SCAN_BATCH_SIZE) {
+                                return vineStarts;
+                            }
                         }
                     } catch (Throwable ignored) {}
                 }
@@ -488,19 +514,6 @@ public final class VineClusterCleaner {
         }
 
         return vineStarts;
-    }
-
-    private static void checkAdjacentVines(LevelChunk chunk, BlockPos.MutableBlockPos center, Set<BlockPos> vineStarts, int baseX, int baseZ) {
-        BlockPos[] neighbors = {center.north(), center.south(), center.east(), center.west()};
-        for (BlockPos n : neighbors) {
-            if (n.getX() >= baseX && n.getX() < baseX + 16 && n.getZ() >= baseZ && n.getZ() < baseZ + 16) {
-                try {
-                    if (chunk.getBlockState(n).getBlock() == Blocks.VINE && vineStarts.size() < VINE_SCAN_BATCH_SIZE) {
-                        vineStarts.add(n);
-                    }
-                } catch (Throwable ignored) {}
-            }
-        }
     }
 
     private static void processVineComponents(ServerLevel level, Set<BlockPos> vineStarts) {
@@ -515,50 +528,88 @@ public final class VineClusterCleaner {
             queue.add(start);
             component.add(start);
 
-            boolean anySupport = false;
-            boolean endTouchesSupport = false;
-            boolean foundEnd = false;
+            boolean anyExternallySupportedVine = false;
 
             while (!queue.isEmpty() && component.size() <= COMPONENT_LIMIT) {
                 BlockPos current = queue.removeFirst();
+                net.minecraft.world.level.block.state.BlockState currentState;
+                try {
+                    currentState = level.getBlockState(current);
+                } catch (Throwable ignored) {
+                    continue;
+                }
+                if (!currentState.is(Blocks.VINE)) {
+                    continue;
+                }
+                try {
+                    if (hasExternalVineSupport(level, current, currentState)) {
+                        anyExternallySupportedVine = true;
+                    }
+                } catch (Throwable ignored) {
+                }
                 BlockPos[] neighbors = {
                     current.north(), current.south(), current.east(), current.west(),
                     current.above(), current.below()
                 };
 
-                int vineNeighborCount = 0;
-                boolean currentTouchesSupport = false;
-
                 for (BlockPos neighbor : neighbors) {
                     try {
                         net.minecraft.world.level.block.state.BlockState neighborState = level.getBlockState(neighbor);
-                        if (neighborState.getBlock() == Blocks.VINE) {
-                            vineNeighborCount++;
+                        if (neighborState.is(Blocks.VINE)) {
                             if (visited.add(neighbor)) {
                                 queue.add(neighbor);
                                 component.add(neighbor);
                             }
-                        } else if (!neighborState.isAir()) {
-                            currentTouchesSupport = true;
                         }
                     } catch (Throwable ignored) {}
-                }
-
-                if (currentTouchesSupport) anySupport = true;
-                if (vineNeighborCount <= 1) {
-                    foundEnd = true;
-                    if (currentTouchesSupport) endTouchesSupport = true;
                 }
             }
 
             if (component.size() > COMPONENT_LIMIT) continue;
 
-            boolean keep = endTouchesSupport || (!foundEnd && anySupport);
-
-            if (!keep) {
+            if (!anyExternallySupportedVine) {
                 removeVineComponent(level, component);
             }
         }
+    }
+
+    private static boolean hasExternalVineSupport(ServerLevel level, BlockPos pos, net.minecraft.world.level.block.state.BlockState state) {
+        if (level == null || pos == null || state == null) {
+            return false;
+        }
+        if (!state.is(Blocks.VINE)) {
+            return false;
+        }
+
+        boolean survives;
+        try {
+            survives = state.canSurvive(level, pos);
+        } catch (Throwable ignored) {
+            return false;
+        }
+        if (!survives) {
+            return false;
+        }
+
+        for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
+            BlockPos neighborPos = pos.relative(direction);
+            net.minecraft.world.level.block.state.BlockState neighborState;
+            try {
+                neighborState = level.getBlockState(neighborPos);
+            } catch (Throwable ignored) {
+                continue;
+            }
+
+            if (neighborState.isAir()) {
+                continue;
+            }
+            if (neighborState.is(Blocks.VINE)) {
+                continue;
+            }
+            return true;
+        }
+
+        return false;
     }
 
     private static void removeVineComponent(ServerLevel level, java.util.List<BlockPos> component) {
@@ -572,10 +623,27 @@ public final class VineClusterCleaner {
         if (shutdown || level == null || component == null || component.isEmpty()) {
             return;
         }
+        Map<Long, LinkedHashSet<Integer>> removalsByChunk = new HashMap<>();
         for (BlockPos pos : component) {
-            if (pos != null) {
-                REMOVAL_QUEUE.add(new RemovalTask(level, pos));
+            if (pos == null) {
+                continue;
             }
+            long chunkKey = ChunkPos.asLong(pos.getX() >> 4, pos.getZ() >> 4);
+            removalsByChunk.computeIfAbsent(chunkKey, unused -> new LinkedHashSet<>())
+                .add(packLocalRemovalPos(pos));
+        }
+
+        for (Map.Entry<Long, LinkedHashSet<Integer>> entry : removalsByChunk.entrySet()) {
+            long chunkKey = entry.getKey();
+            int[] packedPositions = entry.getValue().stream().mapToInt(Integer::intValue).toArray();
+            if (packedPositions.length == 0) {
+                continue;
+            }
+            REMOVAL_QUEUE.add(new RemovalBatch(
+                level,
+                new ChunkPos(ChunkPos.getX(chunkKey), ChunkPos.getZ(chunkKey)),
+                packedPositions
+            ));
         }
         scheduleRemovalDrain(level);
     }
@@ -609,22 +677,38 @@ public final class VineClusterCleaner {
 
         int processed = 0;
         while (processed < budget) {
-            RemovalTask task = REMOVAL_QUEUE.poll();
-            if (task == null) {
+            RemovalBatch batch = REMOVAL_QUEUE.poll();
+            if (batch == null) {
                 break;
             }
-            ServerLevel level = task.level != null ? task.level : fallbackLevel;
+            ServerLevel level = batch.level != null ? batch.level : fallbackLevel;
             if (level == null) {
                 continue;
             }
-            try {
-                level.removeBlockEntity(task.pos);
-                level.setBlock(task.pos, Blocks.AIR.defaultBlockState(), 3);
-            } catch (Throwable ignored) {
+            LevelChunk chunk = level.getChunkSource().getChunkNow(batch.chunkPos.x, batch.chunkPos.z);
+            if (chunk == null) {
+                continue;
             }
-            processed++;
 
-            if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+            BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+            while (processed < budget && batch.hasRemaining()) {
+                unpackLocalRemovalPos(batch.chunkPos, batch.packedPositions[batch.cursor++], cursor);
+                try {
+                    if (chunk.getBlockState(cursor).is(Blocks.VINE)) {
+                        level.removeBlockEntity(cursor);
+                        level.setBlock(cursor, Blocks.AIR.defaultBlockState(), 3);
+                    }
+                } catch (Throwable ignored) {
+                }
+                processed++;
+
+                if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
+                    break;
+                }
+            }
+
+            if (batch.hasRemaining()) {
+                REMOVAL_QUEUE.add(batch);
                 break;
             }
         }
@@ -665,6 +749,8 @@ public final class VineClusterCleaner {
     public static void shutdown() {
         shutdown = true;
         initialized = false;
+        REMOVAL_QUEUE.clear();
+        REMOVAL_DRAIN_SCHEDULED.set(false);
         CHUNK_CURSOR.clear();
         LAST_SCAN.clear();
         LOADED_CHUNKS.clear();
@@ -686,12 +772,25 @@ public final class VineClusterCleaner {
         }
     }
 
+    private static boolean isCleanupRelevantChunk(IDimensionInfo dimInfo,
+                                                  ResourceKey<net.minecraft.world.level.Level> dim,
+                                                  int cx,
+                                                  int cz) {
+        if (isCityChunk(dimInfo, dim, cx, cz)) {
+            return true;
+        }
+        return isCityChunk(dimInfo, dim, cx + 1, cz)
+            || isCityChunk(dimInfo, dim, cx - 1, cz)
+            || isCityChunk(dimInfo, dim, cx, cz + 1)
+            || isCityChunk(dimInfo, dim, cx, cz - 1);
+    }
+
     private static String vineScanKey(ResourceKey<net.minecraft.world.level.Level> dim, int cx, int cz) {
-        return "vine_scan_" + dimKey(dim) + "_" + cx + "_" + cz;
+        return "vine_scan_v" + VINE_SCAN_CACHE_VERSION + "_" + dimKey(dim) + "_" + cx + "_" + cz;
     }
 
     private static String vineSkipKey(ResourceKey<net.minecraft.world.level.Level> dim, int cx, int cz) {
-        return "vine_scan_skip_" + dimKey(dim) + "_" + cx + "_" + cz;
+        return "vine_scan_skip_v" + VINE_SCAN_CACHE_VERSION + "_" + dimKey(dim) + "_" + cx + "_" + cz;
     }
 
     private static String dimKey(ResourceKey<net.minecraft.world.level.Level> dim) {
@@ -700,5 +799,19 @@ public final class VineClusterCleaner {
         }
         String raw = String.valueOf(dim.location());
         return raw.replace(':', '_').replace('/', '_');
+    }
+
+    private static int packLocalRemovalPos(BlockPos pos) {
+        int localX = pos.getX() & 15;
+        int localZ = pos.getZ() & 15;
+        int y = pos.getY() + REMOVAL_Y_OFFSET;
+        return (y << 8) | (localX << 4) | localZ;
+    }
+
+    private static void unpackLocalRemovalPos(ChunkPos chunkPos, int packed, BlockPos.MutableBlockPos target) {
+        int localZ = packed & 15;
+        int localX = (packed >>> 4) & 15;
+        int y = (packed >>> 8) - REMOVAL_Y_OFFSET;
+        target.set(chunkPos.getMinBlockX() + localX, y, chunkPos.getMinBlockZ() + localZ);
     }
 }

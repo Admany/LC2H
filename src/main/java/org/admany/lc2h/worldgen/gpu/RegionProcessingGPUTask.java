@@ -8,20 +8,26 @@ import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
 import org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner;
 import org.admany.lc2h.worldgen.async.planner.AsyncTerrainFeaturePlanner;
 import org.admany.lc2h.worldgen.async.planner.AsyncTerrainCorrectionPlanner;
+import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.worldgen.async.generator.AsyncPaletteGenerator;
 import org.admany.lc2h.worldgen.async.generator.AsyncDebrisGenerator;
 import org.admany.quantified.api.opencl.QuantifiedOpenCL;
+import org.admany.quantified.api.vulkan.QuantifiedVulkan;
 import org.lwjgl.PointerBuffer;
-import org.lwjgl.opencl.CL10;
 
 public record RegionProcessingGPUTask(IDimensionInfo provider, RegionCoord region)
-    implements QuantifiedOpenCL.Workload<Boolean> {
+    implements QuantifiedOpenCL.Workload<Boolean>, QuantifiedVulkan.Workload<Boolean> {
 
-    private static final int CHUNKS_PER_REGION = 25; // This is a 5x5 region
-    private static final int BLOCKS_PER_CHUNK = 256; // This is a 16x16 area
+    static final int CHUNKS_PER_REGION = 25; // This is a 5x5 region
+    static final int SUMMARY_COMPONENTS = 4;
+    static final int INPUTS_PER_REGION = CHUNKS_PER_REGION;
+    static final int RESULTS_PER_REGION = INPUTS_PER_REGION * SUMMARY_COMPONENTS;
+    static final float[] GPU_WARM_SUMMARY = new float[] { 1.0f, 0.0f, 0.0f, 0.0f };
+    private static final long CL_MEM_WRITE_ONLY = 1L << 1;
+    private static final long CL_MEM_READ_ONLY = 1L << 2;
 
-    public static final long VRAM_BYTES = 25L * 256L * 4L * 4L;
-    public static final int PARALLEL_UNITS = CHUNKS_PER_REGION * BLOCKS_PER_CHUNK;
+    public static final long VRAM_BYTES = (long) INPUTS_PER_REGION * Float.BYTES * 2L;
+    public static final int PARALLEL_UNITS = INPUTS_PER_REGION;
 
     public long taskKey() {
         long base = (((long) region.regionX()) & 0xFFFF_FFFFL) << 32;
@@ -47,33 +53,18 @@ public record RegionProcessingGPUTask(IDimensionInfo provider, RegionCoord regio
 
             long kernel = context.createKernel("terrain_generation");
 
-            int dataSize = CHUNKS_PER_REGION * BLOCKS_PER_CHUNK;
-            int outputSize = dataSize * 4;
+            float[] encodedCoords = buildInputCoords(provider, region);
+            int dataSize = encodedCoords.length;
+            int outputSize = dataSize;
 
-            long bufferInputCoords = context.createBuffer(CL10.CL_MEM_READ_ONLY, dataSize * 4L);
-            long bufferOutputFeatures = context.createBuffer(CL10.CL_MEM_WRITE_ONLY, outputSize * 4L);
+            long bufferInputCoords = context.createBuffer(CL_MEM_READ_ONLY, dataSize * 4L);
+            long bufferOutputFeatures = context.createBuffer(CL_MEM_WRITE_ONLY, outputSize * 4L);
 
             try {
                 java.nio.ByteBuffer inputBytes = java.nio.ByteBuffer.allocateDirect(dataSize * 4)
                     .order(java.nio.ByteOrder.nativeOrder());
                 java.nio.FloatBuffer inputCoords = inputBytes.asFloatBuffer();
-
-                for (int i = 0; i < dataSize; i++) {
-                    int chunkIndex = i / BLOCKS_PER_CHUNK;
-                    int blockIndex = i % BLOCKS_PER_CHUNK;
-
-                    int localX = chunkIndex / 5;
-                    int localZ = chunkIndex % 5;
-                    int blockX = blockIndex % 16;
-                    int blockZ = blockIndex / 16;
-
-                    ChunkCoord chunk = region.getChunk(localX, localZ);
-                    int worldX = chunk.chunkX() * 16 + blockX;
-                    int worldZ = chunk.chunkZ() * 16 + blockZ;
-
-                    inputCoords.put(worldX + worldZ * 10000.0f + provider.getSeed() * 0.000001f);
-                }
-
+                inputCoords.put(encodedCoords);
                 inputCoords.flip();
 
                 context.enqueueWriteBuffer(bufferInputCoords, true, 0, dataSize * 4L, inputBytes);
@@ -91,11 +82,14 @@ public record RegionProcessingGPUTask(IDimensionInfo provider, RegionCoord regio
                     .order(java.nio.ByteOrder.nativeOrder());
                 context.enqueueReadBuffer(bufferOutputFeatures, true, 0, outputSize * 4L, resultBytes);
                 resultBytes.rewind();
-                java.nio.FloatBuffer results = resultBytes.asFloatBuffer();
+                float[] results = new float[outputSize];
+                resultBytes.asFloatBuffer().get(results);
 
-                processGPUResults(results, provider, region);
+                processGPUResults(results, region);
+                GPUMemoryManager.continuousCleanup();
+                AsyncChunkWarmup.recordOpenClBatchProcessed(1);
 
-                LC2H.LOGGER.debug("[LC2H] Successfully processed region {} on GPU with {} data points", region, results.capacity());
+                LC2H.LOGGER.debug("[LC2H] Successfully processed region {} on OpenCL with {} data points", region, results.length);
                 return Boolean.TRUE;
 
             } finally {
@@ -110,49 +104,91 @@ public record RegionProcessingGPUTask(IDimensionInfo provider, RegionCoord regio
         }
     }
 
-    public static Boolean processRegionOnCPU(IDimensionInfo provider, RegionCoord region) {
-        LC2H.LOGGER.debug("[LC2H] Processing region {} on CPU (GPU fallback)", region);
-
-        for (int localX = 0; localX < 5; localX++) {
-            for (int localZ = 0; localZ < 5; localZ++) {
-                ChunkCoord chunk = region.getChunk(localX, localZ);
-
-                AsyncMultiChunkPlanner.preSchedule(provider, chunk);
-                AsyncBuildingInfoPlanner.preSchedule(provider, chunk);
-                AsyncTerrainFeaturePlanner.preSchedule(provider, chunk);
-                AsyncPaletteGenerator.preSchedule(provider, chunk);
-                AsyncDebrisGenerator.preSchedule(provider, chunk);
-                AsyncTerrainCorrectionPlanner.preSchedule(provider, chunk);
-            }
+    @Override
+    public Boolean execute(QuantifiedVulkan.Context context) {
+        try {
+            float[] encodedCoords = buildInputCoords(provider, region);
+            float[] results = context.terrainGeneration(encodedCoords);
+            processGPUResults(results, 0, region);
+            GPUMemoryManager.continuousCleanup();
+            AsyncChunkWarmup.recordVulkanBatchProcessed(1);
+            LC2H.LOGGER.debug("[LC2H] Successfully processed region {} on Vulkan device {}", region, context.deviceName());
+            return Boolean.TRUE;
+        } catch (Exception e) {
+            LC2H.LOGGER.error("[LC2H] Vulkan region processing failed for {}: {}", region, e.getMessage());
+            return processRegionOnCPU(provider, region);
         }
-        return Boolean.TRUE;
     }
 
-    private static void processGPUResults(java.nio.FloatBuffer results, IDimensionInfo provider, RegionCoord region) {
+    public static Boolean processRegionOnCPU(IDimensionInfo provider, RegionCoord region) {
+        return AsyncChunkWarmup.runWithinCpuWarmup(() -> {
+            AsyncChunkWarmup.recordCpuFallbackProcessed(1);
+            LC2H.LOGGER.debug("[LC2H] Processing region {} on CPU (GPU fallback)", region);
+
+            for (int localX = 0; localX < 5; localX++) {
+                for (int localZ = 0; localZ < 5; localZ++) {
+                    ChunkCoord chunk = region.getChunk(localX, localZ);
+
+                    AsyncMultiChunkPlanner.preSchedule(provider, chunk);
+                    AsyncBuildingInfoPlanner.preSchedule(provider, chunk);
+                    AsyncTerrainFeaturePlanner.preSchedule(provider, chunk);
+                    AsyncPaletteGenerator.preSchedule(provider, chunk);
+                    AsyncDebrisGenerator.preSchedule(provider, chunk);
+                    AsyncTerrainCorrectionPlanner.preSchedule(provider, chunk);
+                }
+            }
+            return Boolean.TRUE;
+        });
+    }
+
+    static float[] buildInputCoords(IDimensionInfo provider, RegionCoord region) {
+        float[] inputCoords = new float[INPUTS_PER_REGION];
+        encodeInputCoords(provider, region, inputCoords, 0);
+        return inputCoords;
+    }
+
+    static void encodeInputCoords(IDimensionInfo provider, RegionCoord region, float[] target, int offset) {
+        for (int i = 0; i < INPUTS_PER_REGION; i++) {
+            int localX = i / 5;
+            int localZ = i % 5;
+
+            ChunkCoord chunk = region.getChunk(localX, localZ);
+            int worldX = chunk.chunkX() * 16 + 8;
+            int worldZ = chunk.chunkZ() * 16 + 8;
+
+            target[offset + i] = worldX + worldZ * 10000.0f + provider.getSeed() * 0.000001f;
+        }
+    }
+
+    static void processGPUResults(float[] results, RegionCoord region) {
+        processGPUResults(results, 0, region);
+    }
+
+    static void processGPUResults(float[] results, int resultOffset, RegionCoord region) {
         for (int localX = 0; localX < 5; localX++) {
             for (int localZ = 0; localZ < 5; localZ++) {
                 ChunkCoord chunk = region.getChunk(localX, localZ);
-                int chunkIndex = localX * 5 + localZ;
+                int chunkIndex = resultOffset + localX * 5 + localZ;
+                int summaryOffset = resultOffset + (localX * 5 + localZ) * SUMMARY_COMPONENTS;
+                float[] gpuTerrainData = extractChunkSummary(results, summaryOffset);
 
-                float[] gpuTerrainData = new float[BLOCKS_PER_CHUNK * 4];
-                for (int blockIndex = 0; blockIndex < BLOCKS_PER_CHUNK; blockIndex++) {
-                    int globalBaseIndex = chunkIndex * BLOCKS_PER_CHUNK * 4 + blockIndex * 4;
-                    gpuTerrainData[blockIndex * 4] = results.get(globalBaseIndex);
-                    gpuTerrainData[blockIndex * 4 + 1] = results.get(globalBaseIndex + 1);
-                    gpuTerrainData[blockIndex * 4 + 2] = results.get(globalBaseIndex + 2);
-                    gpuTerrainData[blockIndex * 4 + 3] = results.get(globalBaseIndex + 3);
-                }
-
-                injectGPUDataIntoCaches(chunk, gpuTerrainData, provider);
+                injectGPUDataIntoCaches(chunk, gpuTerrainData);
 
                 LC2H.LOGGER.debug("[LC2H] Injected GPU data into caches for chunk {} in region {}", chunk, region);
-
-                GPUMemoryManager.continuousCleanup();
             }
         }
     }
 
-    private static void injectGPUDataIntoCaches(ChunkCoord chunk, float[] gpuData, IDimensionInfo provider) {
+    private static float[] extractChunkSummary(float[] results, int summaryOffset) {
+        if (results == null || summaryOffset < 0 || (summaryOffset + SUMMARY_COMPONENTS) > results.length) {
+            return GPU_WARM_SUMMARY;
+        }
+        float[] summary = new float[SUMMARY_COMPONENTS];
+        System.arraycopy(results, summaryOffset, summary, 0, SUMMARY_COMPONENTS);
+        return summary;
+    }
+
+    private static void injectGPUDataIntoCaches(ChunkCoord chunk, float[] gpuData) {
         boolean cachedInRam = GPUMemoryManager.putGPUData(chunk, gpuData, AsyncMultiChunkPlanner.GPU_DATA_CACHE);
         if (!cachedInRam) {
             return;

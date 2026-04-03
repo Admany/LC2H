@@ -6,6 +6,7 @@ import org.admany.lc2h.LC2H;
 import org.admany.lc2h.util.cache.CacheTtl;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
+import org.admany.quantified.core.common.util.TaskScheduler;
 
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,6 +33,15 @@ public final class AsyncTerrainCorrectionPlanner {
         Objects.requireNonNull(provider, "provider");
         Objects.requireNonNull(coord, "coord");
 
+        if (GPUMemoryManager.getGPUData(coord, GPU_DATA_CACHE) != null) {
+            GPUMemoryManager.markAsHot(coord);
+            TaskScheduler.recordExternalGpuTask();
+            return;
+        }
+        if (!AsyncChunkWarmup.shouldAcceptPreschedule()) {
+            return;
+        }
+
         long now = System.currentTimeMillis();
         if (CacheTtl.markIfFresh(COMPUTATION_CACHE, coord, COMPUTATION_CACHE_TTL_MS, now)) {
             return;
@@ -40,10 +50,7 @@ public final class AsyncTerrainCorrectionPlanner {
 
         boolean debugLogging = AsyncChunkWarmup.isWarmupDebugLoggingEnabled();
 
-        if (GPUMemoryManager.getGPUData(coord, GPU_DATA_CACHE) != null) {
-            if (debugLogging) {
-                LC2H.LOGGER.debug("Used GPU data for terrain correction in {}", coord);
-            }
+        if (AsyncChunkWarmup.deferChunkPrescheduleToGpu(provider, coord, "terrain-correction")) {
             return;
         }
 
@@ -99,7 +106,6 @@ public final class AsyncTerrainCorrectionPlanner {
     public static void shutdown() {
         try {
             LC2H.LOGGER.info("AsyncTerrainCorrectionPlanner: Shutting down");
-            PlannerBatchQueue.flushKind(PlannerTaskKind.TERRAIN_CORRECTION);
 
             COMPUTATION_CACHE.clear();
             GPU_DATA_CACHE.clear();
@@ -128,7 +134,13 @@ public final class AsyncTerrainCorrectionPlanner {
 
     private static void runTerrainCorrectionComputation(ChunkCoord coord, IDimensionInfo provider, boolean debugLogging, long startTime) {
         try {
-            computeTerrainCorrections(coord, provider);
+            float[] gpuData = GPUMemoryManager.getGPUData(coord, GPU_DATA_CACHE);
+            if (gpuData != null) {
+                GPUMemoryManager.markAsHot(coord);
+                TaskScheduler.recordExternalGpuTask();
+            } else {
+                computeTerrainCorrections(coord, provider);
+            }
 
             if (debugLogging) {
                 long endTime = System.nanoTime();

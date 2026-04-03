@@ -28,6 +28,7 @@ import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
 import org.admany.lc2h.dev.diagnostics.Lc2hMonitorService;
 import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
+import org.admany.lc2h.util.ResourceLocations;
 import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.client.LC2HClient;
 import org.admany.lc2h.config.sync.ConfigSyncNetwork;
@@ -45,6 +46,7 @@ import org.admany.lc2h.tweaks.TweaksActorSystem;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
 import org.admany.quantified.api.QuantifiedAPI;
+import org.admany.quantified.api.compute.GpuBackendPreference;
 import org.admany.quantified.core.common.cache.CacheManager;
 import org.admany.quantified.core.common.async.task.ModPriorityManager;
 import org.admany.quantified.core.common.util.TaskScheduler;
@@ -77,9 +79,9 @@ public class LC2H {
 
     public static final DeferredRegister<net.minecraft.sounds.SoundEvent> SOUND_EVENTS = DeferredRegister.create(ForgeRegistries.SOUND_EVENTS, MODID);
     public static final net.minecraftforge.registries.RegistryObject<net.minecraft.sounds.SoundEvent> COUNTDOWN_SOUND = SOUND_EVENTS.register("countdown",
-        () -> net.minecraft.sounds.SoundEvent.createVariableRangeEvent(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MODID, "countdown")));
+        () -> net.minecraft.sounds.SoundEvent.createVariableRangeEvent(ResourceLocations.of(MODID, "countdown")));
     public static final net.minecraftforge.registries.RegistryObject<net.minecraft.sounds.SoundEvent> BUTTON_CLICK_SOUND = SOUND_EVENTS.register("button_click",
-        () -> net.minecraft.sounds.SoundEvent.createVariableRangeEvent(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MODID, "button_click")));
+        () -> net.minecraft.sounds.SoundEvent.createVariableRangeEvent(ResourceLocations.of(MODID, "button_click")));
     private static final java.util.concurrent.atomic.AtomicBoolean SHUTDOWN_FINALIZED = new java.util.concurrent.atomic.AtomicBoolean(false);
     private static final int WARMUP_PREFETCH_INTERVAL_TICKS =
         Math.max(1, Integer.getInteger("lc2h.warmup.prefetchIntervalTicks", 20));
@@ -132,6 +134,12 @@ public class LC2H {
         try {
             if (QuantifiedAPI.register(MODID)) {
                 LOGGER.info("[LC2H] Registered with Quantified API");
+                try {
+                    QuantifiedAPI.setGpuBackendPreference(MODID, GpuBackendPreference.VULKAN_PREFERRED);
+                    LOGGER.debug("[LC2H] Set Quantified GPU backend preference to Vulkan-first");
+                } catch (Throwable preferenceError) {
+                    LOGGER.warn("[LC2H] Could not set Quantified GPU backend preference: {}", preferenceError.getMessage());
+                }
                 try {
                     ModPriorityManager.setMaxTasksForMod(MODID, 1_000_000L);
                     LOGGER.debug("[LC2H] Applied Quantified mod priority tuning");
@@ -193,7 +201,11 @@ public class LC2H {
     @SubscribeEvent
     public void onServerStarted(ServerStartedEvent event) {
         try {
-            org.admany.lc2h.util.spawn.SpawnAssetIndex.refresh(event.getServer().overworld());
+            if (requiresForcedSpawnAssets(event.getServer())) {
+                org.admany.lc2h.util.spawn.SpawnAssetIndex.refresh(event.getServer().overworld());
+            } else {
+                LOGGER.debug("[LC2H] Skipping eager spawn asset index refresh; no forced spawn requirements detected");
+            }
         } catch (Throwable t) {
             LOGGER.warn("[LC2H] Failed to refresh Lost Cities asset index on server start", t);
         }
@@ -219,11 +231,15 @@ public class LC2H {
         }
 
         try {
-            AsyncChunkWarmup.initializeGpuWarmup();
-            if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
-                LOGGER.info("[LC2H] GPU warmup initialized during server startup");
+            if (AsyncChunkWarmup.shouldInitializeGpuWarmupOnServerStart()) {
+                AsyncChunkWarmup.initializeGpuWarmup();
+                if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
+                    LOGGER.info("[LC2H] GPU warmup initialized during server startup");
+                } else {
+                    LOGGER.debug("[LC2H] GPU warmup initialized during server startup");
+                }
             } else {
-                LOGGER.debug("[LC2H] GPU warmup initialized during server startup");
+                LOGGER.debug("[LC2H] Skipping GPU warmup initialization during server startup. It will initialize on first active use");
             }
         } catch (Throwable t) {
             LOGGER.warn("[LC2H] Failed to initialize GPU warmup during server startup: {}", t.getMessage());
@@ -301,13 +317,15 @@ public class LC2H {
                     })
                 ).then(
                 Commands.literal("gpu").executes(ctx -> {
-                    String stats = org.admany.lc2h.worldgen.gpu.GPUMemoryManager.getComprehensiveMemoryStats();
+                    String stats = org.admany.lc2h.worldgen.gpu.GPUMemoryManager.getComprehensiveMemoryStats()
+                        + " | " + AsyncChunkWarmup.describeGpuProcessingStats();
                     ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.gpu.stats", stats), false);
                     return 1;
                 }).then(
                         Commands.literal("cleanup").executes(ctx -> {
                             org.admany.lc2h.worldgen.gpu.GPUMemoryManager.comprehensiveCleanup();
-                            String stats = org.admany.lc2h.worldgen.gpu.GPUMemoryManager.getComprehensiveMemoryStats();
+                            String stats = org.admany.lc2h.worldgen.gpu.GPUMemoryManager.getComprehensiveMemoryStats()
+                                + " | " + AsyncChunkWarmup.describeGpuProcessingStats();
                             ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.gpu.cleanup_done", stats), false);
                             return 1;
                         })
@@ -456,25 +474,13 @@ public class LC2H {
             LOGGER.warn("[LC2H] Failed to stop AsyncIssueMonitor: {}", t.getMessage());
         }
 
-        try {
-            org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner.flushPendingBatches();
-            LOGGER.info("[LC2H] Pending multi-chunk batches flushed");
-        } catch (Throwable t) {
-            LOGGER.warn("[LC2H] Error flushing pending batches: {}", t.getMessage());
-        }
+        LOGGER.info("[LC2H] Fast shutdown started");
 
         try {
             org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner.shutdown();
             LOGGER.info("[LC2H] Multi-chunk planner shut down");
         } catch (Throwable t) {
             LOGGER.warn("[LC2H] Error shutting down multi-chunk planner: {}", t.getMessage());
-        }
-
-        try {
-            org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner.flushPendingBuildingBatches();
-            LOGGER.info("[LC2H] Pending building info batches flushed");
-        } catch (Throwable t) {
-            LOGGER.warn("[LC2H] Error flushing pending building batches: {}", t.getMessage());
         }
 
         try {
@@ -485,13 +491,6 @@ public class LC2H {
         }
 
         try {
-            org.admany.lc2h.worldgen.async.planner.AsyncTerrainFeaturePlanner.flushPendingTerrainBatches();
-            LOGGER.info("[LC2H] Pending terrain feature batches flushed");
-        } catch (Throwable t) {
-            LOGGER.warn("[LC2H] Error flushing pending terrain batches: {}", t.getMessage());
-        }
-
-        try {
             org.admany.lc2h.worldgen.async.planner.AsyncTerrainFeaturePlanner.shutdown();
             LOGGER.info("[LC2H] Terrain feature planner shut down");
         } catch (Throwable t) {
@@ -499,24 +498,10 @@ public class LC2H {
         }
 
         try {
-            org.admany.lc2h.worldgen.async.planner.AsyncTerrainCorrectionPlanner.flushPendingCorrectionBatches();
-            LOGGER.info("[LC2H] Pending terrain correction batches flushed");
-        } catch (Throwable t) {
-            LOGGER.warn("[LC2H] Error flushing pending correction batches: {}", t.getMessage());
-        }
-
-        try {
             org.admany.lc2h.worldgen.async.planner.AsyncTerrainCorrectionPlanner.shutdown();
             LOGGER.info("[LC2H] Terrain correction planner shut down");
         } catch (Throwable t) {
             LOGGER.warn("[LC2H] Error shutting down terrain correction planner: {}", t.getMessage());
-        }
-
-        try {
-            org.admany.lc2h.worldgen.async.planner.AsyncCityPlanner.flushPendingCityBatches();
-            LOGGER.info("[LC2H] Pending city planning batches flushed");
-        } catch (Throwable t) {
-            LOGGER.warn("[LC2H] Error flushing pending city batches: {}", t.getMessage());
         }
 
         try {
@@ -566,6 +551,7 @@ public class LC2H {
         if (!(event.getEntity() instanceof ServerPlayer player)) {
             return;
         }
+        AsyncChunkWarmup.initializeGpuWarmup();
         AsyncChunkWarmup.notifyPlayerJoin();
         tryStartAsyncAfterDelay(player);
     }
@@ -655,9 +641,12 @@ public class LC2H {
                 if (provider != null) {
                     LostCityProfile profile = provider.getProfile();
                     if (profile != null) {
-                        delay = profile.FORCE_SPAWN_IN_BUILDING
-                            || (profile.FORCE_SPAWN_BUILDINGS != null && profile.FORCE_SPAWN_BUILDINGS.length > 0)
-                            || (profile.FORCE_SPAWN_PARTS != null && profile.FORCE_SPAWN_PARTS.length > 0);
+                        boolean forcedSpawn = requiresForcedSpawn(profile);
+                        boolean allowForcedSpawnDelay = Boolean.getBoolean("lc2h.async.delayForcedSpawn");
+                        delay = forcedSpawn && allowForcedSpawnDelay;
+                        if (forcedSpawn && !allowForcedSpawnDelay) {
+                            LOGGER.debug("[LC2H] Forced spawn requirements detected; async startup delay disabled for spawn search");
+                        }
                     }
                 }
             }
@@ -717,16 +706,42 @@ public class LC2H {
             if (profile == null) {
                 return false;
             }
-            if (profile.FORCE_SPAWN_IN_BUILDING) {
-                return true;
-            }
-            if (profile.FORCE_SPAWN_BUILDINGS != null && profile.FORCE_SPAWN_BUILDINGS.length > 0) {
-                return true;
-            }
-            return profile.FORCE_SPAWN_PARTS != null && profile.FORCE_SPAWN_PARTS.length > 0;
+            return requiresForcedSpawn(profile) && Boolean.getBoolean("lc2h.async.delayForcedSpawn");
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+    private static boolean requiresForcedSpawnAssets(MinecraftServer server) {
+        if (server == null) {
+            return false;
+        }
+        try {
+            ServerLevel level = server.overworld();
+            if (level == null) {
+                return false;
+            }
+            IDimensionInfo provider = Registration.LOSTCITY_FEATURE.get().getDimensionInfo(level);
+            if (provider == null) {
+                return false;
+            }
+            return requiresForcedSpawn(provider.getProfile());
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean requiresForcedSpawn(LostCityProfile profile) {
+        if (profile == null) {
+            return false;
+        }
+        if (profile.FORCE_SPAWN_IN_BUILDING) {
+            return true;
+        }
+        if (profile.FORCE_SPAWN_BUILDINGS != null && profile.FORCE_SPAWN_BUILDINGS.length > 0) {
+            return true;
+        }
+        return profile.FORCE_SPAWN_PARTS != null && profile.FORCE_SPAWN_PARTS.length > 0;
     }
 
     private static int reportStats(CommandSourceStack source) {
@@ -816,6 +831,7 @@ public class LC2H {
         lines.add(statLine(net.minecraft.network.chat.Component.translatable("lc2h.command.stats.label.gpu").getString(),
             net.minecraft.network.chat.Component.translatable("lc2h.command.stats.body.gpu",
                 gpuEntries, formatBytes(gpuBytes), diskEntries, formatBytes(diskBytes), formatBytes(quantifiedBytes)).getString()));
+        lines.add(statLine("GPU compute", AsyncChunkWarmup.describeGpuProcessingStats()));
         lines.add(statLine("GPU cache",
             String.format(Locale.ROOT, "promotions=%d", GPUMemoryManager.getDiskPromotionCount())));
         if (quantifiedEntries != null) {
@@ -879,6 +895,7 @@ public class LC2H {
             .append(statLine("GPU",
                 String.format(Locale.ROOT, "entries=%d mem=%s diskEntries=%d diskMem=%s qApiMem=%s",
                     gpuEntries, formatBytes(gpuBytes), diskEntries, formatBytes(diskBytes), formatBytes(quantifiedBytes)))).append('\n');
+        log.append(statLine("GPU compute", AsyncChunkWarmup.describeGpuProcessingStats())).append('\n');
         log.append(statLine("GPU cache",
             String.format(Locale.ROOT, "promotions=%d", GPUMemoryManager.getDiskPromotionCount()))).append('\n');
         if (quantifiedEntries != null) {

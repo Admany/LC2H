@@ -2,6 +2,7 @@ package org.admany.lc2h.dev.debug.chunk;
 
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.ChunkPos;
+import org.admany.lc2h.util.ResourceLocations;
 
 public record ChunkDebugSelection(
     boolean enabled,
@@ -13,7 +14,7 @@ public record ChunkDebugSelection(
 ) {
     public void encode(net.minecraft.network.FriendlyByteBuf buf) {
         buf.writeBoolean(enabled);
-        buf.writeResourceLocation(dimension != null ? dimension : ResourceLocation.fromNamespaceAndPath("minecraft", "overworld"));
+        buf.writeResourceLocation(dimension != null ? dimension : ResourceLocations.of("minecraft", "overworld"));
         buf.writeBoolean(primary != null);
         if (primary != null) {
             buf.writeInt(primary.x);

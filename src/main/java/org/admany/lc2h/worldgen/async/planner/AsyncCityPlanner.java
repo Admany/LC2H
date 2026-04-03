@@ -33,7 +33,6 @@ public final class AsyncCityPlanner {
     }
 
     public static void shutdown() {
-        PlannerBatchQueue.flushKind(PlannerTaskKind.CITY_LAYOUT);
     }
 
     private static void runCityPlanning(IDimensionInfo info, int chunkX, int chunkZ, String cacheKey) {

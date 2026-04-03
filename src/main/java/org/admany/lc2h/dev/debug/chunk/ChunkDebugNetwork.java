@@ -1,6 +1,5 @@
 package org.admany.lc2h.dev.debug.chunk;
 
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.network.NetworkDirection;
 import net.minecraftforge.network.NetworkEvent;
@@ -8,6 +7,7 @@ import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.PacketDistributor;
 import net.minecraftforge.network.simple.SimpleChannel;
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.util.ResourceLocations;
 
 import java.util.Optional;
 import java.util.function.Supplier;
@@ -15,7 +15,7 @@ import java.util.function.Supplier;
 public final class ChunkDebugNetwork {
     private static final String PROTOCOL = "2";
     private static final SimpleChannel CHANNEL = NetworkRegistry.ChannelBuilder
-        .named(ResourceLocation.fromNamespaceAndPath(LC2H.MODID, "chunk_debug"))
+        .named(ResourceLocations.of(LC2H.MODID, "chunk_debug"))
         .networkProtocolVersion(() -> PROTOCOL)
         .clientAcceptedVersions(PROTOCOL::equals)
         .serverAcceptedVersions(PROTOCOL::equals)

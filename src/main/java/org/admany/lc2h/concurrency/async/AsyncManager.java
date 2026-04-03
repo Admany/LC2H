@@ -16,6 +16,7 @@ import org.admany.quantified.api.model.QuantifiedTask;
 import net.minecraftforge.server.ServerLifecycleHooks;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -128,9 +129,7 @@ public class AsyncManager {
                 } else {
                     builder.priorityBackground();
                 }
-                if (gpuPreferred) {
-                    builder.gpuPreferred();
-                }
+                builder.batchKey(quantifiedBatchKey(taskName, priority));
                 CompletableFuture<T> future = QuantifiedAPI.submit(builder);
                 LC2H.LOGGER.debug("Task '{}' submitted to Quantified API", taskName);
                 return AsyncIssueMonitor.track(taskName, wrapTaskFuture(taskName, future));
@@ -440,5 +439,85 @@ public class AsyncManager {
             top.add(entry.getKey() + "=" + entry.getValue().get());
         }
         return top;
+    }
+
+    public static String quantifiedBatchKey(String taskName, Priority priority) {
+        String lane = priority == Priority.HIGH ? "fg" : "bg";
+        return "lc2h:" + lane + ":" + normalizeTaskFamily(taskName);
+    }
+
+    private static String normalizeTaskFamily(String taskName) {
+        if (taskName == null || taskName.isBlank()) {
+            return "task";
+        }
+
+        String raw = taskName.trim();
+        StringBuilder normalized = new StringBuilder(raw.length() + 8);
+        boolean lastSeparator = false;
+        for (int i = 0; i < raw.length(); i++) {
+            char current = raw.charAt(i);
+            if (Character.isUpperCase(current)) {
+                if (normalized.length() > 0 && !lastSeparator) {
+                    normalized.append('-');
+                }
+                normalized.append(Character.toLowerCase(current));
+                lastSeparator = false;
+                continue;
+            }
+            if (Character.isLetterOrDigit(current)) {
+                normalized.append(Character.toLowerCase(current));
+                lastSeparator = false;
+                continue;
+            }
+            if (!lastSeparator && normalized.length() > 0) {
+                normalized.append('-');
+                lastSeparator = true;
+            }
+        }
+
+        String cleaned = normalized.toString();
+        while (cleaned.endsWith("-")) {
+            cleaned = cleaned.substring(0, cleaned.length() - 1);
+        }
+        if (cleaned.isEmpty()) {
+            return "task";
+        }
+
+        String[] tokens = cleaned.split("-");
+        StringBuilder family = new StringBuilder(cleaned.length());
+        int kept = 0;
+        for (String token : tokens) {
+            if (token == null || token.isBlank()) {
+                continue;
+            }
+            if (isAllDigits(token)) {
+                break;
+            }
+            if (kept > 0) {
+                family.append('-');
+            }
+            family.append(token);
+            kept++;
+            if (kept >= 4) {
+                break;
+            }
+        }
+
+        if (family.isEmpty()) {
+            family.append(cleaned.toLowerCase(Locale.ROOT));
+        }
+        if (family.length() > 96) {
+            return family.substring(0, 96);
+        }
+        return family.toString();
+    }
+
+    private static boolean isAllDigits(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            if (!Character.isDigit(value.charAt(i))) {
+                return false;
+            }
+        }
+        return !value.isEmpty();
     }
 }

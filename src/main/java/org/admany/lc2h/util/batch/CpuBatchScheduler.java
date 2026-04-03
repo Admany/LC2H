@@ -1,6 +1,8 @@
 package org.admany.lc2h.util.batch;
 
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.concurrency.async.AsyncManager;
+import org.admany.lc2h.concurrency.async.Priority;
 import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.quantified.api.QuantifiedAPI;
 import org.admany.quantified.api.model.QuantifiedTask;
@@ -77,7 +79,8 @@ public final class CpuBatchScheduler {
                 }
                 flush();
                 return null;
-            }).priorityForeground());
+            }).priorityForeground()
+                .batchKey(AsyncManager.quantifiedBatchKey(name, Priority.HIGH)));
         } catch (Throwable t) {
             LC2H.LOGGER.debug("[LC2H] CpuBatchScheduler submit fallback: {}", t.toString());
             flush();
