@@ -122,16 +122,10 @@ public final class SpawnSearchScheduler {
         String[] partArray = profile.FORCE_SPAWN_PARTS != null ? profile.FORCE_SPAWN_PARTS : new String[0];
         Set<String> rawParts = new HashSet<>(Arrays.asList(partArray));
         // FORCE_SPAWN_BUILDINGS may use "namespace:building/partVariant" composite syntax.
-        // The asset index registers buildings by their base ID only (without the /variant suffix),
-        // so strip the suffix here. Do NOT forward these to rawParts — that pollutes the part
-        // filter with non-part IDs and causes bad auto-resolve suggestions. The LC isSuitable
-        // predicate already handles part-level filtering independently.
-        Set<String> rawBuildings = new HashSet<>(buildingArray.length);
-        for (String entry : buildingArray) {
-            if (entry == null || entry.isBlank()) continue;
-            int slash = entry.indexOf('/');
-            rawBuildings.add(slash > 0 ? entry.substring(0, slash) : entry);
-        }
+        // Keep the full IDs including variant suffixes - the asset index handles variant resolution properly.
+        Set<String> rawBuildings = new HashSet<>(Arrays.asList(buildingArray));
+        // Remove nulls/blanks
+        rawBuildings.removeIf(e -> e == null || e.isBlank());
         Set<String> resolvedBuildings = resolveIds(rawBuildings, value -> {
             String building = SpawnAssetIndex.resolveBuildingId(value);
             if (building != null && !building.equals(value)) {
@@ -202,10 +196,17 @@ public final class SpawnSearchScheduler {
             // (e.g. from LC's FORCE_SPAWN_BUILDINGS profile). For a true relaxed fallback we need a
             // permissive predicate that accepts any above-ground position inside any city building.
             final IDimensionInfo relaxedProvider = provider;
+            // CRITICAL FIX: Pre-load and cache building info to avoid synchronous calls in predicate loop.
+            // Calling getBuildingInfo() in a loop for every tested position can freeze the server.
+            final java.util.Map<ChunkCoord, BuildingInfo> buildingCache = new java.util.concurrent.ConcurrentHashMap<>();
             Predicate<BlockPos> relaxedIsSuitable = pos -> {
                 ChunkCoord c = new ChunkCoord(relaxedProvider.getType(), pos.getX() >> 4, pos.getZ() >> 4);
                 try {
-                    BuildingInfo bi = BuildingInfo.getBuildingInfo(c, relaxedProvider);
+                    // Use cached BuildingInfo that was pre-loaded by the search loop
+                    BuildingInfo bi = buildingCache.computeIfAbsent(c, coord -> {
+                        // Fallback: compute if not cached (should rarely happen as search loop pre-caches)
+                        return getBuildingInfoNow(relaxedProvider, coord);
+                    });
                     if (bi == null || !bi.isCity || !bi.hasBuilding) {
                         return false;
                     }
@@ -215,7 +216,7 @@ public final class SpawnSearchScheduler {
                     return false;
                 }
             };
-            BlockPos relaxedBuildingResult = findSpawnInCity(
+            BlockPos relaxedBuildingResult = findSpawnInCityWithBuildingCache(
                 world,
                 provider,
                 profile,
@@ -225,7 +226,8 @@ public final class SpawnSearchScheduler {
                 java.util.Collections.emptySet(),
                 ResolvedAssetFilter.NONE,
                 computeConstraintHash(profile, java.util.Collections.emptySet(), java.util.Collections.emptySet()),
-                startPos
+                startPos,
+                buildingCache
             );
             if (relaxedBuildingResult != null) {
                 return relaxedBuildingResult;
@@ -627,6 +629,99 @@ public final class SpawnSearchScheduler {
         return null;
     }
 
+    /**
+     * Variant of findSpawnInCity that maintains a BuildingInfo cache to avoid
+     * repeated synchronous calls within predicates. This prevents server freezes
+     * when testing many positions in relaxed spawn fallback searches.
+     */
+    private static BlockPos findSpawnInCityWithBuildingCache(Level world,
+                                                             IDimensionInfo provider,
+                                                             LostCityProfile profile,
+                                                             Predicate<BlockPos> isSuitable,
+                                                             BiPredicate<Level, BlockPos> isValidStandingPosition,
+                                                             Set<String> requiredBuildings,
+                                                             Set<String> requiredParts,
+                                                             ResolvedAssetFilter assetFilter,
+                                                             int constraintHash,
+                                                             BlockPos startPos,
+                                                             java.util.Map<ChunkCoord, BuildingInfo> buildingCache) {
+        int radiusBlocks = Math.max(16, profile.SPAWN_CHECK_RADIUS);
+        int maxAttempts = computeSpawnAttemptBudget(profile, true, requiredBuildings, requiredParts);
+        int radiusIncrease = Math.max(1, profile.SPAWN_RADIUS_INCREASE);
+        Set<Long> visited = new HashSet<>();
+        int attempts = 0;
+
+        int originChunkX = startPos.getX() >> 4;
+        int originChunkZ = startPos.getZ() >> 4;
+        int radiusChunks = Math.max(1, radiusBlocks >> 4);
+        while (attempts <= maxAttempts) {
+            for (int r = 0; r <= radiusChunks; r++) {
+                java.util.ArrayList<SpawnCandidate> deferredCandidates = new java.util.ArrayList<>(DEFERRED_CHUNK_VALIDATION_LIMIT);
+                for (int dx = -r; dx <= r; dx++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        if (Math.abs(dx) != r && Math.abs(dz) != r) {
+                            continue;
+                        }
+                        int chunkX = originChunkX + dx;
+                        int chunkZ = originChunkZ + dz;
+                        long packed = packChunkKey(chunkX, chunkZ);
+                        if (!visited.add(packed)) {
+                            continue;
+                        }
+                        attempts++;
+                        SPAWN_PROGRESS_CHUNKS_SCANNED.incrementAndGet();
+                        logSpawnProgress(world.dimension());
+                        if (attempts > maxAttempts) {
+                            break;
+                        }
+
+                        if (shouldSkip(world.dimension(), chunkX, chunkZ, constraintHash)) {
+                            continue;
+                        }
+                        if (shouldSkipRegion(world.dimension(), chunkX, chunkZ, constraintHash)) {
+                            continue;
+                        }
+
+                        ChunkCoord coord = new ChunkCoord(provider.getType(), chunkX, chunkZ);
+                        // Pre-load and cache building info to avoid repeated synchronous calls
+                        BuildingInfo info = buildingCache.computeIfAbsent(coord, c -> getBuildingInfoNow(provider, c));
+                        if (info == null) {
+                            continue;
+                        }
+
+                        if (!passesBuildingInfo(info, true, assetFilter)) {
+                            recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                            SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
+                            logSpawnProgress(world.dimension());
+                            continue;
+                        }
+
+                        SpawnCandidate candidate = findInBuildingChunk(info, chunkX, chunkZ, isSuitable, requiredParts, assetFilter);
+                        if (candidate == null) {
+                            recordSkip(world.dimension(), chunkX, chunkZ, constraintHash);
+                            SPAWN_PROGRESS_CHUNKS_REJECTED.incrementAndGet();
+                            logSpawnProgress(world.dimension());
+                            continue;
+                        }
+
+                        BlockPos found = tryValidateSpawnCandidate(world, candidate, isValidStandingPosition, false);
+                        if (found != null) {
+                            return found;
+                        }
+
+                        queueDeferredCandidate(deferredCandidates, candidate);
+                    }
+                }
+                BlockPos deferredFound = drainDeferredCandidates(world, deferredCandidates, isValidStandingPosition, constraintHash);
+                if (deferredFound != null) {
+                    return deferredFound;
+                }
+            }
+            radiusChunks = Math.max(radiusChunks + (radiusIncrease >> 4), radiusChunks + 1);
+        }
+        return null;
+    }
+
     private static BlockPos searchCityCandidates(Level world,
                                                  IDimensionInfo provider,
                                                  CityInfo city,
@@ -817,6 +912,9 @@ public final class SpawnSearchScheduler {
                 return info;
             }
             AsyncBuildingInfoPlanner.preSchedulePriority(provider, coord);
+            if (!ALLOW_SYNC_BUILDINGINFO_FALLBACK) {
+                return null;
+            }
             return BuildingInfo.getBuildingInfo(coord, provider);
         } catch (Throwable t) {
             return null;
@@ -1731,19 +1829,20 @@ public final class SpawnSearchScheduler {
             if (value == null || value.isBlank()) {
                 continue;
             }
-            autoResolved.add(value);
             boolean known = isBuilding ? SpawnAssetIndex.isBuildingKnown(value)
                 || SpawnAssetIndex.isMultiBuildingKnown(value)
                 : SpawnAssetIndex.isPartKnown(value);
             if (known) {
+                autoResolved.add(value);
                 continue;
             }
             String candidate = isBuilding ? suggestBestBuilding(value) : SpawnAssetIndex.suggestBestPartId(value);
             if (candidate != null && !candidate.isBlank()) {
-                if (candidate != null && !candidate.isBlank()) {
-                    autoResolved.add(candidate);
-                    remapped.put(value, candidate);
-                }
+                autoResolved.add(candidate);
+                remapped.put(value, candidate);
+            } else {
+                // No remapping found; keep original
+                autoResolved.add(value);
             }
         }
         if (!remapped.isEmpty()) {
