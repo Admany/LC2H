@@ -74,7 +74,49 @@ public final class ResolvedAssetFilter {
                 return true;
             }
         }
+        if (type == SpawnAssetIndex.AssetType.BUILDING) {
+            String candidateFamily = toBuildingFamilyId(candidateId);
+            if (candidateFamily != null) {
+                for (String accepted : allowed) {
+                    if (candidateFamily.equals(toBuildingFamilyId(accepted))) {
+                        return true;
+                    }
+                }
+            }
+        }
         return false;
+    }
+
+    private static String toBuildingFamilyId(String id) {
+        if (id == null || id.isBlank()) {
+            return null;
+        }
+        String trimmed = id.trim();
+        int colon = trimmed.indexOf(':');
+        String namespace = colon >= 0 ? trimmed.substring(0, colon) : "";
+        String path = colon >= 0 && colon + 1 < trimmed.length() ? trimmed.substring(colon + 1) : trimmed;
+        int slash = path.indexOf('/');
+        if (slash >= 0) {
+            path = path.substring(0, slash);
+        }
+        path = stripRotationSuffix(path);
+        return namespace + ':' + path;
+    }
+
+    private static String stripRotationSuffix(String value) {
+        if (value == null || value.isBlank()) {
+            return value;
+        }
+        if (value.endsWith("_90")) {
+            return value.substring(0, value.length() - 3);
+        }
+        if (value.endsWith("_180")) {
+            return value.substring(0, value.length() - 4);
+        }
+        if (value.endsWith("_270")) {
+            return value.substring(0, value.length() - 4);
+        }
+        return value;
     }
 
     private static Set<String> resolveVariants(Set<String> rawIds, SpawnAssetIndex.AssetType type) {

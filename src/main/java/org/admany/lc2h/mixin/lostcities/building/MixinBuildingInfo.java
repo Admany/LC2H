@@ -4,7 +4,9 @@ import mcjty.lostcities.api.LostChunkCharacteristics;
 import mcjty.lostcities.api.MultiPos;
 import mcjty.lostcities.api.ILostCityBuilding;
 import mcjty.lostcities.config.LostCityProfile;
+import mcjty.lostcities.setup.Config;
 import mcjty.lostcities.varia.ChunkCoord;
+import mcjty.lostcities.worldgen.ChunkHeightmap;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import mcjty.lostcities.worldgen.lost.City;
@@ -32,7 +34,12 @@ import org.spongepowered.asm.mixin.gen.Invoker;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
 
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -43,6 +50,7 @@ public abstract class MixinBuildingInfo {
     private static final ConcurrentMap<ChunkCoord, BuildingInfo> LC2H_BUILDING_INFO_MAP = new ConcurrentHashMap<>();
     private static final ConcurrentMap<ChunkCoord, Integer> LC2H_CITY_LEVEL_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentMap<ChunkCoord, Boolean> LC2H_IS_CITY_RAW_CACHE = new ConcurrentHashMap<>();
+    private static final ConcurrentMap<String, Integer> LC2H_CITY_REGION_LEVEL_CACHE = new ConcurrentHashMap<>();
 
     private static final ConcurrentMap<ChunkCoord, Object> LC2H_BUILDING_INFO_LOCKS = new ConcurrentHashMap<>();
     @Unique
@@ -57,6 +65,16 @@ public abstract class MixinBuildingInfo {
     @Unique
     private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_CITY_RAW_BUDGET =
         LostCitiesCacheBudgetManager.register("lc_city_raw", 32, 2048, key -> LC2H_IS_CITY_RAW_CACHE.remove(key) != null);
+    @Unique
+    private static final String LC2H_CITY_LEVEL_DISK_NAMESPACE = "city_level_v4";
+    @Unique
+    private static final int LC2H_CITY_REGION_MAX_MULTIS = Math.max(1, Integer.getInteger("lc2h.cityRegion.maxMultis", 8));
+    @Unique
+    private static final int LC2H_CITY_REGION_MAX_LEVEL_DELTA = Math.max(0, Integer.getInteger("lc2h.cityRegion.maxLevelDelta", 1));
+    @Unique
+    private static final int LC2H_CITY_REGION_MAX_HOPS = Math.max(0, Integer.getInteger("lc2h.cityRegion.maxHops", 1));
+    @Unique
+    private static final int LC2H_CITY_REGION_MAX_LOCAL_DELTA = Math.max(0, Integer.getInteger("lc2h.cityRegion.maxLocalDelta", 1));
 
     @Shadow public ChunkCoord coord;
     @Shadow public IDimensionInfo provider;
@@ -233,6 +251,307 @@ public abstract class MixinBuildingInfo {
     @Shadow public static Random getBuildingRandom(int chunkX, int chunkZ, long seed) { return null; }
     @Invoker("<init>")
     static BuildingInfo lc2h$create(ChunkCoord key, IDimensionInfo provider) { throw new AssertionError(); }
+
+    @Unique
+    private static int lc2h$levelBasedOnHeight(int height, LostCityProfile profile) {
+        if (height < profile.CITY_LEVEL0_HEIGHT) {
+            return 0;
+        } else if (height < profile.CITY_LEVEL1_HEIGHT) {
+            return 1;
+        } else if (height < profile.CITY_LEVEL2_HEIGHT) {
+            return 2;
+        } else if (height < profile.CITY_LEVEL3_HEIGHT) {
+            return 3;
+        } else if (height < profile.CITY_LEVEL4_HEIGHT) {
+            return 4;
+        } else if (height < profile.CITY_LEVEL5_HEIGHT) {
+            return 5;
+        } else if (height < profile.CITY_LEVEL6_HEIGHT) {
+            return 6;
+        } else if (height < profile.CITY_LEVEL7_HEIGHT) {
+            return 7;
+        }
+        return 8;
+    }
+
+    @Unique
+    private static int lc2h$getCityLevelNormalFixed(ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile) {
+        if (!profile.USE_AVG_HEIGHTMAP || Config.HEIGHT_SAMPLE_SIZE.get() <= 2) {
+            return getCityLevelNormal(coord, provider, profile);
+        }
+
+        int multiAreaSize = lc2h$getMultiAreaSize(provider);
+        if (multiAreaSize <= 1) {
+            return lc2h$getSampleAnchoredCityLevel(coord, provider, profile);
+        }
+
+        ChunkCoord multiCoord = lc2h$toMultiCoord(coord, multiAreaSize, provider);
+
+        long[] ownStats = lc2h$computeMultiHeightStats(multiCoord, multiAreaSize, provider, profile);
+        int multiOwnLevel = (ownStats[1] > 0)
+                ? (int) ownStats[2]
+                : lc2h$getSampleAnchoredCityLevel(coord, provider, profile);
+
+        int regionLevel = lc2h$getConnectedRegionCityLevel(coord, multiCoord, multiAreaSize, provider, profile);
+        return lc2h$clampLevelToLocal(regionLevel, multiOwnLevel);
+    }
+
+    @Unique
+    private static int lc2h$clampLevelToLocal(int regionLevel, int localLevel) {
+        if (LC2H_CITY_REGION_MAX_LOCAL_DELTA <= 0) {
+            return localLevel;
+        }
+        int min = localLevel - LC2H_CITY_REGION_MAX_LOCAL_DELTA;
+        int max = localLevel + LC2H_CITY_REGION_MAX_LOCAL_DELTA;
+        if (regionLevel < min) {
+            return min;
+        }
+        if (regionLevel > max) {
+            return max;
+        }
+        return regionLevel;
+    }
+
+    @Unique
+    private static int lc2h$getConnectedRegionCityLevel(ChunkCoord coord,
+                                                        ChunkCoord startMulti,
+                                                        int multiAreaSize,
+                                                        IDimensionInfo provider,
+                                                        LostCityProfile profile) {
+        Set<ChunkCoord> visited = new HashSet<>();
+        ArrayDeque<ChunkCoord> queue = new ArrayDeque<>();
+        ArrayDeque<Integer> depthQueue = new ArrayDeque<>();
+        queue.add(startMulti);
+        depthQueue.add(0);
+
+        ChunkCoord rootMulti = startMulti;
+        long heightSum = 0L;
+        int heightCount = 0;
+
+        while (!queue.isEmpty()) {
+            if (visited.size() >= LC2H_CITY_REGION_MAX_MULTIS) {
+                break;
+            }
+            ChunkCoord multi = queue.removeFirst();
+            int depth = depthQueue.removeFirst();
+            if (!visited.add(multi)) {
+                continue;
+            }
+            if (lc2h$compareCoords(multi, rootMulti) < 0) {
+                rootMulti = multi;
+            }
+
+            long[] currentStats = lc2h$computeMultiHeightStats(multi, multiAreaSize, provider, profile);
+            int currentCount = (int) currentStats[1];
+            int currentLevel = (int) currentStats[2];
+            if (currentCount > 0) {
+                heightCount += currentCount;
+                heightSum += currentStats[0];
+            }
+
+            if (depth >= LC2H_CITY_REGION_MAX_HOPS) {
+                continue;
+            }
+
+            for (ChunkCoord neighbor : lc2h$getNeighborMultis(multi, provider)) {
+                if (visited.contains(neighbor)) {
+                    continue;
+                }
+                if (visited.size() >= LC2H_CITY_REGION_MAX_MULTIS) {
+                    break;
+                }
+                long[] neighborStats = lc2h$computeMultiHeightStats(neighbor, multiAreaSize, provider, profile);
+                int neighborCount = (int) neighborStats[1];
+                int neighborLevel = (int) neighborStats[2];
+                if (currentCount <= 0 || neighborCount <= 0) {
+                    continue;
+                }
+                if (!visited.contains(neighbor)
+                    && lc2h$multisShareCityBoundary(multi, neighbor, multiAreaSize, provider, profile)
+                    && Math.abs(currentLevel - neighborLevel) <= LC2H_CITY_REGION_MAX_LEVEL_DELTA) {
+                    queue.addLast(neighbor);
+                    depthQueue.addLast(depth + 1);
+                }
+            }
+        }
+
+        if (heightCount <= 0) {
+            return lc2h$getSampleAnchoredCityLevel(coord, provider, profile);
+        }
+
+        String regionKey = scopedCacheKey(LC2H_CITY_LEVEL_DISK_NAMESPACE, rootMulti, provider, profile);
+        if (regionKey != null) {
+            Integer cachedRegionLevel = LC2H_CITY_REGION_LEVEL_CACHE.get(regionKey);
+            if (cachedRegionLevel != null) {
+                return cachedRegionLevel;
+            }
+            Integer diskRegionLevel = LostCitiesCacheBridge.getDisk(LC2H_CITY_LEVEL_DISK_NAMESPACE, regionKey, Integer.class);
+            if (diskRegionLevel != null) {
+                Integer prev = LC2H_CITY_REGION_LEVEL_CACHE.putIfAbsent(regionKey, diskRegionLevel);
+                return prev != null ? prev : diskRegionLevel;
+            }
+        }
+
+        int averageHeight = (int) (heightSum / heightCount);
+        int resolvedLevel = lc2h$levelBasedOnHeight(averageHeight, profile);
+        if (regionKey != null) {
+            Integer prev = LC2H_CITY_REGION_LEVEL_CACHE.putIfAbsent(regionKey, resolvedLevel);
+            resolvedLevel = prev != null ? prev : resolvedLevel;
+            LostCitiesCacheBridge.putDisk(LC2H_CITY_LEVEL_DISK_NAMESPACE, regionKey, resolvedLevel);
+        }
+        return resolvedLevel;
+    }
+
+    @Unique
+    private static long[] lc2h$computeMultiHeightStats(ChunkCoord multi,
+                                                       int multiAreaSize,
+                                                       IDimensionInfo provider,
+                                                       LostCityProfile profile) {
+        int baseX = multi.chunkX() * multiAreaSize;
+        int baseZ = multi.chunkZ() * multiAreaSize;
+        long sum = 0L;
+        int count = 0;
+        for (int dx = 0; dx < multiAreaSize; dx++) {
+            for (int dz = 0; dz < multiAreaSize; dz++) {
+                ChunkCoord chunk = new ChunkCoord(provider.dimension(), baseX + dx, baseZ + dz);
+                if (!isCityRaw(chunk, provider, profile)) {
+                    continue;
+                }
+                sum += provider.getHeightmap(chunk).getHeight();
+                count++;
+            }
+        }
+        if (count <= 0) {
+            return new long[]{0L, 0L, 0L};
+        }
+        int level = lc2h$levelBasedOnHeight((int) (sum / count), profile);
+        return new long[]{sum, count, level};
+    }
+
+    @Unique
+    private static int lc2h$getSampleAnchoredCityLevel(ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile) {
+        ChunkHeightmap heightmap = provider.getHeightmap(coord);
+        int height = heightmap.getHeight();
+
+        int sampleSize = Config.HEIGHT_SAMPLE_SIZE.get();
+        int gridX = Math.floorDiv(coord.chunkX(), sampleSize);
+        int gridZ = Math.floorDiv(coord.chunkZ(), sampleSize);
+        int centerOffset = sampleSize / 2;
+
+        int chunkBaseX = (gridX * sampleSize) + centerOffset;
+        int chunkBaseZ = (gridZ * sampleSize) + centerOffset;
+        int chunkLeft = ((gridX - 1) * sampleSize) + centerOffset;
+        int chunkRight = ((gridX + 1) * sampleSize) + centerOffset;
+        int chunkUp = ((gridZ - 1) * sampleSize) + centerOffset;
+        int chunkDown = ((gridZ + 1) * sampleSize) + centerOffset;
+
+        ChunkCoord left = new ChunkCoord(provider.dimension(), chunkLeft, chunkBaseZ);
+        ChunkCoord right = new ChunkCoord(provider.dimension(), chunkRight, chunkBaseZ);
+        ChunkCoord up = new ChunkCoord(provider.dimension(), chunkBaseX, chunkUp);
+        ChunkCoord down = new ChunkCoord(provider.dimension(), chunkBaseX, chunkDown);
+
+        int avgHeightmap = height;
+        int counter = 1;
+        if (isCityRaw(left, provider, profile)) {
+            avgHeightmap += provider.getHeightmap(left).getHeight();
+            counter++;
+        }
+        if (isCityRaw(right, provider, profile)) {
+            avgHeightmap += provider.getHeightmap(right).getHeight();
+            counter++;
+        }
+        if (isCityRaw(up, provider, profile)) {
+            avgHeightmap += provider.getHeightmap(up).getHeight();
+            counter++;
+        }
+        if (isCityRaw(down, provider, profile)) {
+            avgHeightmap += provider.getHeightmap(down).getHeight();
+            counter++;
+        }
+
+        avgHeightmap /= counter;
+        return lc2h$levelBasedOnHeight(avgHeightmap, profile);
+    }
+
+    @Unique
+    private static int lc2h$getMultiAreaSize(IDimensionInfo provider) {
+        try {
+            int areaSize = provider.getWorldStyle().getMultiSettings().areasize();
+            return Math.max(1, areaSize);
+        } catch (Throwable ignored) {
+            return 1;
+        }
+    }
+
+    @Unique
+    private static ChunkCoord lc2h$toMultiCoord(ChunkCoord coord, int multiAreaSize, IDimensionInfo provider) {
+        return new ChunkCoord(provider.dimension(),
+            Math.floorDiv(coord.chunkX(), multiAreaSize),
+            Math.floorDiv(coord.chunkZ(), multiAreaSize));
+    }
+
+    @Unique
+    private static List<ChunkCoord> lc2h$getNeighborMultis(ChunkCoord multi, IDimensionInfo provider) {
+        List<ChunkCoord> neighbors = new ArrayList<>(4);
+        neighbors.add(new ChunkCoord(provider.dimension(), multi.chunkX() - 1, multi.chunkZ()));
+        neighbors.add(new ChunkCoord(provider.dimension(), multi.chunkX() + 1, multi.chunkZ()));
+        neighbors.add(new ChunkCoord(provider.dimension(), multi.chunkX(), multi.chunkZ() - 1));
+        neighbors.add(new ChunkCoord(provider.dimension(), multi.chunkX(), multi.chunkZ() + 1));
+        return neighbors;
+    }
+
+    @Unique
+    private static boolean lc2h$multisShareCityBoundary(ChunkCoord leftMulti,
+                                                        ChunkCoord rightMulti,
+                                                        int multiAreaSize,
+                                                        IDimensionInfo provider,
+                                                        LostCityProfile profile) {
+        int dx = rightMulti.chunkX() - leftMulti.chunkX();
+        int dz = rightMulti.chunkZ() - leftMulti.chunkZ();
+        if (Math.abs(dx) + Math.abs(dz) != 1) {
+            return false;
+        }
+
+        int leftBaseX = leftMulti.chunkX() * multiAreaSize;
+        int leftBaseZ = leftMulti.chunkZ() * multiAreaSize;
+        int rightBaseX = rightMulti.chunkX() * multiAreaSize;
+        int rightBaseZ = rightMulti.chunkZ() * multiAreaSize;
+
+        if (dx != 0) {
+            int leftEdgeX = dx > 0 ? leftBaseX + multiAreaSize - 1 : leftBaseX;
+            int rightEdgeX = dx > 0 ? rightBaseX : rightBaseX + multiAreaSize - 1;
+            for (int offset = 0; offset < multiAreaSize; offset++) {
+                int z = leftBaseZ + offset;
+                ChunkCoord a = new ChunkCoord(provider.dimension(), leftEdgeX, z);
+                ChunkCoord b = new ChunkCoord(provider.dimension(), rightEdgeX, rightBaseZ + offset);
+                if (isCityRaw(a, provider, profile) && isCityRaw(b, provider, profile)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        int leftEdgeZ = dz > 0 ? leftBaseZ + multiAreaSize - 1 : leftBaseZ;
+        int rightEdgeZ = dz > 0 ? rightBaseZ : rightBaseZ + multiAreaSize - 1;
+        for (int offset = 0; offset < multiAreaSize; offset++) {
+            int x = leftBaseX + offset;
+            ChunkCoord a = new ChunkCoord(provider.dimension(), x, leftEdgeZ);
+            ChunkCoord b = new ChunkCoord(provider.dimension(), rightBaseX + offset, rightEdgeZ);
+            if (isCityRaw(a, provider, profile) && isCityRaw(b, provider, profile)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Unique
+    private static int lc2h$compareCoords(ChunkCoord left, ChunkCoord right) {
+        int x = Integer.compare(left.chunkX(), right.chunkX());
+        if (x != 0) {
+            return x;
+        }
+        return Integer.compare(left.chunkZ(), right.chunkZ());
+    }
 
     @Redirect(
         method = "<init>",
@@ -684,8 +1003,8 @@ public abstract class MixinBuildingInfo {
             LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_LEVEL_BUDGET, key);
             return cached;
         }
-        String cityLevelDiskKey = scopedCacheKey("city_level", key, provider, provider != null ? provider.getProfile() : null);
-        Integer disk = LostCitiesCacheBridge.getDisk("city_level", cityLevelDiskKey, Integer.class);
+        String cityLevelDiskKey = scopedCacheKey(LC2H_CITY_LEVEL_DISK_NAMESPACE, key, provider, provider != null ? provider.getProfile() : null);
+        Integer disk = LostCitiesCacheBridge.getDisk(LC2H_CITY_LEVEL_DISK_NAMESPACE, cityLevelDiskKey, Integer.class);
         if (disk != null) {
             Integer prev = LC2H_CITY_LEVEL_CACHE.putIfAbsent(key, disk);
             LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_LEVEL_BUDGET, key, LC2H_CITY_LEVEL_BUDGET.defaultEntryBytes(), prev == null);
@@ -699,11 +1018,11 @@ public abstract class MixinBuildingInfo {
         } else if (provider.getProfile().isCavern()) {
             result = getCityLevelCavern(key, provider);
         } else {
-            result = getCityLevelNormal(key, provider, provider.getProfile());
+            result = lc2h$getCityLevelNormalFixed(key, provider, provider.getProfile());
         }
         Integer prev = LC2H_CITY_LEVEL_CACHE.putIfAbsent(key, result);
         LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_LEVEL_BUDGET, key, LC2H_CITY_LEVEL_BUDGET.defaultEntryBytes(), prev == null);
-        LostCitiesCacheBridge.putDisk("city_level", cityLevelDiskKey, result);
+        LostCitiesCacheBridge.putDisk(LC2H_CITY_LEVEL_DISK_NAMESPACE, cityLevelDiskKey, result);
         return prev != null ? prev : result;
     }
 
@@ -719,6 +1038,7 @@ public abstract class MixinBuildingInfo {
         LC2H_CITY_INFO_MAP.clear();
         LC2H_CITY_LEVEL_CACHE.clear();
         LC2H_IS_CITY_RAW_CACHE.clear();
+        LC2H_CITY_REGION_LEVEL_CACHE.clear();
         LostCitiesCacheBudgetManager.clear(LC2H_BUILDING_INFO_BUDGET);
         LostCitiesCacheBudgetManager.clear(LC2H_CITY_INFO_BUDGET);
         LostCitiesCacheBudgetManager.clear(LC2H_CITY_LEVEL_BUDGET);
