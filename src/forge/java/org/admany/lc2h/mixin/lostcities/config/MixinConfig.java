@@ -7,6 +7,7 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 import net.minecraftforge.fml.loading.FMLPaths;
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.worldgen.lostcities.LostCityProfileOverrideManager;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -34,6 +35,25 @@ public class MixinConfig {
 
     @Inject(method = "getProfileForDimension", at = @At("HEAD"), cancellable = true)
     private static void lc2h$avoidPoisoningProfileCache(ResourceKey<Level> type, CallbackInfoReturnable<String> cir) {
+        String forcedProfile = LostCityProfileOverrideManager.overrideName(type).orElse(null);
+        if (forcedProfile != null) {
+            LostCityProfile profile = ProfileSetup.STANDARD_PROFILES.get(forcedProfile);
+            if (profile == null) {
+                profile = lc2h$loadProfileFromDisk(forcedProfile);
+                if (profile != null) {
+                    ProfileSetup.STANDARD_PROFILES.put(forcedProfile, profile);
+                }
+            }
+
+            if (profile != null) {
+                if (dimensionProfileCache != null) {
+                    dimensionProfileCache.put(type, forcedProfile);
+                }
+                cir.setReturnValue(forcedProfile);
+                return;
+            }
+        }
+
         if (dimensionProfileCache == null && ProfileSetup.STANDARD_PROFILES.isEmpty()) {
             if (lc2h$earlyProfileCacheWarning.compareAndSet(false, true)) {
                 LC2H.LOGGER.info("Lost Cities profiles not initialized yet; deferring profile lookup to avoid disabling worldgen");

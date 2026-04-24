@@ -20,6 +20,13 @@ public final class Lc2hTimingRegistry {
         COUNTERS.computeIfAbsent(bucket, unused -> new TimingCounter()).record(elapsedNs);
     }
 
+    public static TimingHandle bucket(String bucket) {
+        if (bucket == null || bucket.isBlank()) {
+            return TimingHandle.NOOP;
+        }
+        return new TimingHandle(COUNTERS.computeIfAbsent(bucket, unused -> new TimingCounter()));
+    }
+
     public static Map<String, TimingSnapshot> snapshot() {
         Map<String, TimingSnapshot> out = new LinkedHashMap<>();
         COUNTERS.entrySet().stream()
@@ -38,6 +45,23 @@ public final class Lc2hTimingRegistry {
             long deltaMax = Math.max(0L, maxNs);
             double deltaAvg = deltaCount <= 0L ? 0.0D : deltaTotal / (double) deltaCount;
             return new TimingSnapshot(deltaCount, deltaTotal, deltaMax, deltaAvg);
+        }
+    }
+
+    public static final class TimingHandle {
+        private static final TimingHandle NOOP = new TimingHandle(null);
+
+        private final TimingCounter counter;
+
+        private TimingHandle(TimingCounter counter) {
+            this.counter = counter;
+        }
+
+        public void record(long elapsedNs) {
+            if (counter == null || elapsedNs <= 0L) {
+                return;
+            }
+            counter.record(elapsedNs);
         }
     }
 

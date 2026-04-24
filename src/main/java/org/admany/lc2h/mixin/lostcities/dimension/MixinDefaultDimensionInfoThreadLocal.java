@@ -1,17 +1,21 @@
 package org.admany.lc2h.mixin.lostcities.dimension;
 
 import mcjty.lostcities.config.LostCityProfile;
+import mcjty.lostcities.config.ProfileSetup;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.ChunkHeightmap;
 import mcjty.lostcities.worldgen.DefaultDimensionInfo;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.LostCityTerrainFeature;
+import mcjty.lostcities.worldgen.lost.cityassets.AssetRegistries;
+import mcjty.lostcities.worldgen.lost.cityassets.WorldStyle;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
+import org.admany.lc2h.worldgen.lostcities.LostCityProfileOverrideManager;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
@@ -24,11 +28,14 @@ public abstract class MixinDefaultDimensionInfoThreadLocal implements IDimension
 
     @Shadow private WorldGenLevel world;
     @Shadow private LostCityProfile profile;
+    @Shadow private LostCityProfile profileOutside;
+    @Shadow private WorldStyle style;
 
     @Unique private final ThreadLocal<WorldGenLevel> lc2h$worldLocal = new ThreadLocal<>();
     @Unique private volatile WorldGenLevel lc2h$worldFallback;
 
     @Unique private final ThreadLocal<Long> lc2h$featureSeedLocal = new ThreadLocal<>();
+    @Unique private final ThreadLocal<String> lc2h$featureProfileTokenLocal = new ThreadLocal<>();
     @Unique private final ThreadLocal<LostCityTerrainFeature> lc2h$featureLocal = new ThreadLocal<>();
 
     @Unique private final ThreadLocal<Random> lc2h$randomLocal = new ThreadLocal<>();
@@ -90,18 +97,51 @@ public abstract class MixinDefaultDimensionInfoThreadLocal implements IDimension
     }
 
     @Overwrite
+    public LostCityProfile getProfile() {
+        return LostCityProfileOverrideManager.resolveProfile(getWorld(), profile);
+    }
+
+    @Overwrite
+    public LostCityProfile getOutsideProfile() {
+        LostCityProfile effectiveProfile = getProfile();
+        if (effectiveProfile == profile) {
+            return profileOutside;
+        }
+        LostCityProfile outside = ProfileSetup.STANDARD_PROFILES.get(effectiveProfile.CITYSPHERE_OUTSIDE_PROFILE);
+        return outside != null ? outside : profileOutside;
+    }
+
+    @Overwrite
+    public WorldStyle getWorldStyle() {
+        LostCityProfile effectiveProfile = getProfile();
+        if (effectiveProfile == profile) {
+            return style;
+        }
+        try {
+            WorldStyle effectiveStyle = (WorldStyle) AssetRegistries.WORLDSTYLES.get(getWorld(), effectiveProfile.getWorldStyle());
+            return effectiveStyle != null ? effectiveStyle : style;
+        } catch (Throwable ignored) {
+            return style;
+        }
+    }
+
+    @Overwrite
     public LostCityTerrainFeature getFeature() {
         long seed = getSeed();
+        LostCityProfile effectiveProfile = getProfile();
+        String profileToken = LostCityProfileOverrideManager.profileToken(getWorld(), effectiveProfile);
         Long cachedSeed = lc2h$featureSeedLocal.get();
+        String cachedProfileToken = lc2h$featureProfileTokenLocal.get();
         LostCityTerrainFeature cachedFeature = lc2h$featureLocal.get();
-        if (cachedSeed != null && cachedSeed == seed && cachedFeature != null) {
+        if (cachedSeed != null && cachedSeed == seed && profileToken.equals(cachedProfileToken) && cachedFeature != null) {
             return cachedFeature;
         }
 
         RandomSource randomSource = new LegacyRandomSource(seed);
-        LostCityTerrainFeature feature = new LostCityTerrainFeature((IDimensionInfo) (Object) this, profile, randomSource);
-        feature.setupStates(profile);
+        LostCityTerrainFeature feature = new LostCityTerrainFeature((IDimensionInfo) (Object) this, effectiveProfile, randomSource);
+        feature.setupStates(effectiveProfile);
         lc2h$featureSeedLocal.set(seed);
+        lc2h$featureProfileTokenLocal.set(profileToken);
         lc2h$featureLocal.set(feature);
         return feature;
     }

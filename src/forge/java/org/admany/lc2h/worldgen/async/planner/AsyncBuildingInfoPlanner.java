@@ -473,14 +473,16 @@ public final class AsyncBuildingInfoPlanner {
         if (topLeft == null || areaSize <= 0) {
             return;
         }
+        int borderRadius = Math.max(0, Math.min(2,
+            Integer.getInteger("lc2h.multichunk.boundaryInvalidationRadius", 1)));
         long nowMs = System.currentTimeMillis();
         Long previous = RECENT_AREA_INVALIDATIONS.put(topLeft, nowMs);
         if (previous != null && (nowMs - previous) < AREA_INVALIDATE_SUPPRESS_MS) {
             return;
         }
 
-        for (int dx = 0; dx < areaSize; dx++) {
-            for (int dz = 0; dz < areaSize; dz++) {
+        for (int dx = -borderRadius; dx < areaSize + borderRadius; dx++) {
+            for (int dz = -borderRadius; dz < areaSize + borderRadius; dz++) {
                 ChunkCoord key = new ChunkCoord(topLeft.dimension(), topLeft.chunkX() + dx, topLeft.chunkZ() + dz);
                 if (BUILDING_INFO_CACHE.remove(key) != null) {
                     CacheBudgetManager.recordRemove(BUILDING_INFO_BUDGET, key);

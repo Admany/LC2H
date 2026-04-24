@@ -13,9 +13,23 @@ import net.minecraft.world.level.WorldGenLevel;
 import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 
 import java.util.Arrays;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class CityEdgeBlender {
+    private static final long ROLE_GRID_TTL_MS = 60_000L;
+    private static final int ROLE_GRID_PRUNE_EVERY = 512;
+    private static final int ROLE_GRID_CACHE_MAX = 4096;
+    private static final ConcurrentHashMap<RoleGridKey, CachedRoleGrid> ROLE_GRID_CACHE = new ConcurrentHashMap<>();
+    private static final AtomicInteger ROLE_GRID_OPS = new AtomicInteger();
+
     private CityEdgeBlender() {
+    }
+
+    private record RoleGridKey(String dimension, int chunkX, int chunkZ, int radius, int providerIdentity) {
+    }
+
+    private record CachedRoleGrid(ChunkRoleProbe.RoleGrid grid, long timestampMs) {
     }
 
     private record Outside(int chunksToOutside, int distBlocks, int sampleWorldX, int sampleWorldZ) {
@@ -33,11 +47,12 @@ public final class CityEdgeBlender {
 
         int maxScanChunks = Math.max(1, (maxDynamicWidth + 15) / 16);
         WorldGenLevel world = info.provider.getWorld();
+        ChunkRoleProbe.RoleGrid roleGrid = roleGrid(info, maxScanChunks);
 
-        Outside west = findOutsideWest(info, world, maxScanChunks, x, z);
-        Outside east = findOutsideEast(info, world, maxScanChunks, x, z);
-        Outside north = findOutsideNorth(info, world, maxScanChunks, x, z);
-        Outside south = findOutsideSouth(info, world, maxScanChunks, x, z);
+        Outside west = findOutsideWest(info, world, roleGrid, maxScanChunks, x, z);
+        Outside east = findOutsideEast(info, world, roleGrid, maxScanChunks, x, z);
+        Outside north = findOutsideNorth(info, world, roleGrid, maxScanChunks, x, z);
+        Outside south = findOutsideSouth(info, world, roleGrid, maxScanChunks, x, z);
 
         if (!(west.isPresent() || east.isPresent() || north.isPresent() || south.isPresent())) {
             return info.getCityGroundLevel();
@@ -116,7 +131,7 @@ public final class CityEdgeBlender {
         return dist == Integer.MAX_VALUE ? 15 : dist;
     }
 
-    private static Outside findOutsideWest(BuildingInfo info, WorldGenLevel world, int maxScanChunks, int x, int z) {
+    private static Outside findOutsideWest(BuildingInfo info, WorldGenLevel world, ChunkRoleProbe.RoleGrid roleGrid, int maxScanChunks, int x, int z) {
         ChunkCoord c = info.coord;
         int baseX = c.chunkX() << 4;
         int baseZ = c.chunkZ() << 4;
@@ -125,7 +140,7 @@ public final class CityEdgeBlender {
             if (world != null && !world.hasChunk(check.chunkX(), check.chunkZ())) {
                 break;
             }
-            if (!ChunkRoleProbe.isCity(info.provider, c.dimension(), check.chunkX(), check.chunkZ())) {
+            if (!isCity(info, roleGrid, check.chunkX(), check.chunkZ())) {
                 int distBlocks = x + ((d - 1) << 4);
                 int sampleX = baseX - (d << 4) + 15;
                 int sampleZ = baseZ + z;
@@ -135,7 +150,7 @@ public final class CityEdgeBlender {
         return new Outside(0, Integer.MAX_VALUE, 0, 0);
     }
 
-    private static Outside findOutsideEast(BuildingInfo info, WorldGenLevel world, int maxScanChunks, int x, int z) {
+    private static Outside findOutsideEast(BuildingInfo info, WorldGenLevel world, ChunkRoleProbe.RoleGrid roleGrid, int maxScanChunks, int x, int z) {
         ChunkCoord c = info.coord;
         int baseX = c.chunkX() << 4;
         int baseZ = c.chunkZ() << 4;
@@ -144,7 +159,7 @@ public final class CityEdgeBlender {
             if (world != null && !world.hasChunk(check.chunkX(), check.chunkZ())) {
                 break;
             }
-            if (!ChunkRoleProbe.isCity(info.provider, c.dimension(), check.chunkX(), check.chunkZ())) {
+            if (!isCity(info, roleGrid, check.chunkX(), check.chunkZ())) {
                 int distBlocks = (15 - x) + ((d - 1) << 4);
                 int sampleX = baseX + (d << 4);
                 int sampleZ = baseZ + z;
@@ -154,7 +169,7 @@ public final class CityEdgeBlender {
         return new Outside(0, Integer.MAX_VALUE, 0, 0);
     }
 
-    private static Outside findOutsideNorth(BuildingInfo info, WorldGenLevel world, int maxScanChunks, int x, int z) {
+    private static Outside findOutsideNorth(BuildingInfo info, WorldGenLevel world, ChunkRoleProbe.RoleGrid roleGrid, int maxScanChunks, int x, int z) {
         ChunkCoord c = info.coord;
         int baseX = c.chunkX() << 4;
         int baseZ = c.chunkZ() << 4;
@@ -163,7 +178,7 @@ public final class CityEdgeBlender {
             if (world != null && !world.hasChunk(check.chunkX(), check.chunkZ())) {
                 break;
             }
-            if (!ChunkRoleProbe.isCity(info.provider, c.dimension(), check.chunkX(), check.chunkZ())) {
+            if (!isCity(info, roleGrid, check.chunkX(), check.chunkZ())) {
                 int distBlocks = z + ((d - 1) << 4);
                 int sampleX = baseX + x;
                 int sampleZ = baseZ - (d << 4) + 15;
@@ -173,7 +188,7 @@ public final class CityEdgeBlender {
         return new Outside(0, Integer.MAX_VALUE, 0, 0);
     }
 
-    private static Outside findOutsideSouth(BuildingInfo info, WorldGenLevel world, int maxScanChunks, int x, int z) {
+    private static Outside findOutsideSouth(BuildingInfo info, WorldGenLevel world, ChunkRoleProbe.RoleGrid roleGrid, int maxScanChunks, int x, int z) {
         ChunkCoord c = info.coord;
         int baseX = c.chunkX() << 4;
         int baseZ = c.chunkZ() << 4;
@@ -182,7 +197,7 @@ public final class CityEdgeBlender {
             if (world != null && !world.hasChunk(check.chunkX(), check.chunkZ())) {
                 break;
             }
-            if (!ChunkRoleProbe.isCity(info.provider, c.dimension(), check.chunkX(), check.chunkZ())) {
+            if (!isCity(info, roleGrid, check.chunkX(), check.chunkZ())) {
                 int distBlocks = (15 - z) + ((d - 1) << 4);
                 int sampleX = baseX + x;
                 int sampleZ = baseZ + (d << 4);
@@ -190,6 +205,56 @@ public final class CityEdgeBlender {
             }
         }
         return new Outside(0, Integer.MAX_VALUE, 0, 0);
+    }
+
+    private static boolean isCity(BuildingInfo info, ChunkRoleProbe.RoleGrid roleGrid, int chunkX, int chunkZ) {
+        if (roleGrid != null) {
+            return roleGrid.isCity(chunkX, chunkZ);
+        }
+        return ChunkRoleProbe.isCity(info.provider, info.coord.dimension(), chunkX, chunkZ);
+    }
+
+    private static ChunkRoleProbe.RoleGrid roleGrid(BuildingInfo info, int radius) {
+        if (info == null || info.coord == null || info.provider == null) {
+            return null;
+        }
+        String dimension = String.valueOf(info.coord.dimension().location());
+        RoleGridKey key = new RoleGridKey(
+            dimension,
+            info.coord.chunkX(),
+            info.coord.chunkZ(),
+            Math.max(0, Math.min(16, radius)),
+            System.identityHashCode(info.provider)
+        );
+        long now = System.currentTimeMillis();
+        CachedRoleGrid cached = ROLE_GRID_CACHE.get(key);
+        if (cached != null && now - cached.timestampMs() <= ROLE_GRID_TTL_MS) {
+            return cached.grid();
+        }
+        ChunkRoleProbe.RoleGrid grid = ChunkRoleProbe.getGrid(
+            info.provider,
+            info.coord.dimension(),
+            info.coord.chunkX(),
+            info.coord.chunkZ(),
+            radius
+        );
+        ROLE_GRID_CACHE.put(key, new CachedRoleGrid(grid, now));
+        pruneRoleGridCache(now);
+        return grid;
+    }
+
+    private static void pruneRoleGridCache(long now) {
+        int op = ROLE_GRID_OPS.incrementAndGet();
+        if (op < ROLE_GRID_PRUNE_EVERY && ROLE_GRID_CACHE.size() <= ROLE_GRID_CACHE_MAX) {
+            return;
+        }
+        ROLE_GRID_OPS.set(0);
+        for (var entry : ROLE_GRID_CACHE.entrySet()) {
+            CachedRoleGrid value = entry.getValue();
+            if (value == null || now - value.timestampMs() > ROLE_GRID_TTL_MS || ROLE_GRID_CACHE.size() > ROLE_GRID_CACHE_MAX) {
+                ROLE_GRID_CACHE.remove(entry.getKey(), value);
+            }
+        }
     }
 
     private static int legacyMinHeight(BuildingInfo info, ChunkHeightmap heightmap, int x, int z) {

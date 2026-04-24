@@ -25,6 +25,7 @@ import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
 import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
+import org.admany.lc2h.worldgen.lostcities.MultiChunkBoundaryRegistry;
 import org.admany.quantified.core.common.util.TaskScheduler;
 
 import java.util.ArrayList;
@@ -347,6 +348,8 @@ public final class AsyncMultiChunkPlanner {
             ChunkCoord topLeft = new ChunkCoord(multiCoord.dimension(), multiCoord.chunkX() * areaSize, multiCoord.chunkZ() * areaSize);
             org.admany.lc2h.util.lostcities.BuildingInfoCacheInvalidator.invalidateArea(topLeft, areaSize);
             AsyncBuildingInfoPlanner.invalidateArea(topLeft, areaSize);
+            MultiChunkBoundaryRegistry.invalidateArea(topLeft, areaSize);
+            MultiChunkBoundaryRegistry.register(provider, multiCoord, multiChunk);
         } catch (Throwable ignored) {
         }
 
@@ -458,6 +461,7 @@ public final class AsyncMultiChunkPlanner {
             precomputeMultiChunkLookups(provider, multiCoord, areaSize);
             MultiChunk multiChunk = new MultiChunk(multiCoord, areaSize);
             MultiChunk result = ((MultiChunkInvoker) multiChunk).lc2h$calculateBuildings(provider);
+            MultiChunkBoundaryRegistry.register(provider, multiCoord, result);
 
             long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
             if (trace || org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
@@ -659,12 +663,13 @@ public final class AsyncMultiChunkPlanner {
             } else {
                 LostCitiesCacheBudgetManager.recordAccess(MULTICHUNK_BUDGET, multiCoord);
             }
-
             try {
                 int areaSize = provider.getWorldStyle().getMultiSettings().areasize();
                 ChunkCoord topLeft = new ChunkCoord(multiCoord.dimension(), multiCoord.chunkX() * areaSize, multiCoord.chunkZ() * areaSize);
                 org.admany.lc2h.util.lostcities.BuildingInfoCacheInvalidator.invalidateArea(topLeft, areaSize);
                 org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner.invalidateArea(topLeft, areaSize);
+                MultiChunkBoundaryRegistry.invalidateArea(topLeft, areaSize);
+                MultiChunkBoundaryRegistry.register(provider, multiCoord, gameCompatible);
                 ChunkGenTracker.recordMultiChunkIntegrated(topLeft, areaSize);
             } catch (Throwable ignored) {
             }

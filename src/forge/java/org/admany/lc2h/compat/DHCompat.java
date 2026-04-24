@@ -34,10 +34,14 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
 import java.util.Arrays;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 public class DHCompat {
@@ -73,9 +77,25 @@ public class DHCompat {
         Math.max(1, Integer.getInteger("lc2h.dh.sample_batches_per_tick", 8));
     private static final long SAMPLE_BUDGET_NS =
         TimeUnit.MICROSECONDS.toNanos(Long.getLong("lc2h.dh.sample_budget_us", 500L));
+    private static final boolean ASYNC_POPULATE =
+        Boolean.parseBoolean(System.getProperty("lc2h.dh.async_populate", "true"));
+    private static final int POPULATE_THREADS =
+        Math.max(1, Integer.getInteger("lc2h.dh.populate_threads", 1));
+    private static final AtomicInteger POPULATE_THREAD_ID = new AtomicInteger();
+    private static final ExecutorService POPULATE_EXECUTOR =
+        Executors.newFixedThreadPool(POPULATE_THREADS, new DhPopulateThreadFactory());
 
     private interface DhSampleTask {
         boolean runSlice();
+    }
+
+    private static final class DhPopulateThreadFactory implements ThreadFactory {
+        @Override
+        public Thread newThread(Runnable runnable) {
+            Thread thread = new Thread(runnable, "lc2h-dh-populate-" + POPULATE_THREAD_ID.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        }
     }
 
     public static void init() {
@@ -281,7 +301,8 @@ public class DHCompat {
     }
 
     private static final class LevelIntegration {
-        private static final int SAMPLE_BATCH_SIZE = 512;
+        private static final int SAMPLE_BATCH_SIZE =
+            Math.max(32, Integer.getInteger("lc2h.dh.sample_batch_size", 256));
 
         private final Object levelWrapper;
         private final Object wrapperFactory;
@@ -334,7 +355,7 @@ public class DHCompat {
         private CompletableFuture<Void> generateLod(int chunkPosMinX, int chunkPosMinZ, int lodPosX, int lodPosZ, byte detailLevel,
                                                      Object dataSource, ExecutorService executor, Consumer<Object> consumer) {
             CompletableFuture<Void> future = new CompletableFuture<>();
-            Runnable job = () -> runGeneration(chunkPosMinX, chunkPosMinZ, lodPosX, lodPosZ, detailLevel, dataSource, consumer, future);
+            Runnable job = () -> runGeneration(chunkPosMinX, chunkPosMinZ, lodPosX, lodPosZ, detailLevel, dataSource, executor, consumer, future);
             if (executor != null) {
                 try {
                     executor.execute(job);
@@ -348,7 +369,7 @@ public class DHCompat {
         }
 
         private void runGeneration(int chunkPosMinX, int chunkPosMinZ, int lodPosX, int lodPosZ, byte detailLevel,
-                                   Object dataSource, Consumer<Object> consumer, CompletableFuture<Void> resultFuture) {
+                                   Object dataSource, ExecutorService executor, Consumer<Object> consumer, CompletableFuture<Void> resultFuture) {
             try {
                 int width = (Integer) fullDataSourceGetWidth.invoke(dataSource);
                 int scale = 1 << (detailLevel & 0xFF);
@@ -368,18 +389,45 @@ public class DHCompat {
                         resultFuture.completeExceptionally(err);
                         return;
                     }
-                    try {
-                        populateDataSource(detailLevel, dataSource, width, blockSamples, biomeSamples, heights);
-                        consumer.accept(dataSource);
-                        resultFuture.complete(null);
-                    } catch (Throwable t) {
-                        resultFuture.completeExceptionally(t);
-                        LC2H.LOGGER.debug("Distant Horizons generation failed for {}: {}", dimensionName, t.getMessage());
-                    }
+                    submitPopulateWork(executor, () -> {
+                        try {
+                            populateDataSource(detailLevel, dataSource, width, blockSamples, biomeSamples, heights);
+                            consumer.accept(dataSource);
+                            resultFuture.complete(null);
+                        } catch (Throwable t) {
+                            resultFuture.completeExceptionally(t);
+                            LC2H.LOGGER.debug("Distant Horizons generation failed for {}: {}", dimensionName, t.getMessage());
+                        }
+                    });
                 });
             } catch (Throwable t) {
                 resultFuture.completeExceptionally(t);
                 LC2H.LOGGER.debug("Distant Horizons generation failed for {}: {}", dimensionName, t.getMessage());
+            }
+        }
+
+        private void submitPopulateWork(ExecutorService dhExecutor, Runnable job) {
+            if (!ASYNC_POPULATE) {
+                job.run();
+                return;
+            }
+
+            if (dhExecutor != null) {
+                try {
+                    dhExecutor.execute(job);
+                    return;
+                } catch (RejectedExecutionException ignored) {
+                    // Fall back to LC2H's daemon populate worker below.
+                } catch (Throwable t) {
+                    LC2H.LOGGER.debug("Distant Horizons executor rejected populate work for {}: {}", dimensionName, t.toString());
+                }
+            }
+
+            try {
+                POPULATE_EXECUTOR.execute(job);
+            } catch (Throwable t) {
+                LC2H.LOGGER.debug("LC2H DH populate worker rejected work for {}; running inline ({})", dimensionName, t.toString());
+                job.run();
             }
         }
 

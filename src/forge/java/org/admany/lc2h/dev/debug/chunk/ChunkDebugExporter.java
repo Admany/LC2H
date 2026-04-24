@@ -35,6 +35,7 @@ import org.admany.lc2h.mixin.accessor.lostcities.MultiChunkAccessor;
 import org.admany.lc2h.util.lostcities.MultiChunkCacheAccess;
 import org.admany.lc2h.worldgen.async.snapshot.MultiChunkSnapshot;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
+import org.admany.lc2h.worldgen.lostcities.MultiChunkBoundaryRegistry;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -118,6 +119,7 @@ public final class ChunkDebugExporter {
                 } catch (Throwable ignored) {
                 }
                 chunk.add("characteristics", buildCharacteristicsJson(provider, coord, buildingInfo));
+                chunk.add("multichunkBoundary", buildMultiChunkBoundaryJson(provider, coord));
                 chunk.add("undergroundScan", buildUndergroundScanJson(player, coord, buildingInfo));
                 chunk.add("treeSeam", buildTreeSeamDebugJson(player.level(), provider, coord));
                 chunk.add("structures", buildStructureDebugJson(player.level(), coord));
@@ -137,6 +139,32 @@ public final class ChunkDebugExporter {
         Path outFile = outDir.resolve(baseName + ".json");
         Files.writeString(outFile, GSON.toJson(root), StandardCharsets.UTF_8);
         return outFile;
+    }
+
+    private static JsonObject buildMultiChunkBoundaryJson(IDimensionInfo provider, ChunkCoord coord) {
+        JsonObject obj = new JsonObject();
+        if (provider == null || coord == null) {
+            obj.addProperty("available", false);
+            obj.addProperty("reason", "provider-missing");
+            return obj;
+        }
+        try {
+            MultiChunkBoundaryRegistry.Decision decision = MultiChunkBoundaryRegistry.boundaryDecision(provider, coord);
+            obj.addProperty("available", true);
+            obj.addProperty("reserved", decision.reserved());
+            obj.addProperty("reason", decision.reason());
+            obj.addProperty("offset", decision.offset());
+            if (decision.edge() != null) {
+                obj.addProperty("edge", decision.edge().name());
+            }
+            if (decision.contractKey() != null) {
+                obj.addProperty("contractKey", decision.contractKey());
+            }
+        } catch (Throwable t) {
+            obj.addProperty("available", false);
+            obj.addProperty("error", t.getClass().getSimpleName());
+        }
+        return obj;
     }
 
     private static IDimensionInfo resolveProvider(ServerPlayer player) {

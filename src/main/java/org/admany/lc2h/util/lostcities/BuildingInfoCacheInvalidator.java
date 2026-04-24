@@ -2,6 +2,7 @@ package org.admany.lc2h.util.lostcities;
 
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
+import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 
 import java.lang.reflect.Field;
 import java.util.Map;
@@ -13,6 +14,8 @@ import java.util.Map;
  * - If a chunk's characteristics/BuildingInfo are cached as "single" before the MultiChunk (multibuilding plan) is integrated, that chunk may never get re-evaluated as part of the multibuilding, causing ugly seams at multibuilding edges.
  */
 public final class BuildingInfoCacheInvalidator {
+    private static final int BORDER_RADIUS = Math.max(0, Math.min(2,
+        Integer.getInteger("lc2h.multichunk.boundaryInvalidationRadius", 1)));
 
     private static final String[] CACHE_FIELDS = {
         "LC2H_CITY_INFO_MAP",
@@ -29,14 +32,20 @@ public final class BuildingInfoCacheInvalidator {
             return;
         }
 
+        for (int dx = -BORDER_RADIUS; dx < areaSize + BORDER_RADIUS; dx++) {
+            for (int dz = -BORDER_RADIUS; dz < areaSize + BORDER_RADIUS; dz++) {
+                ChunkRoleProbe.invalidate(new ChunkCoord(topLeft.dimension(), topLeft.chunkX() + dx, topLeft.chunkZ() + dz));
+            }
+        }
+
         for (String fieldName : CACHE_FIELDS) {
             Map<?, ?> map = getStaticMap(fieldName);
             if (map == null || map.isEmpty()) {
                 continue;
             }
 
-            for (int dx = 0; dx < areaSize; dx++) {
-                for (int dz = 0; dz < areaSize; dz++) {
+            for (int dx = -BORDER_RADIUS; dx < areaSize + BORDER_RADIUS; dx++) {
+                for (int dz = -BORDER_RADIUS; dz < areaSize + BORDER_RADIUS; dz++) {
                     ChunkCoord key = new ChunkCoord(topLeft.dimension(), topLeft.chunkX() + dx, topLeft.chunkZ() + dz);
                     try {
                         map.remove(key);

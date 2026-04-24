@@ -107,6 +107,8 @@ public class ChunkPostProcessor {
         Math.max(16, Integer.getInteger("lc.floating.city_source_column_max_depth", 96));
     private static final int CITY_FLOATING_SOURCE_MIN_EXPOSED_SIDES =
         Math.max(1, Math.min(4, Integer.getInteger("lc.floating.city_source_column_min_exposed_sides", 3)));
+    private static final boolean ENABLE_WORLDGEN_SHADOW_APPLY =
+        Boolean.parseBoolean(System.getProperty("lc.floating.worldgen_shadow_apply", "true"));
     private static final double TICK_TIME_BUDGET_MS = Math.max(5D, Double.parseDouble(System.getProperty("lc.floating.tick_budget_ms", "35")));
     // If set (>0), forces a fixed work budget. Otherwise, the post processor auto-tunes.
     private static final double OVERRIDE_MAX_WORK_TIME_PER_TICK_MS = Double.parseDouble(System.getProperty("lc.floating.max_work_ms_per_tick", "-1"));
@@ -124,6 +126,26 @@ public class ChunkPostProcessor {
         ThreadLocal.withInitial(BlockPos.MutableBlockPos::new);
     private static final ThreadLocal<BlockPos.MutableBlockPos> LOCAL_BELOW_POS =
         ThreadLocal.withInitial(BlockPos.MutableBlockPos::new);
+    private static final Lc2hTimingRegistry.TimingHandle TIMING_FLOATING_CANDIDATE_CHECK =
+        Lc2hTimingRegistry.bucket("chunk_post.floating_candidate_check");
+    private static final Lc2hTimingRegistry.TimingHandle TIMING_DOUBLE_BLOCK_REPAIR =
+        Lc2hTimingRegistry.bucket("chunk_post.double_block_repair");
+    private static final Lc2hTimingRegistry.TimingHandle TIMING_PROCESS_CHUNK =
+        Lc2hTimingRegistry.bucket("chunk_post.process_chunk");
+    private static final Lc2hTimingRegistry.TimingHandle TIMING_SUBMIT_ASYNC_SCAN =
+        Lc2hTimingRegistry.bucket("chunk_post.submit_async_scan");
+    private static final Lc2hTimingRegistry.TimingHandle TIMING_ASYNC_FLOATING_CANDIDATE =
+        Lc2hTimingRegistry.bucket("chunk_post.async_floating_candidate");
+    private static final Lc2hTimingRegistry.TimingHandle TIMING_SCAN_CHUNK_ASYNC =
+        Lc2hTimingRegistry.bucket("chunk_post.scan_chunk_async");
+    private static final Lc2hTimingRegistry.TimingHandle TIMING_APPLY_FLOATING_CANDIDATE =
+        Lc2hTimingRegistry.bucket("chunk_post.apply_floating_candidate");
+    private static final Lc2hTimingRegistry.TimingHandle TIMING_APPLY_DOUBLE_BLOCK_REPAIR =
+        Lc2hTimingRegistry.bucket("chunk_post.apply_double_block_repair");
+    private static final Lc2hTimingRegistry.TimingHandle TIMING_APPLY_SCAN_RESULT =
+        Lc2hTimingRegistry.bucket("chunk_post.apply_scan_result");
+    private static final Lc2hTimingRegistry.TimingHandle TIMING_DRAIN_ALL =
+        Lc2hTimingRegistry.bucket("chunk_post.drain_all");
 
     private static final String DATA_ROOT = "lc2h";
     private static final String DATA_FLAG = "doubleblock_repaired";
@@ -617,6 +639,20 @@ public class ChunkPostProcessor {
         return 1;
     }
 
+    private static int removeFloatingCandidate(net.minecraft.server.level.WorldGenRegion region, BlockPos pos, BlockState state) {
+        if (!ENABLE_WORLDGEN_SHADOW_APPLY || region == null || pos == null || state == null) {
+            return 0;
+        }
+        if (isPotentialFloatingSourceFluid(state)) {
+            return removeFloatingFluidColumn(region, pos, state.getFluidState());
+        }
+        try {
+            return region.setBlock(pos, AIR_STATE, SAFE_SET_FLAGS, 512) ? 1 : 0;
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
     private static int removeFloatingFluidColumn(ServerLevel level,
                                                  BlockPos origin,
                                                  net.minecraft.world.level.material.FluidState sourceFluid) {
@@ -644,6 +680,40 @@ public class ChunkPostProcessor {
         }
         enqueueShadowRemovalBatch(level, new ChunkPos(origin), packedPositions);
         return packedPositions.size();
+    }
+
+    private static int removeFloatingFluidColumn(net.minecraft.server.level.WorldGenRegion region,
+                                                 BlockPos origin,
+                                                 net.minecraft.world.level.material.FluidState sourceFluid) {
+        if (!ENABLE_WORLDGEN_SHADOW_APPLY || region == null || origin == null || sourceFluid == null || sourceFluid.isEmpty()) {
+            return 0;
+        }
+
+        int removed = 0;
+        int maxDepth = Math.max(CITY_FLOATING_SOURCE_MAX_DEPTH, MAX_FLUID_CLUSTER_SCAN);
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos().set(origin);
+        while (removed < maxDepth) {
+            BlockState state;
+            try {
+                state = region.getBlockState(cursor);
+            } catch (Throwable ignored) {
+                break;
+            }
+            net.minecraft.world.level.material.FluidState fluid = state.getFluidState();
+            if (fluid == null || fluid.isEmpty() || !isSameFloatingFluidFamily(sourceFluid, fluid)) {
+                break;
+            }
+            try {
+                if (!region.setBlock(cursor, AIR_STATE, SAFE_SET_FLAGS, 512)) {
+                    break;
+                }
+            } catch (Throwable ignored) {
+                break;
+            }
+            removed++;
+            cursor.move(Direction.DOWN);
+        }
+        return removed;
     }
 
     private static int countFreeHangingFluidColumnDepth(ServerLevel level,
@@ -793,6 +863,11 @@ public class ChunkPostProcessor {
         }
 
         if (enqueue) {
+            int removed = removeFloatingCandidate(region, pos, state);
+            if (removed > 0) {
+                FIXED_FLOATING += removed;
+                return;
+            }
             try {
                 if (level == null) {
                     level = resolveServerLevel(region);
@@ -1180,14 +1255,20 @@ public class ChunkPostProcessor {
                 continue;
             }
 
-            BlockPos.MutableBlockPos pos = LOCAL_SCAN_POS.get();
-            pos.set(baseX + current.x, current.y, baseZ + current.z);
-            BlockState state = chunk.getBlockState(pos);
+            BlockState state = getSectionState(section, current.x, current.y, current.z);
+            if (state == null) {
+                samples++;
+                current = current.advance(maxY);
+                continue;
+            }
+            BlockPos.MutableBlockPos pos = null;
 
             if (floatingScanEnabled && shouldWatchFloatingCandidate(state)) {
+                pos = LOCAL_SCAN_POS.get();
+                pos.set(baseX + current.x, current.y, baseZ + current.z);
                 long floatingStartNs = System.nanoTime();
                 boolean remove = shouldRemoveFloatingCandidate(level, pos, state);
-                Lc2hTimingRegistry.record("chunk_post.floating_candidate_check", System.nanoTime() - floatingStartNs);
+                TIMING_FLOATING_CANDIDATE_CHECK.record(System.nanoTime() - floatingStartNs);
                 if (remove) {
                     FIXED_FLOATING += removeFloatingCandidate(level, pos, state);
                     LCLogger.debug("Removed floating vegetation on chunk scan at {}", pos);
@@ -1195,9 +1276,13 @@ public class ChunkPostProcessor {
             }
 
             if (doubleBlockEnabled && hasDoubleHalf(state)) {
+                if (pos == null) {
+                    pos = LOCAL_SCAN_POS.get();
+                    pos.set(baseX + current.x, current.y, baseZ + current.z);
+                }
                 long repairStartNs = System.nanoTime();
                 repairDoubleHalf(level, pos, state);
-                Lc2hTimingRegistry.record("chunk_post.double_block_repair", System.nanoTime() - repairStartNs);
+                TIMING_DOUBLE_BLOCK_REPAIR.record(System.nanoTime() - repairStartNs);
             }
 
             samples++;
@@ -1206,7 +1291,7 @@ public class ChunkPostProcessor {
 
         return current;
         } finally {
-            Lc2hTimingRegistry.record("chunk_post.process_chunk", System.nanoTime() - startNs);
+            TIMING_PROCESS_CHUNK.record(System.nanoTime() - startNs);
         }
     }
 
@@ -1220,7 +1305,7 @@ public class ChunkPostProcessor {
             } catch (Throwable t) {
                 INFLIGHT_CHUNK_SCANS.remove(key);
             } finally {
-                Lc2hTimingRegistry.record("chunk_post.submit_async_scan", System.nanoTime() - startNs);
+                TIMING_SUBMIT_ASYNC_SCAN.record(System.nanoTime() - startNs);
             }
         });
     }
@@ -1261,26 +1346,35 @@ public class ChunkPostProcessor {
                 continue;
             }
 
-            BlockPos.MutableBlockPos pos = LOCAL_SCAN_POS.get();
-            pos.set(baseX + current.x, current.y, baseZ + current.z);
             BlockState state;
             try {
-                state = chunk.getBlockState(pos);
+                state = getSectionState(section, current.x, current.y, current.z);
+                if (state == null) {
+                    current = current.advance(maxY);
+                    samples++;
+                    continue;
+                }
             } catch (Throwable ignored) {
                 current = current.advance(maxY);
                 samples++;
                 continue;
             }
+            BlockPos.MutableBlockPos pos = null;
 
             if (floatingScanEnabled && shouldWatchFloatingCandidate(state)) {
+                pos = LOCAL_SCAN_POS.get();
+                pos.set(baseX + current.x, current.y, baseZ + current.z);
                 BlockPos.MutableBlockPos below = LOCAL_BELOW_POS.get();
                 below.set(pos.getX(), pos.getY() - 1, pos.getZ());
                 try {
                     long candidateStartNs = System.nanoTime();
-                    BlockState belowState = chunk.getBlockState(below);
+                    BlockState belowState = getChunkLocalState(chunk, sections, current.x, current.y - 1, current.z);
+                    if (belowState == null) {
+                        belowState = chunk.getBlockState(below);
+                    }
                     boolean unsupported = isUnsupportedSupport(levelFromChunk(chunk), below, belowState);
                     boolean queueCandidate = unsupported;
-                    Lc2hTimingRegistry.record("chunk_post.async_floating_candidate", System.nanoTime() - candidateStartNs);
+                    TIMING_ASYNC_FLOATING_CANDIDATE.record(System.nanoTime() - candidateStartNs);
                     if (queueCandidate) {
                         if (floating == null) {
                             floating = new java.util.ArrayList<>();
@@ -1292,6 +1386,10 @@ public class ChunkPostProcessor {
             }
 
             if (doubleBlockEnabled && hasDoubleHalf(state)) {
+                if (pos == null) {
+                    pos = LOCAL_SCAN_POS.get();
+                    pos.set(baseX + current.x, current.y, baseZ + current.z);
+                }
                 if (doubleBlocks == null) {
                     doubleBlocks = new java.util.ArrayList<>();
                 }
@@ -1304,7 +1402,7 @@ public class ChunkPostProcessor {
 
         return new ChunkScanResult(key, current, floating == null ? List.of() : floating, doubleBlocks == null ? List.of() : doubleBlocks);
         } finally {
-            Lc2hTimingRegistry.record("chunk_post.scan_chunk_async", System.nanoTime() - startNs);
+            TIMING_SCAN_CHUNK_ASYNC.record(System.nanoTime() - startNs);
         }
     }
 
@@ -1345,7 +1443,7 @@ public class ChunkPostProcessor {
             BlockState state = level.getBlockState(pos);
             long floatingStartNs = System.nanoTime();
             boolean remove = shouldRemoveFloatingCandidate(level, pos, state);
-            Lc2hTimingRegistry.record("chunk_post.apply_floating_candidate", System.nanoTime() - floatingStartNs);
+            TIMING_APPLY_FLOATING_CANDIDATE.record(System.nanoTime() - floatingStartNs);
             if (remove) {
                 FIXED_FLOATING += removeFloatingCandidate(level, pos, state);
             }
@@ -1363,7 +1461,7 @@ public class ChunkPostProcessor {
             if (hasDoubleHalf(state)) {
                 long repairStartNs = System.nanoTime();
                 repairDoubleHalf(level, pos, state);
-                Lc2hTimingRegistry.record("chunk_post.apply_double_block_repair", System.nanoTime() - repairStartNs);
+                TIMING_APPLY_DOUBLE_BLOCK_REPAIR.record(System.nanoTime() - repairStartNs);
             }
         }
 
@@ -1375,7 +1473,7 @@ public class ChunkPostProcessor {
         }
 
         maybeFinishRescan(level);
-        Lc2hTimingRegistry.record("chunk_post.apply_scan_result", System.nanoTime() - startNs);
+        TIMING_APPLY_SCAN_RESULT.record(System.nanoTime() - startNs);
     }
 
     private static void maybeFinishRescan(ServerLevel level) {
@@ -1550,7 +1648,7 @@ public class ChunkPostProcessor {
         if (CHUNK_SCAN_PROGRESS.isEmpty()) {
             BATCH_IN_FLIGHT.set(false);
         }
-        Lc2hTimingRegistry.record("chunk_post.drain_all", System.nanoTime() - startNs);
+        TIMING_DRAIN_ALL.record(System.nanoTime() - startNs);
     }
 
     private static void enqueueLoadedChunks(ServerLevel level) {
@@ -1708,6 +1806,37 @@ public class ChunkPostProcessor {
             }
             return floatingScanEnabled && shouldWatchFloatingCandidate(state);
         });
+    }
+
+    private static BlockState getSectionState(LevelChunkSection section, int localX, int worldY, int localZ) {
+        if (section == null) {
+            return null;
+        }
+        try {
+            return section.getStates().get(localX & 15, worldY & 15, localZ & 15);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static BlockState getChunkLocalState(LevelChunk chunk,
+                                                 LevelChunkSection[] sections,
+                                                 int localX,
+                                                 int worldY,
+                                                 int localZ) {
+        if (chunk == null || sections == null) {
+            return null;
+        }
+        int sectionIndex;
+        try {
+            sectionIndex = chunk.getSectionIndex(worldY);
+        } catch (Throwable ignored) {
+            return null;
+        }
+        if (sectionIndex < 0 || sectionIndex >= sections.length) {
+            return null;
+        }
+        return getSectionState(sections[sectionIndex], localX, worldY, localZ);
     }
 
     private static boolean chunkHasInterestingBlocks(LevelChunk chunk,
