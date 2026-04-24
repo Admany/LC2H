@@ -68,6 +68,10 @@ public class MainThreadChunkApplier {
     private static final AtomicInteger DRAIN_PASSES_THIS_TICK = new AtomicInteger(0);
     private static final LongAdder TOTAL_APPLIED = new LongAdder();
     private static final LongAdder TOTAL_CULLED = new LongAdder();
+    private static final Lc2hTimingRegistry.TimingHandle TIMING_INLINE_CLIENT =
+        Lc2hTimingRegistry.bucket("main_thread_apply.inline_client");
+    private static final Lc2hTimingRegistry.TimingHandle TIMING_TASK =
+        Lc2hTimingRegistry.bucket("main_thread_apply.task");
 
     private static final long DEFAULT_TICK_BUDGET_NS = TimeUnit.MILLISECONDS.toNanos(1);
     private static final long STARTUP_TICK_BUDGET_NS = TimeUnit.MILLISECONDS.toNanos(6);
@@ -89,10 +93,13 @@ public class MainThreadChunkApplier {
     private static volatile Block CREATE_WHEEL_BLOCK_CACHE;
     private static volatile Block CREATE_WHEEL_CONTROLLER_BLOCK_CACHE;
     private record CreateRefreshTask(ChunkCoord chunk, BlockPos pos, BlockState state, long readyTick) {}
+    private record BlockRefreshKey(ResourceLocation dimension, long pos) {}
     private record CreateChunkRefreshTask(ChunkCoord chunk, long readyTick) {}
     private static final java.util.concurrent.PriorityBlockingQueue<CreateChunkRefreshTask> CREATE_CHUNK_REFRESH_TASKS =
         new java.util.concurrent.PriorityBlockingQueue<>(64, Comparator.comparingLong(CreateChunkRefreshTask::readyTick));
     private static final java.util.concurrent.ConcurrentHashMap<ChunkCoord, Boolean> CREATE_REFRESH_PENDING =
+        new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.concurrent.ConcurrentHashMap<BlockRefreshKey, Boolean> CREATE_BLOCK_REFRESH_PENDING =
         new java.util.concurrent.ConcurrentHashMap<>();
     private static final java.util.concurrent.PriorityBlockingQueue<CreateRefreshTask> CREATE_REFRESH_TASKS =
         new java.util.concurrent.PriorityBlockingQueue<>(64, Comparator.comparingLong(CreateRefreshTask::readyTick));
@@ -134,7 +141,7 @@ public class MainThreadChunkApplier {
                 LC2H.LOGGER.error("[LC2H] Failed to apply chunk {} on client thread: {}", chunk, t.getMessage());
                 LC2H.LOGGER.debug("[LC2H] Apply error", t);
             } finally {
-                Lc2hTimingRegistry.record("main_thread_apply.inline_client", System.nanoTime() - startNs);
+                TIMING_INLINE_CLIENT.record(System.nanoTime() - startNs);
                 PENDING_TASKS.remove(chunk);
             }
             return;
@@ -392,7 +399,7 @@ public class MainThreadChunkApplier {
                 LC2H.LOGGER.error("[LC2H] Failed to apply chunk {} on main thread: {}", chunk, t.getMessage());
                 LC2H.LOGGER.debug("[LC2H] Apply error", t);
             } finally {
-                Lc2hTimingRegistry.record("main_thread_apply.task", System.nanoTime() - taskStartNs);
+                TIMING_TASK.record(System.nanoTime() - taskStartNs);
             }
 
             applied++;
@@ -512,6 +519,13 @@ public class MainThreadChunkApplier {
                 break;
             }
             CREATE_REFRESH_TASKS.poll();
+            BlockRefreshKey refreshKey = blockRefreshKey(task.chunk(), task.pos());
+            if (refreshKey != null) {
+                CREATE_BLOCK_REFRESH_PENDING.remove(refreshKey);
+            }
+            if (task.chunk() == null || task.chunk().dimension() == null) {
+                continue;
+            }
             ServerLevel level = server.getLevel(task.chunk().dimension());
             if (level != null && level.isLoaded(task.pos())) {
                 try {
@@ -524,6 +538,18 @@ public class MainThreadChunkApplier {
                 }
             }
         }
+    }
+
+    private static boolean markCreateBlockRefreshPending(ChunkCoord chunk, BlockPos pos) {
+        BlockRefreshKey key = blockRefreshKey(chunk, pos);
+        return key != null && CREATE_BLOCK_REFRESH_PENDING.putIfAbsent(key, Boolean.TRUE) == null;
+    }
+
+    private static BlockRefreshKey blockRefreshKey(ChunkCoord chunk, BlockPos pos) {
+        if (chunk == null || chunk.dimension() == null || pos == null) {
+            return null;
+        }
+        return new BlockRefreshKey(chunk.dimension().location(), pos.asLong());
     }
 
     private static void drainRefinedStorageRefresh(MinecraftServer server) {
@@ -743,7 +769,7 @@ public class MainThreadChunkApplier {
                 }
                 BlockPos wheelPos = be.getBlockPos();
                 if (wheelPos != null) {
-                    if (scheduledPositions.add(wheelPos.asLong())) {
+                    if (scheduledPositions.add(wheelPos.asLong()) && markCreateBlockRefreshPending(chunk, wheelPos)) {
                         updates.add(new CreateRefreshTask(chunk, wheelPos, state, nowTick + 1L));
                     }
                     
@@ -770,10 +796,10 @@ public class MainThreadChunkApplier {
                             continue;
                         }
 
-                        if (scheduledPositions.add(middle.asLong())) {
+                        if (scheduledPositions.add(middle.asLong()) && markCreateBlockRefreshPending(chunk, middle)) {
                             updates.add(new CreateRefreshTask(chunk, middle, middleState, nowTick + 1L));
                         }
-                        if (scheduledPositions.add(otherWheel.asLong())) {
+                        if (scheduledPositions.add(otherWheel.asLong()) && markCreateBlockRefreshPending(chunk, otherWheel)) {
                             updates.add(new CreateRefreshTask(chunk, otherWheel, otherState, nowTick + 1L));
                         }
 
