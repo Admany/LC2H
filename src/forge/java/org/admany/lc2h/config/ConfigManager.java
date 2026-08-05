@@ -2,6 +2,8 @@ package org.admany.lc2h.config;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.google.gson.stream.JsonReader;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.fml.loading.FMLEnvironment;
@@ -19,6 +21,10 @@ public class ConfigManager {
     public static ConfigManager.Config CONFIG;
 
     public static boolean ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER = true;
+    public static boolean ENABLE_AUTOMATIC_CHUNK_SCANS = false;
+    public static boolean REJECT_STRUCTURES_IN_CITY_CHUNKS = true;
+    public static int CITY_STRUCTURE_REJECTION_BUFFER_CHUNKS = 0;
+    public static boolean CITY_VERTICAL_TERRAIN_CLEARANCE = false;
     public static boolean ENABLE_LOSTCITIES_GENERATION_LOCK = true;
     public static boolean ENABLE_LOSTCITIES_PART_SLICE_COMPAT = true;
     public static boolean CITY_BLEND_ENABLED = true;
@@ -34,19 +40,20 @@ public class ConfigManager {
     public static String UI_LOCALE = "en_us";
     public static int CACHE_MAX_MB = 384;
     public static long CACHE_MAX_BYTES = 10L * 1024L * 1024L;
-    public static int LOSTCITIES_CACHE_MAX_MB = 384;
-    public static int CACHE_COMBINED_MAX_MB = 512;
+    public static int LOSTCITIES_CACHE_MAX_MB = 128;
+    public static int CACHE_COMBINED_MAX_MB = 256;
     public static boolean CACHE_ENFORCE_COMBINED_MAX = true;
     public static boolean CACHE_SPLIT_EQUAL = false;
-    public static int LOSTCITIES_CACHE_TTL_MINUTES = 20;
-    public static int LOSTCITIES_CACHE_DISK_TTL_HOURS = 6;
+    public static int LOSTCITIES_CACHE_TTL_MINUTES = 10;
+    public static int LOSTCITIES_CACHE_DISK_TTL_HOURS = 2;
 
-    // City edge tree handling
+    // City edge tree handling. These protections are mandatory: a tree that
+    // crosses a Lost Cities boundary is captured and replayed safely.
     public static boolean CITY_BLEND_CLEAR_TREES = true;
     public static boolean CITY_BLEND_TREE_SEAM_FIX = true;
     public static int CITY_BLEND_TREE_SEAM_BUFFER = 3;
     public static float TREE_SEAM_RADIUS_MULTIPLIER = 1.0f;
-    public static boolean SEAM_OWNERSHIP_ENABLED = true;
+    public static boolean SEAM_OWNERSHIP_ENABLED = false;
     public static int SEAM_OWNERSHIP_MAX_INTENTS_PER_CHUNK = 8192;
     public static long SEAM_OWNERSHIP_INTENT_TTL_MS = 10L * 60L * 1000L;
     public static int HIGHWAY_SUPPORT_MAX_DEPTH = 192;
@@ -65,6 +72,12 @@ public class ConfigManager {
 
     public static class Config {
         public boolean enableAsyncDoubleBlockBatcher = true;
+        public boolean enableAutomaticChunkScans = false;
+        public boolean rejectStructuresInCityChunks = true;
+        public int cityStructureRejectionBufferChunks = 0;
+        // Retained only so older config files migrate cleanly. It is ignored:
+        // native Lost Cities terrain correction owns hill shaping.
+        public boolean cityVerticalTerrainClearance = false;
         public boolean enableLostCitiesGenerationLock = true;
         public boolean enableLostCitiesPartSliceCompat = true;
         public boolean enableCacheStatsLogging = true;
@@ -75,12 +88,12 @@ public class ConfigManager {
         public String uiAccentColor = "3A86FF";
         public String uiLocale = "en_us";
         public int cacheMaxMB = 384;
-        public int cacheLostCitiesMaxMB = 384;
-        public int cacheCombinedMaxMB = 512;
+        public int cacheLostCitiesMaxMB = 128;
+        public int cacheCombinedMaxMB = 256;
         public boolean cacheEnforceCombinedMax = true;
         public boolean cacheSplitEqual = false;
-        public int cacheLostCitiesTtlMinutes = 20;
-        public int cacheLostCitiesDiskTtlHours = 6;
+        public int cacheLostCitiesTtlMinutes = 10;
+        public int cacheLostCitiesDiskTtlHours = 2;
 
         // City edge blending
         public boolean cityBlendEnabled = false;
@@ -92,7 +105,7 @@ public class ConfigManager {
         public boolean cityBlendTreeSeamFix = true;
         public int cityBlendTreeSeamBuffer = 3;
         public float treeSeamRadiusMultiplier = 1.0f;
-        public boolean seamOwnershipEnabled = true;
+        public boolean seamOwnershipEnabled = false;
         public int seamOwnershipMaxIntentsPerChunk = 8192;
         public long seamOwnershipIntentTtlMs = 10L * 60L * 1000L;
         public int highwaySupportMaxDepth = 192;
@@ -113,11 +126,16 @@ public class ConfigManager {
         try {
             File configFile = new File(path);
             Config userConfig = null;
+            JsonObject userFields = new JsonObject();
             if (configFile.exists()) {
                 try (FileReader reader = new FileReader(configFile)) {
                     JsonReader jsonReader = new JsonReader(reader);
                     jsonReader.setLenient(true);
-                    userConfig = GSON.fromJson(jsonReader, Config.class);
+                    var parsed = JsonParser.parseReader(jsonReader);
+                    if (parsed != null && parsed.isJsonObject()) {
+                        userFields = parsed.getAsJsonObject();
+                        userConfig = GSON.fromJson(parsed, Config.class);
+                    }
                     if (userConfig == null) {
                         LCLogger.warn("[LC2H] [Config] ⚠ Config file was empty or invalid, creating new one");
                         userConfig = new Config();
@@ -132,20 +150,27 @@ public class ConfigManager {
                 userConfig = new Config();
             }
 
-            Config defaultConfig = new Config();
-            Config merged = defaultConfig;
+            Config merged = new Config();
             try {
                 for (java.lang.reflect.Field field : Config.class.getFields()) {
-                    Object userVal = field.get(userConfig);
-                    Object defVal = field.get(defaultConfig);
-                    if (userVal != null && !userVal.equals(defVal)) {
-                        field.set(merged, userVal);
+                    // Gson initializes absent primitive fields to false/zero. Copying by
+                    // value therefore silently disabled every newly-added default-true
+                    // option in an existing config. Presence-based merging preserves
+                    // explicit user values while allowing new defaults to migrate.
+                    if (userFields.has(field.getName())) {
+                        field.set(merged, field.get(userConfig));
                     }
                 }
             } catch (Exception e) {
                 LCLogger.error("[LC2H] [Config] ❌ Failed to merge config fields: " + e.getMessage());
             }
 
+            // Migrate obsolete opt-outs before writing the normalized config.
+            // The old vertical clear was a blanket terrain deletion pass; the
+            // tree flags could silently turn cross-boundary trees into rejects.
+            merged.cityVerticalTerrainClearance = false;
+            merged.cityBlendClearTrees = true;
+            merged.cityBlendTreeSeamFix = true;
             writePrettyJsonConfig(merged);
 
             return merged;
@@ -166,6 +191,10 @@ public class ConfigManager {
         java.util.Map<String, String> comments = new java.util.LinkedHashMap<>();
         // General Settings
         comments.put("enableAsyncDoubleBlockBatcher", "Enable async batching for double blocks");
+        comments.put("enableAutomaticChunkScans", "Scan every loaded chunk for legacy floating/double-block cleanup. Expensive in large modpacks and disabled by default; use /lc2h rescanChunk for targeted repair.");
+        comments.put("rejectStructuresInCityChunks", "Prevent vanilla and modded StructureStart structures from starting in or intersecting Lost Cities chunks.");
+        comments.put("cityStructureRejectionBufferChunks", "Extra non-city chunk ring kept clear around cities when rejecting structures (0-4).");
+        comments.put("cityVerticalTerrainClearance", "Retired compatibility field. LC2H always preserves native Lost Cities terrain shaping.");
         comments.put("enableLostCitiesGenerationLock", "Recommended: serialize nearby Lost Cities chunk-gen to avoid bugged/duplicated chunks (may reduce max throughput)");
         comments.put("enableLostCitiesPartSliceCompat", "Recommended: prevent crashes from broken/invalid Lost Cities building parts (safe bounds checks)");
         comments.put("enableCacheStatsLogging", "Enable cache stats logging");
@@ -187,11 +216,11 @@ public class ConfigManager {
         comments.put("cityBlendEnabled", "Enable smooth blending of city edges into surrounding terrain");
         comments.put("cityBlendWidth", "Blend width in blocks around city borders");
         comments.put("cityBlendSoftness", "Blend softness (higher = softer falloff)");
-        comments.put("cityBlendClearTrees", "Prevent trees from generating near city borders (within the blend distance)");
-        comments.put("cityBlendTreeSeamFix", "Prevent half-trees on city borders by blocking trees that would cross a city/vanilla seam");
+        comments.put("cityBlendClearTrees", "Always active: protect city boundaries from unsafe tree placement.");
+        comments.put("cityBlendTreeSeamFix", "Always active: capture and replay trees that cross Lost Cities seams.");
         comments.put("cityBlendTreeSeamBuffer", "Buffer (blocks) from a chunk edge to block seam-crossing trees");
         comments.put("treeSeamRadiusMultiplier", "Multiplier for auto-detected tree spread at seams (raise for giant tree modpacks)");
-        comments.put("seamOwnershipEnabled", "Enable chunk seam ownership journal for cross-chunk Lost Cities writes");
+        comments.put("seamOwnershipEnabled", "Experimental: defer cross-chunk Lost Cities writes through a seam journal. Disabled by default because it changes native generation order.");
         comments.put("seamOwnershipMaxIntentsPerChunk", "Maximum deferred seam write intents per target chunk");
         comments.put("seamOwnershipIntentTtlMs", "How long deferred seam write intents are kept before expiring (milliseconds)");
         comments.put("highwaySupportMaxDepth", "Maximum downward support depth for Lost Cities highway pillars (higher reaches seabed in deep oceans)");
@@ -215,6 +244,10 @@ public class ConfigManager {
             java.util.LinkedHashMap<String, String[]> groups = new java.util.LinkedHashMap<>();
             groups.put("General Settings", new String[]{
                 "enableAsyncDoubleBlockBatcher",
+                "enableAutomaticChunkScans",
+                "rejectStructuresInCityChunks",
+                "cityStructureRejectionBufferChunks",
+                "cityVerticalTerrainClearance",
                 "enableLostCitiesGenerationLock",
                 "enableLostCitiesPartSliceCompat",
                 "enableCacheStatsLogging",
@@ -323,6 +356,13 @@ public class ConfigManager {
     public static void initializeGlobals() {
         CONFIG = loadOrCreateConfig();
         ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER = CONFIG.enableAsyncDoubleBlockBatcher;
+        ENABLE_AUTOMATIC_CHUNK_SCANS = CONFIG.enableAutomaticChunkScans;
+        REJECT_STRUCTURES_IN_CITY_CHUNKS = CONFIG.rejectStructuresInCityChunks;
+        CITY_STRUCTURE_REJECTION_BUFFER_CHUNKS = Math.max(0, Math.min(4, CONFIG.cityStructureRejectionBufferChunks));
+        // Do not clear terrain above city ground. Lost Cities' own terrain
+        // correction is height-aware and is the authoritative hill/highway
+        // shaping path. Retain the JSON field only for migration.
+        CITY_VERTICAL_TERRAIN_CLEARANCE = false;
         ENABLE_LOSTCITIES_GENERATION_LOCK = CONFIG.enableLostCitiesGenerationLock;
         ENABLE_LOSTCITIES_PART_SLICE_COMPAT = CONFIG.enableLostCitiesPartSliceCompat;
         ENABLE_CACHE_STATS_LOGGING = CONFIG.enableCacheStatsLogging;
@@ -356,8 +396,8 @@ public class ConfigManager {
         CITY_BLEND_ENABLED = CONFIG.cityBlendEnabled;
         CITY_BLEND_WIDTH = CONFIG.cityBlendWidth;
         CITY_BLEND_SOFTNESS = CONFIG.cityBlendSoftness;
-        CITY_BLEND_CLEAR_TREES = CONFIG.cityBlendClearTrees;
-        CITY_BLEND_TREE_SEAM_FIX = CONFIG.cityBlendTreeSeamFix;
+        CITY_BLEND_CLEAR_TREES = true;
+        CITY_BLEND_TREE_SEAM_FIX = true;
         CITY_BLEND_TREE_SEAM_BUFFER = Math.max(1, CONFIG.cityBlendTreeSeamBuffer);
         TREE_SEAM_RADIUS_MULTIPLIER = (float) Math.max(0.5D, Math.min(3.0D, CONFIG.treeSeamRadiusMultiplier));
         SEAM_OWNERSHIP_ENABLED = CONFIG.seamOwnershipEnabled;

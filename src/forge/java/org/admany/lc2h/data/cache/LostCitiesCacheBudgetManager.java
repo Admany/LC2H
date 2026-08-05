@@ -15,18 +15,22 @@ public final class LostCitiesCacheBudgetManager {
         boolean evict(Object key);
     }
 
-    public static final long DEFAULT_MAX_BYTES = 384L * 1024L * 1024L;
-    private static final long MIN_BYTES = 64L * 1024L * 1024L;
+    public static final long DEFAULT_MAX_BYTES = 128L * 1024L * 1024L;
+    private static final long MIN_BYTES = 32L * 1024L * 1024L;
     private static final AtomicLong MAX_BYTES = new AtomicLong(sanitizeMaxBytes(
         Long.getLong("lc2h.lostcities.cache.maxBytes", DEFAULT_MAX_BYTES)));
     private static final AtomicLong TTL_MS = new AtomicLong(Math.max(60_000L,
-        Long.getLong("lc2h.lostcities.cache.ttlMinutes", 20L) * 60_000L));
+        Long.getLong("lc2h.lostcities.cache.ttlMinutes", 10L) * 60_000L));
     private static final AtomicLong TTL_SWEEP_MS = new AtomicLong(Math.max(10_000L,
         Long.getLong("lc2h.lostcities.cache.ttlSweepMs", 60_000L)));
     private static final int MAX_EVICTIONS_PER_PASS = Math.max(64,
         Integer.getInteger("lc2h.lostcities.cache.maxEvictionsPerPass", 512));
     private static final int MAX_TTL_EVICTIONS_PER_PASS = Math.max(128,
         Integer.getInteger("lc2h.lostcities.cache.maxTtlEvictionsPerPass", 2048));
+    private static final boolean TOUCH_ON_ACCESS = Boolean.parseBoolean(
+        System.getProperty("lc2h.lostcities.cache.touchOnAccess", "false"));
+    private static final int ACCESS_TOUCH_INTERVAL = Math.max(1,
+        Integer.getInteger("lc2h.lostcities.cache.accessTouchInterval", 128));
 
     private static final ConcurrentHashMap<String, CacheGroup> GROUPS = new ConcurrentHashMap<>();
     private static final AtomicLong TOTAL_BYTES = new AtomicLong(0);
@@ -60,10 +64,8 @@ public final class LostCitiesCacheBudgetManager {
         if (group == null || key == null) {
             return;
         }
-        group.recordAccess(key);
-        if (shouldEnforceBudgetNow()) {
-            maybeEvict();
-            CombinedCacheBudgetManager.maybeEvict();
+        if (TOUCH_ON_ACCESS) {
+            group.recordAccess(key);
         }
     }
 
@@ -199,6 +201,7 @@ public final class LostCitiesCacheBudgetManager {
         private final AtomicLong entries = new AtomicLong(0);
         private final ConcurrentLinkedDeque<Object> order = new ConcurrentLinkedDeque<>();
         private final AtomicLong orderSize = new AtomicLong(0);
+        private final AtomicLong accessCount = new AtomicLong(0);
         private final ConcurrentHashMap<Object, Integer> sizes = new ConcurrentHashMap<>();
         private final ConcurrentHashMap<Object, Long> lastAccess = new ConcurrentHashMap<>();
 
@@ -212,7 +215,9 @@ public final class LostCitiesCacheBudgetManager {
         private void recordPut(Object key, long entryBytes, boolean inserted) {
             long now = System.currentTimeMillis();
             if (!inserted) {
-                recordAccessInternal(key, now);
+                if (TOUCH_ON_ACCESS) {
+                    recordAccessInternal(key, now);
+                }
                 return;
             }
             int size = (int) Math.min(Integer.MAX_VALUE, Math.max(1L, entryBytes));
@@ -227,6 +232,10 @@ public final class LostCitiesCacheBudgetManager {
         }
 
         private void recordAccess(Object key) {
+            long count = accessCount.incrementAndGet();
+            if ((count % ACCESS_TOUCH_INTERVAL) != 0L) {
+                return;
+            }
             recordAccessInternal(key, System.currentTimeMillis());
         }
 

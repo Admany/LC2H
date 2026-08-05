@@ -189,13 +189,10 @@ public final class PlannerBatchQueue {
             gpuAssist.whenComplete((ignored, throwable) -> {
                 if (throwable != null) {
                     LC2H.LOGGER.debug("Planner GPU assist failed for {}: {}", key.label(), throwable.toString());
-                    dispatchCpuBatch(key, filtered);
-                    return;
                 }
-                List<PlannerExecutable> remaining = filterGpuSatisfied(filtered);
-                if (!remaining.isEmpty()) {
-                    dispatchCpuBatch(key, remaining);
-                }
+                // The current region shader only warms numeric prefilter data.
+                // Always run the authoritative planner tasks afterwards.
+                dispatchCpuBatch(key, filtered);
             });
             return;
         }

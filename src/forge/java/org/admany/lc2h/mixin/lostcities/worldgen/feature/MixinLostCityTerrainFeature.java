@@ -3,6 +3,7 @@ package org.admany.lc2h.mixin.lostcities.worldgen.feature;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.varia.Tools;
 import mcjty.lostcities.worldgen.ChunkDriver;
+import mcjty.lostcities.worldgen.ChunkHeightmap;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.LostCityTerrainFeature;
 import mcjty.lostcities.worldgen.LostTags;
@@ -11,12 +12,16 @@ import mcjty.lostcities.worldgen.lost.DamageArea;
 import mcjty.lostcities.worldgen.lost.Explosion;
 import mcjty.lostcities.worldgen.lost.cityassets.CompiledPalette;
 import net.minecraft.server.level.WorldGenRegion;
+import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import org.admany.lc2h.config.ConfigManager;
+import org.admany.lc2h.dev.debug.PreCaptureTargetTraceRegistry;
 import org.admany.lc2h.mixin.accessor.lostcities.BuildingInfoAccessor;
 import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
+import org.admany.lc2h.worldgen.gpu.TerrainCorrectionGpuPipeline;
+import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 import org.admany.lc2h.worldgen.lostcities.LostCitiesGenerationLocks;
 import org.admany.lc2h.worldgen.lostcities.LostCityTerrainFeatureGuards;
 import org.spongepowered.asm.mixin.Mixin;
@@ -36,6 +41,9 @@ import java.util.concurrent.TimeUnit;
 
 @Mixin(value = LostCityTerrainFeature.class, remap = false)
 public class MixinLostCityTerrainFeature {
+    @Unique
+    private static final boolean LC2H_SKIP_INTERIOR_TERRAIN_CORRECTION =
+        Boolean.parseBoolean(System.getProperty("lc2h.terrain.skipInteriorCorrection", "false"));
 
 	    @Shadow public ChunkDriver driver;
 	    @Shadow public IDimensionInfo provider;
@@ -85,45 +93,69 @@ public class MixinLostCityTerrainFeature {
         }
     }
 
-	    @Inject(method = "generate(Lnet/minecraft/server/level/WorldGenRegion;Lnet/minecraft/world/level/chunk/ChunkAccess;)V", at = @At("HEAD"), cancellable = true, remap = false)
-	    private void lc2h$warmupGeneration(WorldGenRegion region, ChunkAccess chunk, CallbackInfo ci) {
+    @Inject(method = "correctTerrainShape", at = @At("HEAD"), cancellable = true, remap = false)
+    private void lc2h$skipInteriorTerrainCorrection(WorldGenLevel world, ChunkCoord coord, ChunkHeightmap heightmap, CallbackInfo ci) {
+        if (TerrainCorrectionGpuPipeline.tryCorrect(world, coord, heightmap, provider, driver, air)) {
+            ci.cancel();
+            return;
+        }
+        if (!LC2H_SKIP_INTERIOR_TERRAIN_CORRECTION) {
+            return;
+        }
+        LostCityTerrainFeature self = (LostCityTerrainFeature) (Object) this;
+        if (self.provider == null || coord == null || self.provider.getType() == null) {
+            return;
+        }
+        ChunkRoleProbe.RoleGrid grid = ChunkRoleProbe.getGrid(self.provider, self.provider.getType(), coord.chunkX(), coord.chunkZ(), 1);
+        if (grid.isCity(coord.chunkX(), coord.chunkZ())
+            && grid.isCity(coord.chunkX() + 1, coord.chunkZ())
+            && grid.isCity(coord.chunkX(), coord.chunkZ() + 1)
+            && grid.isCity(coord.chunkX() + 1, coord.chunkZ() + 1)) {
+            PreCaptureTargetTraceRegistry.recordControlFlowAltered(
+                "correctTerrainShape.cancel",
+                coord,
+                "interior-city terrain correction skipped");
+            ci.cancel();
+        }
+    }
+
+    @Inject(method = "generate(Lnet/minecraft/server/level/WorldGenRegion;Lnet/minecraft/world/level/chunk/ChunkAccess;)V", at = @At("HEAD"), remap = false)
+    private void lc2h$warmupGeneration(WorldGenRegion region, ChunkAccess chunk, CallbackInfo ci) {
 	        LostCityTerrainFeature self = (LostCityTerrainFeature) (Object) this;
         if (self.provider.getWorld() == null) return;
         ChunkCoord coord = new ChunkCoord(self.provider.getType(), chunk.getPos().x, chunk.getPos().z);
 
 	        long now = System.currentTimeMillis();
-	        if (LostCityTerrainFeatureGuards.isGeneratedRecently(coord, now)) {
-	            if (LostCityTerrainFeatureGuards.TRACE_GENERATE) {
-	                org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityTerrainFeature.generate skipped (already generated) coord={} thread={}", coord, Thread.currentThread().getName());
-	            }
-	            ChunkGenTracker.recordGenerateSkip(coord, "already-generated");
-	            releaseGenerateLock();
-	            ci.cancel();
-	            return;
+	        if (LostCityTerrainFeatureGuards.isGeneratedRecently(coord, now)
+                && LostCityTerrainFeatureGuards.TRACE_GENERATE) {
+	            org.admany.lc2h.LC2H.LOGGER.debug(
+                    "[LC2H] LostCityTerrainFeature.generate seen as already generated recently (continuing) coord={} thread={}",
+                    coord,
+                    Thread.currentThread().getName()
+                );
 	        }
 	        Long inFlight = LostCityTerrainFeatureGuards.IN_FLIGHT_GENERATE_MS.putIfAbsent(coord, now);
 	        if (inFlight != null) {
 	            if ((now - inFlight) < LostCityTerrainFeatureGuards.GENERATE_GUARD_MS) {
 	                if (LostCityTerrainFeatureGuards.TRACE_GENERATE) {
-	                    org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityTerrainFeature.generate skipped (in-flight) coord={} thread={}", coord, Thread.currentThread().getName());
+	                    org.admany.lc2h.LC2H.LOGGER.debug(
+                            "[LC2H] LostCityTerrainFeature.generate duplicate in-flight (continuing) coord={} thread={}",
+                            coord,
+                            Thread.currentThread().getName()
+                        );
 	                }
-	                ChunkGenTracker.recordGenerateSkip(coord, "in-flight");
-	                releaseGenerateLock();
-	                ci.cancel();
-	                return;
+	            } else {
+	                LostCityTerrainFeatureGuards.IN_FLIGHT_GENERATE_MS.put(coord, now);
 	            }
-	            LostCityTerrainFeatureGuards.IN_FLIGHT_GENERATE_MS.put(coord, now);
 	        }
 	        Long last = LostCityTerrainFeatureGuards.getLastSuccess(coord, now);
-	        if (last != null && (now - last) < LostCityTerrainFeatureGuards.GENERATE_GUARD_MS) {
-	            LostCityTerrainFeatureGuards.IN_FLIGHT_GENERATE_MS.remove(coord);
-	            if (LostCityTerrainFeatureGuards.TRACE_GENERATE) {
-	                org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityTerrainFeature.generate skipped (recent) coord={} thread={}", coord, Thread.currentThread().getName());
-	            }
-	            ChunkGenTracker.recordGenerateSkip(coord, "recent");
-	            releaseGenerateLock();
-	            ci.cancel();
-	            return;
+	        if (last != null && (now - last) < LostCityTerrainFeatureGuards.GENERATE_GUARD_MS
+                && LostCityTerrainFeatureGuards.TRACE_GENERATE) {
+	            org.admany.lc2h.LC2H.LOGGER.debug(
+                    "[LC2H] LostCityTerrainFeature.generate seen as recent success (continuing) coord={} thread={}",
+                    coord,
+                    Thread.currentThread().getName()
+                );
 	        }
 	        if (LostCityTerrainFeatureGuards.TRACE_GENERATE) {
             org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityTerrainFeature.generate begin coord={} thread={}", coord, Thread.currentThread().getName());
@@ -136,9 +168,32 @@ public class MixinLostCityTerrainFeature {
 
         ChunkGenTracker.recordGenerateStart(coord);
 
-        if (!AsyncChunkWarmup.isPreScheduled(coord)) {
+        if (AsyncChunkWarmup.shouldWarmupFromCurrentThread()
+            && AsyncChunkWarmup.shouldAcceptPreschedule()
+            && !AsyncChunkWarmup.isPreScheduled(coord)) {
             AsyncChunkWarmup.preSchedule(self.provider, coord);
         }
+    }
+
+    /**
+     * This call is after Lost Cities has installed the current chunk primer,
+     * and before doNormalChunk reaches correctTerrainShape. Capture only an
+     * immutable snapshot here; no GPU result is awaited on the generation
+     * thread and the original heightmap result is returned unchanged.
+     */
+    @Redirect(
+        method = "generate(Lnet/minecraft/server/level/WorldGenRegion;Lnet/minecraft/world/level/chunk/ChunkAccess;)V",
+        at = @At(value = "INVOKE", target = "Lmcjty/lostcities/worldgen/LostCityTerrainFeature;getHeightmap(Lmcjty/lostcities/varia/ChunkCoord;Lnet/minecraft/world/level/WorldGenLevel;)Lmcjty/lostcities/worldgen/ChunkHeightmap;"),
+        remap = false,
+        require = 1)
+    private ChunkHeightmap lc2h$captureTerrainRegion(LostCityTerrainFeature self,
+                                                       ChunkCoord coord,
+                                                       WorldGenLevel world,
+                                                       WorldGenRegion region,
+                                                       ChunkAccess chunk) {
+        ChunkHeightmap heightmap = self.getHeightmap(coord, world);
+        TerrainCorrectionGpuPipeline.captureUpstream(world, coord, heightmap, provider, chunk, air);
+        return heightmap;
     }
 
 	    @Inject(method = "generate(Lnet/minecraft/server/level/WorldGenRegion;Lnet/minecraft/world/level/chunk/ChunkAccess;)V", at = @At("RETURN"), remap = false)
@@ -159,7 +214,6 @@ public class MixinLostCityTerrainFeature {
     @Inject(method = "breakBlocksForDamageNew", at = @At("HEAD"), cancellable = true, remap = false)
     private void lc2h$initDeterministicDamageSeed(int chunkX, int chunkZ, BuildingInfo info, CallbackInfo ci) {
         if (!ConfigManager.ENABLE_EXPLOSION_DEBRIS) {
-            ci.cancel();
             return;
         }
         long seed = 0L;
@@ -229,7 +283,7 @@ public class MixinLostCityTerrainFeature {
     )
     private boolean lc2h$sharedHasExplosions(DamageArea area, int y) {
         if (!ConfigManager.ENABLE_EXPLOSION_DEBRIS) {
-            return false;
+            return area.hasExplosions(y);
         }
         int[] pos = LC2H_DAMAGE_CONTEXT_POS.get();
         List<double[]> paths = LC2H_DAMAGE_CONTEXT_PATHS.get();
@@ -257,7 +311,7 @@ public class MixinLostCityTerrainFeature {
     )
     private float lc2h$sharedGetDamage(DamageArea area, int x, int y, int z) {
         if (!ConfigManager.ENABLE_EXPLOSION_DEBRIS) {
-            return 0.0f;
+            return area.getDamage(x, y, z);
         }
         List<double[]> paths = LC2H_DAMAGE_CONTEXT_PATHS.get();
         if (paths == null) {
@@ -291,7 +345,7 @@ public class MixinLostCityTerrainFeature {
             return state;
         }
         if (!ConfigManager.ENABLE_EXPLOSION_DEBRIS) {
-            return state;
+            return area.damageBlock(state, provider, y, damage, palette, liquidState);
         }
         Integer baseY = LC2H_DAMAGE_BASE_Y.get();
         if (baseY != null && baseY != Integer.MIN_VALUE && LC2H_DAMAGE_MIN_CITY_DEPTH > 0) {

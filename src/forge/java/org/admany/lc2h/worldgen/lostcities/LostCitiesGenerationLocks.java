@@ -5,6 +5,8 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.atomic.LongAdder;
+import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 
 public final class LostCitiesGenerationLocks {
 
@@ -12,6 +14,12 @@ public final class LostCitiesGenerationLocks {
     private static final int SHIFT = Math.max(0, Integer.getInteger("lc2h.lostcities.genLockShift", 2));
 
     private static final ReentrantLock[] LOCKS = createLocks(STRIPES);
+    private static final LongAdder ACQUISITIONS = new LongAdder();
+    private static final LongAdder CONTENTIONS = new LongAdder();
+    private static final LongAdder WAIT_NS = new LongAdder();
+    private static final LongAdder HOLD_NS = new LongAdder();
+    private static final Lc2hTimingRegistry.TimingHandle WAIT_TIMING = Lc2hTimingRegistry.bucket("lostcities.generation_lock_wait");
+    private static final Lc2hTimingRegistry.TimingHandle HOLD_TIMING = Lc2hTimingRegistry.bucket("lostcities.generation_lock_hold");
 
     private LostCitiesGenerationLocks() {
     }
@@ -19,16 +27,22 @@ public final class LostCitiesGenerationLocks {
     public static final class LockToken implements AutoCloseable {
         private final ReentrantLock lock;
         private final boolean acquired;
+        private final long holdStartNs;
 
         private LockToken(ReentrantLock lock, boolean acquired) {
             this.lock = lock;
             this.acquired = acquired;
+            this.holdStartNs = acquired ? System.nanoTime() : 0L;
         }
 
         @Override
         public void close() {
             if (acquired && lock != null) {
-                lock.unlock();
+                try {
+                    recordHold(System.nanoTime() - holdStartNs);
+                } finally {
+                    lock.unlock();
+                }
             }
         }
     }
@@ -53,11 +67,15 @@ public final class LostCitiesGenerationLocks {
         int h = mix(dimHash ^ (gx * 73471) ^ (gz * 91283));
         ReentrantLock lock = LOCKS[h & (STRIPES - 1)];
 
-        lock.lock();
+        long holdStartNs = acquire(lock);
         try {
             action.run();
         } finally {
-            lock.unlock();
+            try {
+                recordHold(System.nanoTime() - holdStartNs);
+            } finally {
+                lock.unlock();
+            }
         }
     }
 
@@ -71,8 +89,48 @@ public final class LostCitiesGenerationLocks {
         int dimHash = dimension != null ? dimension.location().hashCode() : 0;
         int h = mix(dimHash ^ (gx * 73471) ^ (gz * 91283));
         ReentrantLock lock = LOCKS[h & (STRIPES - 1)];
-        lock.lock();
+        acquire(lock);
         return new LockToken(lock, true);
+    }
+
+    private static long acquire(ReentrantLock lock) {
+        long waitStartNs = System.nanoTime();
+        if (!lock.tryLock()) {
+            CONTENTIONS.increment();
+            lock.lock();
+        }
+        long waitedNs = System.nanoTime() - waitStartNs;
+        ACQUISITIONS.increment();
+        WAIT_NS.add(waitedNs);
+        WAIT_TIMING.record(waitedNs);
+        return System.nanoTime();
+    }
+
+    private static void recordHold(long holdNs) {
+        if (holdNs <= 0L) {
+            return;
+        }
+        HOLD_NS.add(holdNs);
+        HOLD_TIMING.record(holdNs);
+    }
+
+    public static String diagnostics() {
+        long acquisitions = ACQUISITIONS.sum();
+        return "enabled=" + isEnabled()
+            + " stripes=" + STRIPES
+            + " shift=" + SHIFT
+            + " acquisitions=" + acquisitions
+            + " contended=" + CONTENTIONS.sum()
+            + " avgWaitUs=" + formatMicros(WAIT_NS.sum(), acquisitions)
+            + " avgHoldMs=" + formatMillis(HOLD_NS.sum(), acquisitions);
+    }
+
+    private static String formatMicros(long totalNs, long count) {
+        return String.format(java.util.Locale.ROOT, "%.3f", count <= 0L ? 0.0D : totalNs / (double) count / 1_000.0D);
+    }
+
+    private static String formatMillis(long totalNs, long count) {
+        return String.format(java.util.Locale.ROOT, "%.3f", count <= 0L ? 0.0D : totalNs / (double) count / 1_000_000.0D);
     }
 
     private static int mix(int x) {

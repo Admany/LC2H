@@ -5,12 +5,7 @@ import mcjty.lostcities.worldgen.IDimensionInfo;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.worldgen.coord.RegionCoord;
 import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
-import org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner;
-import org.admany.lc2h.worldgen.async.planner.AsyncTerrainFeaturePlanner;
-import org.admany.lc2h.worldgen.async.planner.AsyncTerrainCorrectionPlanner;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
-import org.admany.lc2h.worldgen.async.generator.AsyncPaletteGenerator;
-import org.admany.lc2h.worldgen.async.generator.AsyncDebrisGenerator;
 import org.admany.quantified.api.opencl.QuantifiedOpenCL;
 import org.admany.quantified.api.vulkan.QuantifiedVulkan;
 import org.lwjgl.PointerBuffer;
@@ -85,7 +80,7 @@ public record RegionProcessingGPUTask(IDimensionInfo provider, RegionCoord regio
                 float[] results = new float[outputSize];
                 resultBytes.asFloatBuffer().get(results);
 
-                processGPUResults(results, region);
+                processGPUResults(provider, results, region);
                 GPUMemoryManager.continuousCleanup();
                 AsyncChunkWarmup.recordOpenClBatchProcessed(1);
 
@@ -109,7 +104,7 @@ public record RegionProcessingGPUTask(IDimensionInfo provider, RegionCoord regio
         try {
             float[] encodedCoords = buildInputCoords(provider, region);
             float[] results = context.terrainGeneration(encodedCoords);
-            processGPUResults(results, 0, region);
+            processGPUResults(provider, results, 0, region);
             GPUMemoryManager.continuousCleanup();
             AsyncChunkWarmup.recordVulkanBatchProcessed(1);
             LC2H.LOGGER.debug("[LC2H] Successfully processed region {} on Vulkan device {}", region, context.deviceName());
@@ -130,11 +125,6 @@ public record RegionProcessingGPUTask(IDimensionInfo provider, RegionCoord regio
                     ChunkCoord chunk = region.getChunk(localX, localZ);
 
                     AsyncMultiChunkPlanner.preSchedule(provider, chunk);
-                    AsyncBuildingInfoPlanner.preSchedule(provider, chunk);
-                    AsyncTerrainFeaturePlanner.preSchedule(provider, chunk);
-                    AsyncPaletteGenerator.preSchedule(provider, chunk);
-                    AsyncDebrisGenerator.preSchedule(provider, chunk);
-                    AsyncTerrainCorrectionPlanner.preSchedule(provider, chunk);
                 }
             }
             return Boolean.TRUE;
@@ -160,19 +150,21 @@ public record RegionProcessingGPUTask(IDimensionInfo provider, RegionCoord regio
         }
     }
 
-    static void processGPUResults(float[] results, RegionCoord region) {
-        processGPUResults(results, 0, region);
+    static void processGPUResults(IDimensionInfo provider, float[] results, RegionCoord region) {
+        processGPUResults(provider, results, 0, region);
     }
 
-    static void processGPUResults(float[] results, int resultOffset, RegionCoord region) {
+    static void processGPUResults(IDimensionInfo provider, float[] results, int resultOffset, RegionCoord region) {
         for (int localX = 0; localX < 5; localX++) {
             for (int localZ = 0; localZ < 5; localZ++) {
                 ChunkCoord chunk = region.getChunk(localX, localZ);
-                int chunkIndex = resultOffset + localX * 5 + localZ;
                 int summaryOffset = resultOffset + (localX * 5 + localZ) * SUMMARY_COMPONENTS;
                 float[] gpuTerrainData = extractChunkSummary(results, summaryOffset);
 
-                injectGPUDataIntoCaches(chunk, gpuTerrainData);
+                // Retain the optional prefilter result for diagnostics/residency,
+                // but never mistake it for the authoritative Lost Cities plan.
+                GPUMemoryManager.putGPUData(chunk, gpuTerrainData, AsyncMultiChunkPlanner.GPU_DATA_CACHE);
+                AsyncMultiChunkPlanner.preSchedule(provider, chunk);
 
                 LC2H.LOGGER.debug("[LC2H] Injected GPU data into caches for chunk {} in region {}", chunk, region);
             }
@@ -188,16 +180,4 @@ public record RegionProcessingGPUTask(IDimensionInfo provider, RegionCoord regio
         return summary;
     }
 
-    private static void injectGPUDataIntoCaches(ChunkCoord chunk, float[] gpuData) {
-        boolean cachedInRam = GPUMemoryManager.putGPUData(chunk, gpuData, AsyncMultiChunkPlanner.GPU_DATA_CACHE);
-        if (!cachedInRam) {
-            return;
-        }
-
-        GPUMemoryManager.putGPUDataRuntimeOnly(chunk, gpuData, AsyncBuildingInfoPlanner.GPU_DATA_CACHE);
-        GPUMemoryManager.putGPUDataRuntimeOnly(chunk, gpuData, AsyncTerrainFeaturePlanner.GPU_DATA_CACHE);
-        GPUMemoryManager.putGPUDataRuntimeOnly(chunk, gpuData, AsyncPaletteGenerator.GPU_DATA_CACHE);
-        GPUMemoryManager.putGPUDataRuntimeOnly(chunk, gpuData, AsyncDebrisGenerator.GPU_DATA_CACHE);
-        GPUMemoryManager.putGPUDataRuntimeOnly(chunk, gpuData, AsyncTerrainCorrectionPlanner.GPU_DATA_CACHE);
-    }
 }

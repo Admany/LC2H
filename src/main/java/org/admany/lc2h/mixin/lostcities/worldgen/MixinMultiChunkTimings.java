@@ -18,7 +18,7 @@ public class MixinMultiChunkTimings {
                     value = "INVOKE",
                     target = "Lorg/apache/logging/log4j/Logger;info(Ljava/lang/String;[Ljava/lang/Object;)V"
             ),
-            require = 0
+            require = 0, expect = 0
     )
     private void lc2h$redirectMultiChunkTimingInfo(Logger logger, String message, Object[] params) {
         if (ENABLE_INFO_TIMINGS) {
@@ -37,7 +37,7 @@ public class MixinMultiChunkTimings {
                     value = "INVOKE",
                     target = "Lorg/apache/logging/log4j/Logger;debug(Ljava/lang/String;[Ljava/lang/Object;)V"
             ),
-            require = 0
+            require = 0, expect = 0
     )
     private void lc2h$redirectMultiChunkTimingDebug(Logger logger, String message, Object[] params) {
         logger.debug(message, params);

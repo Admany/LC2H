@@ -5,6 +5,9 @@ import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
+import mcjty.lostcities.worldgen.lost.City;
+import mcjty.lostcities.worldgen.lost.CitySphere;
+import mcjty.lostcities.worldgen.lost.Highway;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 
@@ -21,8 +24,17 @@ public final class ChunkRoleProbe {
         Integer.getInteger("lc2h.chunkRoleProbe.pruneEvery", 512));
 
     private static final ConcurrentHashMap<ChunkCoord, Entry> CACHE = new ConcurrentHashMap<>();
+    /**
+     * Terrain blending runs before normal Lost Cities feature placement. At
+     * that point characteristics snapshots can still be replaced after a
+     * multichunk plan integrates, so they are not authoritative inputs for a
+     * density decision. Keep a provider-scoped cache of the raw Lost Cities
+     * predicates instead. It is cleared with the rest of the lifecycle state.
+     */
+    private static final ConcurrentHashMap<IDimensionInfo, ConcurrentHashMap<ChunkCoord, Probe>>
+        TERRAIN_CACHE = new ConcurrentHashMap<>();
     private static final AtomicInteger OP_COUNTER = new AtomicInteger(0);
-    private static final Probe EMPTY_PROBE = new Probe(false, false, 0, false, false, false);
+    private static final Probe EMPTY_PROBE = new Probe(false, false, 0, false, -1, false, false, false);
 
     private ChunkRoleProbe() {
     }
@@ -32,11 +44,17 @@ public final class ChunkRoleProbe {
         boolean couldHaveBuilding,
         int cityLevel,
         boolean hasHighway,
+        int highwayLevel,
+        boolean highwayTunnel,
         boolean hasRailway,
         boolean buildingTypeKnown
     ) {
         public boolean isUnsafe() {
             return isCity || hasHighway || hasRailway;
+        }
+
+        public boolean hasSurfaceHighway() {
+            return hasHighway && !highwayTunnel;
         }
     }
 
@@ -67,7 +85,8 @@ public final class ChunkRoleProbe {
         }
     }
 
-    private record Entry(Probe probe, LostChunkCharacteristics characteristics, long timestampMs, boolean routeKnown) {
+    private record Entry(Probe probe, LostChunkCharacteristics characteristics, long timestampMs,
+                         boolean highwayKnown, boolean routeKnown) {
     }
 
     public static Probe get(IDimensionInfo dimInfo, ResourceKey<Level> dim, int chunkX, int chunkZ) {
@@ -155,6 +174,81 @@ public final class ChunkRoleProbe {
         return new RoleGrid(dim, centerX, centerZ, clampedRadius, probes);
     }
 
+    /**
+     * Route-aware grid for terrain and structure decisions which must see
+     * Lost Cities highways even when a cached BuildingInfo snapshot only
+     * contains the cheaper city characteristics.
+     */
+    public static RoleGrid getInfrastructureGrid(IDimensionInfo dimInfo,
+                                                 ResourceKey<Level> dim,
+                                                 int centerX,
+                                                 int centerZ,
+                                                 int radius) {
+        int clampedRadius = Math.max(0, Math.min(16, radius));
+        int diameter = clampedRadius * 2 + 1;
+        Probe[] probes = new Probe[diameter * diameter];
+        int index = 0;
+        for (int dz = -clampedRadius; dz <= clampedRadius; dz++) {
+            for (int dx = -clampedRadius; dx <= clampedRadius; dx++) {
+                int chunkX = centerX + dx;
+                int chunkZ = centerZ + dz;
+                Probe probe = get(dimInfo, dim, chunkX, chunkZ);
+                probes[index++] = probe.isCity()
+                    ? probe
+                    : getHighwayAware(dimInfo, dim, chunkX, chunkZ);
+            }
+        }
+        return new RoleGrid(dim, centerX, centerZ, clampedRadius, probes);
+    }
+
+    /**
+     * Stable early-worldgen role grid for density and city-floor blending.
+     *
+     * <p>This intentionally bypasses {@link BuildingInfoSnapshotStore} and
+     * {@link BuildingInfo#getChunkCharacteristics}: those represent a later,
+     * mutable planning stage. The raw city factor is the predicate Lost
+     * Cities itself starts {@code isCityRaw} from, while highway levels are
+     * coordinate/seed derived. Only successfully resolved probes are cached.</p>
+     */
+    public static RoleGrid getStableTerrainGrid(IDimensionInfo dimInfo,
+                                                ResourceKey<Level> dim,
+                                                int centerX,
+                                                int centerZ,
+                                                int radius) {
+        int clampedRadius = Math.max(0, Math.min(16, radius));
+        int diameter = clampedRadius * 2 + 1;
+        Probe[] probes = new Probe[diameter * diameter];
+        int index = 0;
+        for (int dz = -clampedRadius; dz <= clampedRadius; dz++) {
+            for (int dx = -clampedRadius; dx <= clampedRadius; dx++) {
+                probes[index++] = getStableTerrainProbe(dimInfo, dim, centerX + dx, centerZ + dz);
+            }
+        }
+        return new RoleGrid(dim, centerX, centerZ, clampedRadius, probes);
+    }
+
+    public static Probe getStableTerrainProbe(IDimensionInfo dimInfo,
+                                              ResourceKey<Level> dim,
+                                              int chunkX,
+                                              int chunkZ) {
+        if (dimInfo == null || dim == null) {
+            return EMPTY_PROBE;
+        }
+        ChunkCoord coord = new ChunkCoord(dim, chunkX, chunkZ);
+        ConcurrentHashMap<ChunkCoord, Probe> providerCache =
+            TERRAIN_CACHE.computeIfAbsent(dimInfo, ignored -> new ConcurrentHashMap<>());
+        Probe cached = providerCache.get(coord);
+        if (cached != null) {
+            return cached;
+        }
+        Probe resolved = computeStableTerrainProbe(dimInfo, coord);
+        if (resolved == null) {
+            return EMPTY_PROBE;
+        }
+        Probe previous = providerCache.putIfAbsent(coord, resolved);
+        return previous != null ? previous : resolved;
+    }
+
     public static boolean isUnsafe(IDimensionInfo dimInfo, ResourceKey<Level> dim, int chunkX, int chunkZ) {
         return getRouteAware(dimInfo, dim, chunkX, chunkZ).isUnsafe();
     }
@@ -188,6 +282,7 @@ public final class ChunkRoleProbe {
 
     public static void clear() {
         CACHE.clear();
+        TERRAIN_CACHE.clear();
         BuildingInfoSnapshotStore.clear();
     }
 
@@ -215,10 +310,54 @@ public final class ChunkRoleProbe {
             snapshot.couldHaveBuilding(),
             snapshot.cityLevel(),
             false,
+            -1,
+            false,
             false,
             snapshot.buildingTypeKnown()
         );
-        return new Entry(probe, snapshot.characteristics(), snapshot.timestampMs(), false);
+        return new Entry(probe, snapshot.characteristics(), snapshot.timestampMs(), false, false);
+    }
+
+    private static Probe getHighwayAware(IDimensionInfo dimInfo, ResourceKey<Level> dim,
+                                         int chunkX, int chunkZ) {
+        if (dimInfo == null || dim == null) {
+            return EMPTY_PROBE;
+        }
+        long now = System.currentTimeMillis();
+        ChunkCoord coord = new ChunkCoord(dim, chunkX, chunkZ);
+        Entry cached = CACHE.get(coord);
+        if (cached != null && isFresh(cached, now) && cached.highwayKnown()) {
+            return cached.probe();
+        }
+
+        Probe base = get(dimInfo, dim, chunkX, chunkZ);
+        cached = CACHE.get(coord);
+        LostCityProfile profile = null;
+        try {
+            profile = dimInfo.getProfile();
+        } catch (Exception ignored) {
+        }
+        boolean hasHighway = false;
+        int highwayLevel = -1;
+        boolean highwayTunnel = false;
+        try {
+            if (profile != null) {
+                int xLevel = Highway.getXHighwayLevel(coord, dimInfo, profile);
+                int zLevel = Highway.getZHighwayLevel(coord, dimInfo, profile);
+                highwayLevel = Math.max(xLevel, zLevel);
+                hasHighway = highwayLevel >= 0;
+                highwayTunnel = hasHighway && isHighwayTunnel(dimInfo, coord, profile,
+                    base.isCity(), base.cityLevel(), highwayLevel);
+            }
+        } catch (Exception ignored) {
+        }
+        Probe upgraded = new Probe(base.isCity(), base.couldHaveBuilding(), base.cityLevel(),
+            hasHighway, highwayLevel, highwayTunnel, base.hasRailway(), base.buildingTypeKnown());
+        CACHE.put(coord, new Entry(upgraded,
+            cached == null ? null : cached.characteristics(), now, true,
+            cached != null && cached.routeKnown()));
+        maybePrune(now);
+        return upgraded;
     }
 
     private static Probe getRouteAware(IDimensionInfo dimInfo, ResourceKey<Level> dim, int chunkX, int chunkZ) {
@@ -271,17 +410,79 @@ public final class ChunkRoleProbe {
         }
 
         boolean hasHighway = false;
+        int highwayLevel = -1;
+        boolean highwayTunnel = false;
         boolean hasRailway = false;
         try {
             if (profile != null) {
                 hasHighway = BuildingInfo.hasHighway(coord, dimInfo, profile);
+                if (hasHighway) {
+                    highwayLevel = Math.max(
+                        Highway.getXHighwayLevel(coord, dimInfo, profile),
+                        Highway.getZHighwayLevel(coord, dimInfo, profile));
+                    highwayTunnel = isHighwayTunnel(dimInfo, coord, profile,
+                        isCity, cityLevel, highwayLevel);
+                }
                 hasRailway = BuildingInfo.hasRailway(coord, dimInfo, profile);
             }
         } catch (Exception ignored) {
         }
 
-        Probe probe = new Probe(isCity, couldHaveBuilding, cityLevel, hasHighway, hasRailway, buildingTypeKnown);
-        return new Entry(probe, characteristics, now, true);
+        Probe probe = new Probe(isCity, couldHaveBuilding, cityLevel, hasHighway,
+            highwayLevel, highwayTunnel, hasRailway, buildingTypeKnown);
+        return new Entry(probe, characteristics, now, true, true);
+    }
+
+    private static Probe computeStableTerrainProbe(IDimensionInfo dimInfo, ChunkCoord coord) {
+        try {
+            LostCityProfile profile = dimInfo.getProfile();
+            if (profile == null) {
+                return null;
+            }
+
+            boolean isCity = !BuildingInfo.isVoidChunk(coord, dimInfo);
+            if (isCity && (profile.isSpace() || profile.isSpheres())) {
+                isCity = !CitySphere.onCitySphereBorder(coord, dimInfo)
+                    && !CitySphere.hasMonorailStation(coord, dimInfo);
+            }
+            if (isCity) {
+                isCity = City.getCityFactor(coord, dimInfo, profile) > profile.CITY_THRESHOLD;
+            }
+
+            int cityLevel = isCity ? BuildingInfo.getCityLevel(coord, dimInfo) : 0;
+            int xLevel = Highway.getXHighwayLevel(coord, dimInfo, profile);
+            int zLevel = Highway.getZHighwayLevel(coord, dimInfo, profile);
+            int highwayLevel = Math.max(xLevel, zLevel);
+            boolean hasHighway = highwayLevel >= 0;
+            boolean highwayTunnel = hasHighway && isHighwayTunnel(dimInfo, coord, profile,
+                isCity, cityLevel, highwayLevel);
+            return new Probe(isCity, false, cityLevel, hasHighway, highwayLevel,
+                highwayTunnel, false, false);
+        } catch (Throwable ignored) {
+            // Do not poison the lifecycle cache with a false negative. A later
+            // call can retry once the provider has become fully usable.
+            return null;
+        }
+    }
+
+    /** Mirrors Lost Cities' BuildingInfo#isTunnel(level) decision without
+     * constructing a full BuildingInfo for every terrain-blend sample. */
+    private static boolean isHighwayTunnel(IDimensionInfo dimInfo,
+                                           ChunkCoord coord,
+                                           LostCityProfile profile,
+                                           boolean isCity,
+                                           int cityLevel,
+                                           int highwayLevel) {
+        if (highwayLevel < 0) {
+            return false;
+        }
+        if (isCity) {
+            return cityLevel > highwayLevel;
+        }
+        int routeY = profile.GROUNDLEVEL
+            + highwayLevel * mcjty.lostcities.worldgen.LostCityTerrainFeature.FLOORHEIGHT
+            + 3;
+        return dimInfo.getHeightmap(coord).getHeight() > routeY;
     }
 
     private static boolean isFresh(Entry entry, long now) {

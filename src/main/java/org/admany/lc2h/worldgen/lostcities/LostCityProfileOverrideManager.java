@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public final class LostCityProfileOverrideManager {
     private static final ConcurrentHashMap<ResourceKey<Level>, Override> OVERRIDES = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<ResourceKey<Level>, Override> OUTSIDE_OVERRIDES = new ConcurrentHashMap<>();
     private static final AtomicLong VERSION = new AtomicLong();
 
     private LostCityProfileOverrideManager() {
@@ -41,6 +42,20 @@ public final class LostCityProfileOverrideManager {
         return override == null ? Optional.empty() : Optional.of(override.profileName());
     }
 
+    public static String setOutsideOverride(ResourceKey<Level> dimension, String profileName) {
+        String normalized = normalize(profileName);
+        if (dimension == null || normalized == null) {
+            return null;
+        }
+        OUTSIDE_OVERRIDES.put(dimension, new Override(normalized, VERSION.incrementAndGet()));
+        return normalized;
+    }
+
+    public static Optional<String> outsideOverrideName(ResourceKey<Level> dimension) {
+        Override override = dimension == null ? null : OUTSIDE_OVERRIDES.get(dimension);
+        return override == null ? Optional.empty() : Optional.of(override.profileName());
+    }
+
     public static LostCityProfile resolveProfile(WorldGenLevel world, LostCityProfile fallback) {
         if (world == null) {
             return fallback;
@@ -57,14 +72,26 @@ public final class LostCityProfileOverrideManager {
         return profile != null ? profile : fallback;
     }
 
+    public static LostCityProfile resolveOutsideProfile(ResourceKey<Level> dimension, LostCityProfile fallback) {
+        Override override = dimension == null ? null : OUTSIDE_OVERRIDES.get(dimension);
+        if (override == null) {
+            return fallback;
+        }
+        LostCityProfile profile = ProfileSetup.STANDARD_PROFILES.get(override.profileName());
+        return profile != null ? profile : fallback;
+    }
+
     public static String profileToken(WorldGenLevel world, LostCityProfile effectiveProfile) {
         ResourceKey<Level> dimension = world == null ? null : world.getLevel().dimension();
         Override override = dimension == null ? null : OVERRIDES.get(dimension);
+        Override outsideOverride = dimension == null ? null : OUTSIDE_OVERRIDES.get(dimension);
         String name = effectiveProfile == null ? "<null>" : effectiveProfile.getName();
-        if (override == null) {
+        if (override == null && outsideOverride == null) {
             return "base:" + name;
         }
-        return "override:" + override.profileName() + ":" + override.version() + ":" + name;
+        String profilePart = override == null ? "base" : "override:" + override.profileName() + ":" + override.version();
+        String outsidePart = outsideOverride == null ? "outside:base" : "outside:" + outsideOverride.profileName() + ":" + outsideOverride.version();
+        return profilePart + "|" + outsidePart + "|" + name;
     }
 
     public static boolean hasKnownProfile(String profileName) {
@@ -124,6 +151,11 @@ public final class LostCityProfileOverrideManager {
         }
 
         return names;
+    }
+
+    public static void clearAllOverrides() {
+        OVERRIDES.clear();
+        OUTSIDE_OVERRIDES.clear();
     }
 
     private static String normalize(String profileName) {

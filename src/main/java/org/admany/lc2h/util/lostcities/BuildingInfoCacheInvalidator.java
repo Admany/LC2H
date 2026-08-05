@@ -19,9 +19,7 @@ public final class BuildingInfoCacheInvalidator {
 
     private static final String[] CACHE_FIELDS = {
         "LC2H_CITY_INFO_MAP",
-        "LC2H_BUILDING_INFO_MAP",
-        "LC2H_CITY_LEVEL_CACHE",
-        "LC2H_IS_CITY_RAW_CACHE"
+        "LC2H_BUILDING_INFO_MAP"
     };
 
     private BuildingInfoCacheInvalidator() {

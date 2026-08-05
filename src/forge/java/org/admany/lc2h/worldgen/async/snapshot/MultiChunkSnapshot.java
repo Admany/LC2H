@@ -7,6 +7,7 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.Level;
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.lc2h.mixin.accessor.lostcities.MultiChunkAccessor;
 
 import java.io.ByteArrayInputStream;
@@ -36,6 +37,7 @@ public final class MultiChunkSnapshot {
     }
 
     public static byte[] encode(MultiChunk multiChunk) {
+        long startNs = System.nanoTime();
         if (multiChunk == null || !MultiChunkMBReflector.ready()) {
             return null;
         }
@@ -68,10 +70,13 @@ public final class MultiChunkSnapshot {
         } catch (Throwable throwable) {
             LC2H.LOGGER.debug("Failed to encode multichunk snapshot: {}", throwable.toString());
             return null;
+        } finally {
+            Lc2hTimingRegistry.record("multichunk.snapshot_encode", System.nanoTime() - startNs);
         }
     }
 
     public static MultiChunk decode(byte[] payload) {
+        long startNs = System.nanoTime();
         if (payload == null || payload.length == 0 || !MultiChunkMBReflector.ready()) {
             return null;
         }
@@ -109,6 +114,8 @@ public final class MultiChunkSnapshot {
         } catch (Throwable throwable) {
             LC2H.LOGGER.debug("Failed to decode multichunk snapshot: {}", throwable.toString());
             return null;
+        } finally {
+            Lc2hTimingRegistry.record("multichunk.snapshot_decode", System.nanoTime() - startNs);
         }
     }
 

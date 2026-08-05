@@ -466,6 +466,10 @@ final class Lc2hConfigController {
         }
         ConfigManager.Config c = new ConfigManager.Config();
         c.enableAsyncDoubleBlockBatcher = src.enableAsyncDoubleBlockBatcher;
+        c.enableAutomaticChunkScans = src.enableAutomaticChunkScans;
+        c.rejectStructuresInCityChunks = src.rejectStructuresInCityChunks;
+        c.cityStructureRejectionBufferChunks = src.cityStructureRejectionBufferChunks;
+        c.cityVerticalTerrainClearance = src.cityVerticalTerrainClearance;
         c.enableLostCitiesGenerationLock = src.enableLostCitiesGenerationLock;
         c.enableLostCitiesPartSliceCompat = src.enableLostCitiesPartSliceCompat;
         c.enableCacheStatsLogging = src.enableCacheStatsLogging;

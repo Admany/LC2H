@@ -1,0 +1,15 @@
+package org.admany.lc2h.worldgen.kernel;
+
+public enum LostCityKernelStage {
+    CLASSIFY_CHUNKS,
+    PLAN_MULTICHUNK,
+    PLAN_ROADS,
+    PLAN_RAILWAYS,
+    PLAN_BUILDINGS,
+    PLAN_BUILDING_INFO,
+    PLAN_TERRAIN,
+    PLAN_TERRAIN_CORRECTION,
+    PLAN_CITY_LAYOUT,
+    MERGE_MUTATION_INTENTS,
+    APPLY_MUTATION_INTENTS
+}

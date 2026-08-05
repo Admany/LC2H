@@ -16,6 +16,10 @@ public final class ServerRescheduler {
 
     public static void setServer(MinecraftServer srv) {
         server = srv;
+        if (srv == null) {
+            clearPending();
+            return;
+        }
         drainPending();
     }
 
@@ -51,6 +55,14 @@ public final class ServerRescheduler {
             return;
         }
         PENDING.add(task);
+    }
+
+    public static int clearPending() {
+        int cleared = 0;
+        while (PENDING.poll() != null) {
+            cleared++;
+        }
+        return cleared;
     }
 
     private static boolean shouldRunInlineClient() {

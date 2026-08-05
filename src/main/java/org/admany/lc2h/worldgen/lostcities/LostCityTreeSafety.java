@@ -113,16 +113,27 @@ public final class LostCityTreeSafety {
         return new ChunkUnsafeLookup(dimInfo, dim).isUnsafe(chunkX, chunkZ);
     }
 
+    static boolean isUnsafeChunk(ChunkUnsafeLookup unsafeLookup, int chunkX, int chunkZ) {
+        return unsafeLookup != null && unsafeLookup.isUnsafe(chunkX, chunkZ);
+    }
+
     public static boolean isNearUnsafeChunk(IDimensionInfo dimInfo, ResourceKey<Level> dim, int worldX, int worldZ, int radiusBlocks) {
         if (dimInfo == null || dim == null || radiusBlocks <= 0) {
             return false;
         }
 
+        ChunkUnsafeLookup unsafeLookup = new ChunkUnsafeLookup(dimInfo, dim);
+        return isNearUnsafeChunk(unsafeLookup, worldX, worldZ, radiusBlocks);
+    }
+
+    static boolean isNearUnsafeChunk(ChunkUnsafeLookup unsafeLookup, int worldX, int worldZ, int radiusBlocks) {
+        if (unsafeLookup == null || radiusBlocks <= 0) {
+            return false;
+        }
         int maxDistSq = radiusBlocks * radiusBlocks;
         int originChunkX = worldX >> 4;
         int originChunkZ = worldZ >> 4;
         int radiusChunks = ((radiusBlocks + 15) / 16) + 1;
-        ChunkUnsafeLookup unsafeLookup = new ChunkUnsafeLookup(dimInfo, dim);
 
         for (int dcx = -radiusChunks; dcx <= radiusChunks; dcx++) {
             int cx = originChunkX + dcx;
@@ -165,11 +176,18 @@ public final class LostCityTreeSafety {
             return false;
         }
 
+        ChunkUnsafeLookup unsafeLookup = new ChunkUnsafeLookup(dimInfo, dim);
+        return isNearUnsafeTransition(unsafeLookup, worldX, worldZ, radiusBlocks);
+    }
+
+    static boolean isNearUnsafeTransition(ChunkUnsafeLookup unsafeLookup, int worldX, int worldZ, int radiusBlocks) {
+        if (unsafeLookup == null || radiusBlocks <= 0) {
+            return false;
+        }
         int maxDistSq = radiusBlocks * radiusBlocks;
         int originChunkX = worldX >> 4;
         int originChunkZ = worldZ >> 4;
         int radiusChunks = ((radiusBlocks + 15) / 16) + 1;
-        ChunkUnsafeLookup unsafeLookup = new ChunkUnsafeLookup(dimInfo, dim);
         boolean originUnsafe = unsafeLookup.isUnsafe(originChunkX, originChunkZ);
 
         for (int dcx = -radiusChunks; dcx <= radiusChunks; dcx++) {

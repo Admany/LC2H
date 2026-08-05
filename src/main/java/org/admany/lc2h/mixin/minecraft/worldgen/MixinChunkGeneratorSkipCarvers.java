@@ -18,12 +18,14 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(NoiseBasedChunkGenerator.class)
 public class MixinChunkGeneratorSkipCarvers {
+    private static final boolean LC2H_SKIP_VANILLA_CARVERS_IN_CITY_CHUNKS =
+        Boolean.parseBoolean(System.getProperty("lc2h.skipVanillaCarversInCityChunks", "false"));
 
     @Inject(
         method = "applyCarvers(Lnet/minecraft/server/level/WorldGenRegion;JLnet/minecraft/world/level/levelgen/RandomState;Lnet/minecraft/world/level/biome/BiomeManager;Lnet/minecraft/world/level/StructureManager;Lnet/minecraft/world/level/chunk/ChunkAccess;Lnet/minecraft/world/level/levelgen/GenerationStep$Carving;)V",
         at = @At("HEAD"),
         cancellable = true,
-        require = 0
+        require = 0, expect = 0
     )
     private void lc2h$skipCarversInCityChunks(WorldGenRegion region,
                                               long seed,
@@ -33,6 +35,9 @@ public class MixinChunkGeneratorSkipCarvers {
                                               ChunkAccess chunk,
                                               GenerationStep.Carving step,
                                               CallbackInfo ci) {
+        if (!LC2H_SKIP_VANILLA_CARVERS_IN_CITY_CHUNKS) {
+            return;
+        }
         if (region == null || chunk == null) {
             return;
         }

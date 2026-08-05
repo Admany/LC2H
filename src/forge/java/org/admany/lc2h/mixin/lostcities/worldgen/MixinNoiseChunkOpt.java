@@ -21,14 +21,20 @@ import java.util.function.Function;
 @Mixin(NoiseChunkOpt.class)
 public class MixinNoiseChunkOpt {
 
+    private static final boolean ENABLE_ASYNC_NOISE_WARMUP =
+        Boolean.parseBoolean(System.getProperty("lc2h.noise.async_warmup", "false"));
+
     private static final boolean USE_IDENTITY_WRAP =
-        Boolean.parseBoolean(System.getProperty("lc2h.noise.identity_wrap", "true"));
+        Boolean.parseBoolean(System.getProperty("lc2h.noise.identity_wrap", "false"));
 
     @Unique
     private Map<DensityFunction, DensityFunction> lc2h$identityWrapped;
 
-    @Inject(method = "optimizeNoise", at = @At("HEAD"), remap = false, require = 0)
+    @Inject(method = "optimizeNoise", at = @At("HEAD"), remap = false, require = 0, expect = 0)
     private void asyncOptimizeNoise(int chunkX, int chunkZ, CallbackInfo ci) {
+        if (!ENABLE_ASYNC_NOISE_WARMUP) {
+            return;
+        }
         AsyncNoiseGenerator.generateNoiseAsync(chunkX, chunkZ);
     }
 

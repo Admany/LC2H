@@ -4,7 +4,9 @@ import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.util.cache.CacheTtl;
+import org.admany.lc2h.worldgen.dag.LostCityDagScheduler;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
+import org.admany.lc2h.worldgen.noise.CheapChunkNoiseField;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.quantified.core.common.util.TaskScheduler;
 
@@ -57,6 +59,22 @@ public final class AsyncTerrainFeaturePlanner {
         long startTime = System.nanoTime();
 
         if (AsyncChunkWarmup.deferChunkPrescheduleToGpu(provider, coord, "terrain-feature")) {
+            return;
+        }
+
+        if (LostCityDagScheduler.isEnabled()) {
+            LostCityDagScheduler.submitTerrainFeatures(provider, coord)
+                .whenComplete((result, throwable) -> {
+                    if (throwable != null) {
+                        COMPUTATION_CACHE.remove(coord);
+                        LC2H.LOGGER.error("Kernel terrain feature computation failed for {}: {}", coord, throwable.getMessage());
+                        return;
+                    }
+                    if (debugLogging) {
+                        long endTime = System.nanoTime();
+                        LC2H.LOGGER.debug("Finished kernel terrain feature compute for {} in {} ms", coord, (endTime - startTime) / 1_000_000);
+                    }
+                });
             return;
         }
 
@@ -169,12 +187,11 @@ public final class AsyncTerrainFeaturePlanner {
     }
 
     private static void precomputeNoiseData(ChunkCoord coord) {
+        double[] field = CheapChunkNoiseField.getOrCompute(coord);
         for (int x = 0; x < 16; x++) {
+            int row = x << 4;
             for (int z = 0; z < 16; z++) {
-                double baseNoise = Math.sin((coord.chunkX() * 16 + x) * 0.01) * Math.cos((coord.chunkZ() * 16 + z) * 0.01);
-                double detailNoise = Math.sin((coord.chunkX() * 16 + x) * 0.05) * Math.cos((coord.chunkZ() * 16 + z) * 0.05) * 0.5;
-                double finalNoise = baseNoise + detailNoise;
-                cacheNoiseValue(coord, x, z, finalNoise);
+                cacheNoiseValue(coord, x, z, field[row | z]);
             }
         }
     }

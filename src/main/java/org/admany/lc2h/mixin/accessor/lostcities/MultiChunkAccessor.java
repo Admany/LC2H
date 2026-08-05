@@ -15,6 +15,9 @@ public interface MultiChunkAccessor {
     @Accessor("topleft")
     ChunkCoord lc2h$getTopLeft();
 
+    @Accessor("mc")
+    ChunkCoord lc2h$getMultiCoord();
+
     @Accessor("MULTICHUNKS")
     TimedCache<ChunkCoord, MultiChunk> lc2h$getCache();
 

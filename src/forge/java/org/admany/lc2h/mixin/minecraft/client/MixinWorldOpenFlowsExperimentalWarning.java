@@ -12,7 +12,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(WorldOpenFlows.class)
 public class MixinWorldOpenFlowsExperimentalWarning {
-    @Inject(method = "m_269260_", at = @At("HEAD"), cancellable = true, require = 0, remap = false)
+    @Inject(method = "m_269260_", at = @At("HEAD"), cancellable = true, require = 0, expect = 0, remap = false)
     private static void lc2h$skipExperimentalConfirm(Minecraft minecraft,
                                                      CreateWorldScreen screen,
                                                      Lifecycle lifecycle,

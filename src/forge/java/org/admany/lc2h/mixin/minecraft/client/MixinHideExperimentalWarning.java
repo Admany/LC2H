@@ -18,7 +18,7 @@ public class MixinHideExperimentalWarning {
             at = @At("HEAD"),
             argsOnly = true,
             ordinal = 1,
-            require = 0
+            require = 0, expect = 0
     )
     private boolean lc2h$skipExperimentalPrompt(boolean askConfirmation) {
         return ConfigManager.HIDE_EXPERIMENTAL_WARNING ? false : askConfirmation;
@@ -29,7 +29,7 @@ public class MixinHideExperimentalWarning {
             at = @At("HEAD"),
             argsOnly = true,
             ordinal = 2,
-            require = 0
+            require = 0, expect = 0
     )
     private boolean lc2h$markWarningConfirmed(boolean confirmed) {
         return ConfigManager.HIDE_EXPERIMENTAL_WARNING ? true : confirmed;

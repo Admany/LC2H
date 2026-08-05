@@ -9,7 +9,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(WorldDimensions.class)
 public class MixinWorldDimensionsExperimentalWarning {
-    @Inject(method = "m_246739_", at = @At("HEAD"), cancellable = true, require = 0, remap = false)
+    @Inject(method = "m_246739_", at = @At("HEAD"), cancellable = true, require = 0, expect = 0, remap = false)
     private void lc2h$forceNonExperimental(CallbackInfoReturnable<Boolean> cir) {
         if (ConfigManager.HIDE_EXPERIMENTAL_WARNING) {
             cir.setReturnValue(false);

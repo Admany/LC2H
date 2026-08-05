@@ -1,0 +1,129 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer Targets {
+    float values[];
+} targetData;
+
+layout(std430, binding = 1) readonly buffer SectionMetadata {
+    float values[];
+} sectionData;
+
+layout(std430, binding = 2) readonly buffer PaletteFlags {
+    float values[];
+} paletteData;
+
+layout(std430, binding = 3) readonly buffer RawWords {
+    float values[];
+} rawData;
+
+layout(std430, binding = 4) writeonly buffer Outputs {
+    float values[];
+} outputData;
+
+layout(push_constant) uniform Parameters {
+    uint columnCount;
+    int minBuildHeight;
+    int sectionsPerRequest;
+} parameters;
+
+const int EMPTY = 1;
+const int FOLIAGE = 2;
+const int AIR = 4;
+const int BEDROCK = 8;
+
+uint packedPaletteId(uint sectionBase, uint packedIndex) {
+    uint bits = uint(sectionData.values[sectionBase]);
+    if (bits == 0u) {
+        return 0u;
+    }
+    uint valuesPerLong = uint(sectionData.values[sectionBase + 1u]);
+    uint rawOffset = uint(sectionData.values[sectionBase + 2u]);
+    uint word = packedIndex / valuesPerLong;
+    uint bitOffset = (packedIndex - word * valuesPerLong) * bits;
+    uint low = floatBitsToUint(rawData.values[rawOffset + word * 2u]);
+    uint high = floatBitsToUint(rawData.values[rawOffset + word * 2u + 1u]);
+    uint value;
+    if (bitOffset < 32u) {
+        value = low >> bitOffset;
+        if (bitOffset + bits > 32u) {
+            value |= high << (32u - bitOffset);
+        }
+    } else {
+        value = high >> (bitOffset - 32u);
+    }
+    return value & ((1u << bits) - 1u);
+}
+
+int flagsAt(uint globalColumn, int y) {
+    int index = y - parameters.minBuildHeight;
+    int columnHeight = parameters.sectionsPerRequest * 16;
+    if (index < 0 || index >= columnHeight) {
+        return EMPTY | AIR;
+    }
+    uint requestIndex = globalColumn / 256u;
+    uint column = globalColumn - requestIndex * 256u;
+    uint x = column >> 4u;
+    uint z = column & 15u;
+    uint section = uint(index) >> 4u;
+    uint localY = uint(index) & 15u;
+    uint sectionBase = (requestIndex * uint(parameters.sectionsPerRequest) + section) * 5u;
+    uint paletteOffset = uint(sectionData.values[sectionBase + 3u]);
+    uint packedIndex = (localY << 8u) | (z << 4u) | x;
+    return int(paletteData.values[paletteOffset + packedPaletteId(sectionBase, packedIndex)]);
+}
+
+void emit(uint index, int mode, int sourceTop, int target, int count) {
+    uint outBase = index * 4u;
+    outputData.values[outBase] = float(mode);
+    outputData.values[outBase + 1u] = float(sourceTop);
+    outputData.values[outBase + 2u] = float(target);
+    outputData.values[outBase + 3u] = float(count);
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= parameters.columnCount) {
+        return;
+    }
+
+    int targetMax = int(targetData.values[index * 2u]);
+    int targetMin = int(targetData.values[index * 2u + 1u]);
+    int maxBuildHeight = parameters.minBuildHeight + parameters.sectionsPerRequest * 16;
+
+    int y = maxBuildHeight - 1;
+    while ((flagsAt(index, y) & EMPTY) != 0 && y > targetMax) {
+        --y;
+    }
+    if (y > targetMax) {
+        int total = y - targetMax + 1;
+        emit(index, 1, y, targetMax, min(total, 6));
+        return;
+    }
+
+    y = targetMin;
+    while ((flagsAt(index, y) & (EMPTY | FOLIAGE)) != 0 && y > parameters.minBuildHeight) {
+        --y;
+    }
+    if (y >= targetMin) {
+        emit(index, 0, 0, 0, 0);
+        return;
+    }
+
+    int sourceTop = y;
+    int count = 0;
+    while (y > 0) {
+        int flags = flagsAt(index, y);
+        if ((flags & (AIR | BEDROCK)) != 0) {
+            break;
+        }
+        ++count;
+        --y;
+    }
+    if (count == 0) {
+        emit(index, 0, 0, 0, 0);
+        return;
+    }
+    emit(index, 2, sourceTop, targetMin, count);
+}

@@ -42,7 +42,7 @@ public class MixinLostCityTerrainFeatureHeightmapCache {
         });
 
     private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_HEIGHTMAP_BUDGET =
-        LostCitiesCacheBudgetManager.register("lc_heightmap", 2048, 1024, MixinLostCityTerrainFeatureHeightmapCache::evictHeightmap);
+        LostCitiesCacheBudgetManager.register("lc_heightmap", 2048, 256, MixinLostCityTerrainFeatureHeightmapCache::evictHeightmap);
 
     private static final ThreadLocal<net.minecraft.world.level.WorldGenLevel> LC2H_HEIGHTMAP_WORLD_CONTEXT =
         ThreadLocal.withInitial(() -> null);
@@ -123,7 +123,7 @@ public class MixinLostCityTerrainFeatureHeightmapCache {
             value = "INVOKE",
             target = "Ljava/util/Map;get(Ljava/lang/Object;)Ljava/lang/Object;"
         ),
-        require = 0
+        require = 0, expect = 0
     )
     private Object lc2h$trackHeightmapGet(Map<ChunkCoord, ChunkHeightmap> map, Object key) {
         Object value = map.get(key);
@@ -145,7 +145,7 @@ public class MixinLostCityTerrainFeatureHeightmapCache {
             value = "INVOKE",
             target = "Ljava/util/Map;put(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
         ),
-        require = 0
+        require = 0, expect = 0
     )
     private Object lc2h$trackHeightmapPut(Map<ChunkCoord, ChunkHeightmap> map, Object key, Object value) {
         Object prev = map.put((ChunkCoord) key, (ChunkHeightmap) value);
@@ -166,7 +166,7 @@ public class MixinLostCityTerrainFeatureHeightmapCache {
             value = "INVOKE",
             target = "Lmcjty/lostcities/varia/TimedCache;get(Ljava/lang/Object;)Ljava/lang/Object;"
         ),
-        require = 0
+        require = 0, expect = 0
     )
     private Object lc2h$trackHeightmapGetTimed(TimedCache<ChunkCoord, ChunkHeightmap> cache, Object key) {
         ChunkCoord coord = key instanceof ChunkCoord c ? c : null;
@@ -189,7 +189,7 @@ public class MixinLostCityTerrainFeatureHeightmapCache {
             value = "INVOKE",
             target = "Lmcjty/lostcities/varia/TimedCache;put(Ljava/lang/Object;Ljava/lang/Object;)V"
         ),
-        require = 0
+        require = 0, expect = 0
     )
     private void lc2h$trackHeightmapPutTimed(TimedCache<ChunkCoord, ChunkHeightmap> cache, Object key, Object value) {
         ChunkCoord coord = key instanceof ChunkCoord c ? c : null;

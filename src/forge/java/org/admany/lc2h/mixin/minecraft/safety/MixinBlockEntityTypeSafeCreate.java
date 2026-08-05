@@ -18,7 +18,7 @@ public abstract class MixinBlockEntityTypeSafeCreate {
         method = "create(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/entity/BlockEntity;",
         at = @At("HEAD"),
         cancellable = true,
-        require = 0
+        require = 0, expect = 0
     )
     private void lc2h$skipInvalidBlockEntity(BlockPos pos, BlockState state, CallbackInfoReturnable<BlockEntity> cir) {
         if (state == null || state.isAir()) {
@@ -38,7 +38,7 @@ public abstract class MixinBlockEntityTypeSafeCreate {
         at = @At("HEAD"),
         cancellable = true,
         remap = false,
-        require = 0
+        require = 0, expect = 0
     )
     private void lc2h$skipInvalidBlockEntityObf(BlockPos pos, BlockState state, CallbackInfoReturnable<BlockEntity> cir) {
         if (state == null || state.isAir()) {

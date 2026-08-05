@@ -183,6 +183,14 @@ public final class StallDetector {
         } catch (Throwable ignored) {}
 
         try {
+            sb.append("ShadowBlockMutationApplier = ").append(org.admany.lc2h.worldgen.apply.ShadowBlockMutationApplier.diagnostics()).append('\n');
+        } catch (Throwable ignored) {}
+
+        try {
+            sb.append("DeferredTreeEventHandler = ").append(org.admany.lc2h.worldgen.lostcities.DeferredTreeEventHandler.capturedTreeDiagnostics()).append('\n');
+        } catch (Throwable ignored) {}
+
+        try {
             sb.append("TweaksActorSystem.inFlight = ").append(org.admany.lc2h.tweaks.TweaksActorSystem.getInFlightCount()).append('\n');
         } catch (Throwable ignored) {}
 

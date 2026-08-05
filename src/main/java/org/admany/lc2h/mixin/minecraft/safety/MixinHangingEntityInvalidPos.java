@@ -20,12 +20,12 @@ public abstract class MixinHangingEntityInvalidPos extends Entity {
         super(entityType, level);
     }
 
-    @Inject(method = "tick", at = @At("HEAD"), cancellable = true, require = 0)
+    @Inject(method = "tick", at = @At("HEAD"), cancellable = true, require = 0, expect = 0)
     private void lc2h$skipInvalidHangingEntityLog(CallbackInfo ci) {
         handleInvalidHangingEntity(ci);
     }
 
-    @Inject(method = "m_8119_", at = @At("HEAD"), cancellable = true, require = 0, remap = false)
+    @Inject(method = "m_8119_", at = @At("HEAD"), cancellable = true, require = 0, expect = 0, remap = false)
     private void lc2h$skipInvalidHangingEntityLogSrg(CallbackInfo ci) {
         handleInvalidHangingEntity(ci);
     }

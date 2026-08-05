@@ -6,6 +6,7 @@ import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.block.DoublePlantBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
+import org.admany.lc2h.dev.debug.PreCaptureTargetTraceRegistry;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
@@ -18,7 +19,7 @@ public class MixinLostCityTerrainFeatureTallBlocks {
                 method = "lambda$generatePart$6(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V",
                 at = @At(value = "INVOKE", target = "Lnet/minecraft/world/level/WorldGenLevel;m_7731_(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;I)Z"),
                 remap = false,
-                require = 0
+                require = 0, expect = 0
             )
     private boolean fixTallBlockPlacement(WorldGenLevel world, BlockPos pos, BlockState state, int flags) {
         if (state.getBlock() instanceof DoublePlantBlock && state.getValue(DoublePlantBlock.HALF) == DoubleBlockHalf.LOWER) {
@@ -27,6 +28,13 @@ public class MixinLostCityTerrainFeatureTallBlocks {
 
             if (world.isEmptyBlock(upperPos) || world.getBlockState(upperPos).canBeReplaced()) {
                 world.setBlock(upperPos, upperState, flags);
+            } else if (PreCaptureTargetTraceRegistry.shouldTracePosition(upperPos)) {
+                PreCaptureTargetTraceRegistry.recordSkippedTargetWrite(
+                    upperPos,
+                    world.getBlockState(upperPos),
+                    upperState,
+                    "MixinLostCityTerrainFeatureTallBlocks#fixTallBlockPlacement",
+                    "upper-not-replaceable");
             }
         }
 

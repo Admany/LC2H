@@ -1,10 +1,12 @@
 package org.admany.lc2h.mixin.lostcities.config;
 
+import mcjty.lostcities.LostCities;
 import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.config.ProfileSetup;
 import mcjty.lostcities.setup.Config;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
+import net.minecraftforge.common.ForgeConfigSpec;
 import net.minecraftforge.fml.loading.FMLPaths;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.worldgen.lostcities.LostCityProfileOverrideManager;
@@ -19,7 +21,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Mixin(value = Config.class, remap = false)
 public class MixinConfig {
@@ -27,39 +31,21 @@ public class MixinConfig {
     @Shadow
     private static Map<ResourceKey<Level>, String> dimensionProfileCache;
 
+    @Shadow
+    private static ForgeConfigSpec.ConfigValue<List<? extends String>> DIMENSION_PROFILES;
+
     @Unique
     private static final java.util.concurrent.atomic.AtomicBoolean lc2h$earlyProfileCacheWarning = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     @Unique
     private static final java.util.concurrent.atomic.AtomicBoolean lc2h$missingSelectedProfileWarning = new java.util.concurrent.atomic.AtomicBoolean(false);
 
+    @Unique
+    private static final Object lc2h$profileCacheLock = new Object();
+
     @Inject(method = "getProfileForDimension", at = @At("HEAD"), cancellable = true)
-    private static void lc2h$avoidPoisoningProfileCache(ResourceKey<Level> type, CallbackInfoReturnable<String> cir) {
-        String forcedProfile = LostCityProfileOverrideManager.overrideName(type).orElse(null);
-        if (forcedProfile != null) {
-            LostCityProfile profile = ProfileSetup.STANDARD_PROFILES.get(forcedProfile);
-            if (profile == null) {
-                profile = lc2h$loadProfileFromDisk(forcedProfile);
-                if (profile != null) {
-                    ProfileSetup.STANDARD_PROFILES.put(forcedProfile, profile);
-                }
-            }
-
-            if (profile != null) {
-                if (dimensionProfileCache != null) {
-                    dimensionProfileCache.put(type, forcedProfile);
-                }
-                cir.setReturnValue(forcedProfile);
-                return;
-            }
-        }
-
-        if (dimensionProfileCache == null && ProfileSetup.STANDARD_PROFILES.isEmpty()) {
-            if (lc2h$earlyProfileCacheWarning.compareAndSet(false, true)) {
-                LC2H.LOGGER.info("Lost Cities profiles not initialized yet; deferring profile lookup to avoid disabling worldgen");
-            }
-            cir.setReturnValue(null);
-        }
+    private static void lc2h$resolveProfileForDimension(ResourceKey<Level> type, CallbackInfoReturnable<String> cir) {
+        cir.setReturnValue(lc2h$resolveProfileName(type));
     }
 
     @Inject(method = "getProfileForDimension", at = @At("RETURN"), cancellable = true)
@@ -227,5 +213,143 @@ public class MixinConfig {
             LC2H.LOGGER.error("Unexpected error while loading Lost Cities profile '{}': {}", profileName, t.getMessage());
             return null;
         }
+    }
+
+    @Unique
+    private static String lc2h$resolveProfileName(ResourceKey<Level> type) {
+        synchronized (lc2h$profileCacheLock) {
+            Map<ResourceKey<Level>, String> cache = lc2h$ensureProfileCache();
+            String forcedProfile = LostCityProfileOverrideManager.overrideName(type).orElse(null);
+            if (forcedProfile != null) {
+                String validated = lc2h$validateProfileName(type, forcedProfile);
+                if (validated != null && !validated.isBlank()) {
+                    cache.put(type, validated);
+                    return validated;
+                }
+            }
+            return lc2h$validateProfileName(type, cache.get(type));
+        }
+    }
+
+    @Unique
+    private static Map<ResourceKey<Level>, String> lc2h$ensureProfileCache() {
+        if (dimensionProfileCache != null && !dimensionProfileCache.isEmpty()) {
+            return dimensionProfileCache;
+        }
+
+        ConcurrentHashMap<ResourceKey<Level>, String> rebuilt = new ConcurrentHashMap<>();
+        dimensionProfileCache = rebuilt;
+
+        for (String dp : DIMENSION_PROFILES.get()) {
+            if (dp == null || dp.isBlank()) {
+                continue;
+            }
+            String[] split = dp.split("=", 2);
+            if (split.length != 2) {
+                LostCities.getLogger().error("Bad format for config value: '{}'!", dp);
+                continue;
+            }
+            ResourceKey<Level> dimensionType = ResourceKey.create(net.minecraft.core.registries.Registries.DIMENSION, new net.minecraft.resources.ResourceLocation(split[0]));
+            String validated = lc2h$validateProfileName(dimensionType, split[1]);
+            if (validated != null && !validated.isBlank()) {
+                rebuilt.put(dimensionType, validated);
+            } else {
+                LostCities.getLogger().error("Cannot find profile: {} for dimension {}!", split[1], split[0]);
+            }
+        }
+
+        String selectedProfile = Config.SELECTED_PROFILE.get();
+        if ("<CHECK>".equals(selectedProfile)) {
+            if (Config.profileFromClient != null && !Config.profileFromClient.isEmpty()) {
+                Config.SELECTED_PROFILE.set(Config.profileFromClient);
+                if (Config.jsonFromClient != null && !Config.jsonFromClient.isEmpty()) {
+                    Config.SELECTED_CUSTOM_JSON.set(Config.jsonFromClient);
+                } else {
+                    Config.SELECTED_CUSTOM_JSON.set("");
+                }
+                selectedProfile = Config.profileFromClient;
+            } else {
+                Config.SELECTED_PROFILE.set("");
+                selectedProfile = "";
+            }
+        }
+
+        if (selectedProfile != null && !selectedProfile.isBlank()) {
+            String validatedSelected = lc2h$validateProfileName(Level.OVERWORLD, selectedProfile);
+            if (validatedSelected != null && !validatedSelected.isBlank()) {
+                rebuilt.put(Level.OVERWORLD, validatedSelected);
+            }
+            String json = Config.SELECTED_CUSTOM_JSON.get();
+            if (json != null && !json.isEmpty()) {
+                LostCityProfile profile = new LostCityProfile("customized", json);
+                ProfileSetup.STANDARD_PROFILES.computeIfAbsent("customized", ignored -> new LostCityProfile("customized", false)).copyFrom(profile);
+            }
+        }
+
+        String overworldProfile = rebuilt.get(Level.OVERWORLD);
+        if (overworldProfile != null && !overworldProfile.isBlank()) {
+            LostCityProfile profile = lc2h$resolveStandardProfile(overworldProfile);
+            if (profile != null && profile.GENERATE_NETHER) {
+                rebuilt.put(Level.NETHER, "cavern");
+            }
+        }
+
+        if (rebuilt.isEmpty() && ProfileSetup.STANDARD_PROFILES.isEmpty()) {
+            if (lc2h$earlyProfileCacheWarning.compareAndSet(false, true)) {
+                LC2H.LOGGER.info("Lost Cities profiles not initialized yet; returning empty profile cache to avoid worldgen crashes");
+            }
+        }
+
+        return rebuilt;
+    }
+
+    @Unique
+    private static LostCityProfile lc2h$resolveStandardProfile(String profileName) {
+        if (profileName == null || profileName.isBlank()) {
+            return null;
+        }
+        LostCityProfile profile = ProfileSetup.STANDARD_PROFILES.get(profileName);
+        if (profile == null) {
+            profile = lc2h$loadProfileFromDisk(profileName);
+            if (profile != null) {
+                ProfileSetup.STANDARD_PROFILES.put(profileName, profile);
+            }
+        }
+        return profile;
+    }
+
+    @Unique
+    private static String lc2h$validateProfileName(ResourceKey<Level> type, String profileName) {
+        if (profileName == null || profileName.isBlank()) {
+            return null;
+        }
+        if ("customized".equals(profileName)) {
+            try {
+                String json = Config.SELECTED_CUSTOM_JSON.get();
+                if (json != null && !json.isBlank()) {
+                    return profileName;
+                }
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+        LostCityProfile profile = lc2h$resolveStandardProfile(profileName);
+        if (profile != null) {
+            return profileName;
+        }
+        String fallback = ProfileSetup.STANDARD_PROFILES.containsKey("default") ? "default" : null;
+        if (fallback != null) {
+            if (lc2h$missingSelectedProfileWarning.compareAndSet(false, true)) {
+                LC2H.LOGGER.warn(
+                    "Lost Cities profile '{}' was requested for dimension '{}' but is missing; forcing '{}' so Lost Cities generation works",
+                    profileName, type.location(), fallback
+                );
+            }
+            if (dimensionProfileCache != null) {
+                dimensionProfileCache.put(type, fallback);
+            }
+            return fallback;
+        }
+        return null;
     }
 }

@@ -31,6 +31,7 @@ public final class DeferredTreeSavedData extends SavedData {
     private static final String TAG_CONFIG = "config";
     private static final String TAG_BLOCKS = "blocks";
     private static final String TAG_STATE = "state";
+    private static final String TAG_SOURCE = "source";
     private static final AtomicReference<java.lang.reflect.Field> BUILTIN_BLOCK_REGISTRY_FIELD = new AtomicReference<>();
     private static final AtomicReference<java.lang.reflect.Field> BUILTIN_FEATURE_REGISTRY_FIELD = new AtomicReference<>();
 
@@ -38,7 +39,8 @@ public final class DeferredTreeSavedData extends SavedData {
         BlockPos pos,
         List<DeferredTreeQueue.CapturedBlock> blocks,
         TreeConfiguration config,
-        ResourceLocation featureId
+        ResourceLocation featureId,
+        DeferredTreeCaptureContext.CaptureSource source
     ) {
     }
 
@@ -75,7 +77,7 @@ public final class DeferredTreeSavedData extends SavedData {
                     blocks.add(new DeferredTreeQueue.CapturedBlock(BlockPos.of(blockEntry.getLong(TAG_POS)), state));
                 }
                 if (!blocks.isEmpty()) {
-                    data.trees.add(new PersistedTree(pos, blocks, null, null));
+                    data.trees.add(new PersistedTree(pos, blocks, null, null, readSource(entry)));
                 }
                 continue;
             }
@@ -95,7 +97,7 @@ public final class DeferredTreeSavedData extends SavedData {
             if (config == null) {
                 continue;
             }
-            data.trees.add(new PersistedTree(pos, Collections.emptyList(), config, featureId));
+            data.trees.add(new PersistedTree(pos, Collections.emptyList(), config, featureId, DeferredTreeCaptureContext.CaptureSource.VANILLA_TREE));
         }
         return data;
     }
@@ -121,6 +123,7 @@ public final class DeferredTreeSavedData extends SavedData {
                     blockList.add(blockEntry);
                 }
                 if (!blockList.isEmpty()) {
+                    entry.putString(TAG_SOURCE, sourceName(tree.source()));
                     entry.put(TAG_BLOCKS, blockList);
                     list.add(entry);
                 }
@@ -145,20 +148,31 @@ public final class DeferredTreeSavedData extends SavedData {
     }
 
     public List<DeferredTreeQueue.PendingTree> toPendingTrees(ResourceKey<Level> dim) {
+        return toPendingTrees(dim, 0L);
+    }
+
+    public List<DeferredTreeQueue.PendingTree> toPendingTrees(ServerLevel level) {
+        if (level == null) {
+            return Collections.emptyList();
+        }
+        return toPendingTrees(level.dimension(), level.getSeed());
+    }
+
+    public List<DeferredTreeQueue.PendingTree> toPendingTrees(ResourceKey<Level> dim, long seed) {
         if (trees.isEmpty() || dim == null) {
             return Collections.emptyList();
         }
         List<DeferredTreeQueue.PendingTree> out = new ArrayList<>();
         for (PersistedTree tree : trees) {
             if (tree.blocks() != null && !tree.blocks().isEmpty()) {
-                out.add(DeferredTreeQueue.PendingTree.captured(tree.pos(), tree.blocks(), dim));
-                continue;
+            out.add(DeferredTreeQueue.PendingTree.captured(tree.pos(), tree.blocks(), dim, seed, tree.source()));
+            continue;
             }
             Feature<?> feature = getFeature(tree.featureId());
             if (!(feature instanceof TreeFeature treeFeature)) {
                 continue;
             }
-            out.add(DeferredTreeQueue.PendingTree.replay(tree.pos(), tree.config(), treeFeature, dim));
+            out.add(DeferredTreeQueue.PendingTree.replay(tree.pos(), tree.config(), treeFeature, dim, seed));
         }
         return out;
     }
@@ -173,7 +187,7 @@ public final class DeferredTreeSavedData extends SavedData {
                 continue;
             }
             if (tree.hasCapturedBlocks()) {
-                trees.add(new PersistedTree(tree.pos(), tree.blocks(), null, null));
+                trees.add(new PersistedTree(tree.pos(), tree.blocks(), null, null, tree.source()));
                 continue;
             }
             if (tree.config() == null || tree.feature() == null) {
@@ -183,8 +197,26 @@ public final class DeferredTreeSavedData extends SavedData {
             if (id == null) {
                 continue;
             }
-            trees.add(new PersistedTree(tree.pos(), Collections.emptyList(), tree.config(), id));
+            trees.add(new PersistedTree(tree.pos(), Collections.emptyList(), tree.config(), id, tree.source()));
         }
+    }
+
+    private static DeferredTreeCaptureContext.CaptureSource readSource(CompoundTag tag) {
+        if (tag == null || !tag.contains(TAG_SOURCE, Tag.TAG_STRING)) {
+            return DeferredTreeCaptureContext.CaptureSource.VANILLA_TREE;
+        }
+        try {
+            return DeferredTreeCaptureContext.CaptureSource.valueOf(tag.getString(TAG_SOURCE));
+        } catch (IllegalArgumentException ignored) {
+            return DeferredTreeCaptureContext.CaptureSource.VANILLA_TREE;
+        }
+    }
+
+    private static String sourceName(DeferredTreeCaptureContext.CaptureSource source) {
+        DeferredTreeCaptureContext.CaptureSource effective = source == null
+            ? DeferredTreeCaptureContext.CaptureSource.VANILLA_TREE
+            : source;
+        return effective.name();
     }
 
     private static BlockState readBlockState(CompoundTag tag) {
