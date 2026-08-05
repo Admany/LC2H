@@ -1,5 +1,6 @@
 package org.admany.lc2h.worldgen.seams;
 
+import mcjty.lostcities.varia.ChunkCoord;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
@@ -13,7 +14,10 @@ import org.admany.lc2h.LC2H;
 import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.mixin.accessor.minecraft.WorldGenRegionAccessor;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
+import org.admany.lc2h.worldgen.apply.ChunkShadowMutationPlan;
+import org.admany.lc2h.worldgen.apply.ShadowBlockMutationApplier;
 
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -50,6 +54,14 @@ public final class SeamOwnershipJournal {
     }
 
     public static void beginLostCityPass(WorldGenRegion region) {
+        beginPass(region, region == null ? null : region.getCenter());
+    }
+
+    public static void beginBiomeDecorationPass(WorldGenRegion region, int ownerChunkX, int ownerChunkZ) {
+        beginPass(region, new net.minecraft.world.level.ChunkPos(ownerChunkX, ownerChunkZ));
+    }
+
+    private static void beginPass(WorldGenRegion region, net.minecraft.world.level.ChunkPos ownerChunk) {
         if (!enabled() || region == null) {
             return;
         }
@@ -60,16 +72,27 @@ public final class SeamOwnershipJournal {
                 CONTEXT.remove();
                 return;
             }
+            if (ownerChunk == null) {
+                CONTEXT.remove();
+                return;
+            }
             ResourceLocation dim = level.dimension().location();
-            net.minecraft.world.level.ChunkPos center = region.getCenter();
-            ACTIVE_PASSES.add(new SeamChunkKey(dim, center.x, center.z));
-            CONTEXT.set(new GenerationContext(region, dim, center.x, center.z));
+            ACTIVE_PASSES.add(new SeamChunkKey(dim, ownerChunk.x, ownerChunk.z));
+            CONTEXT.set(new GenerationContext(region, dim, ownerChunk.x, ownerChunk.z));
         } catch (Throwable ignored) {
             CONTEXT.remove();
         }
     }
 
     public static void endLostCityPass(WorldGenRegion region) {
+        endPass(region, region == null ? null : region.getCenter());
+    }
+
+    public static void endBiomeDecorationPass(WorldGenRegion region, int ownerChunkX, int ownerChunkZ) {
+        endPass(region, new net.minecraft.world.level.ChunkPos(ownerChunkX, ownerChunkZ));
+    }
+
+    private static void endPass(WorldGenRegion region, net.minecraft.world.level.ChunkPos ownerChunk) {
         if (!enabled() || region == null) {
             CONTEXT.remove();
             return;
@@ -81,9 +104,8 @@ public final class SeamOwnershipJournal {
         } finally {
             try {
                 ServerLevel level = resolveServerLevel(region);
-                if (level != null) {
-                    net.minecraft.world.level.ChunkPos center = region.getCenter();
-                    ACTIVE_PASSES.remove(new SeamChunkKey(level.dimension().location(), center.x, center.z));
+                if (level != null && ownerChunk != null) {
+                    ACTIVE_PASSES.remove(new SeamChunkKey(level.dimension().location(), ownerChunk.x, ownerChunk.z));
                 }
             } catch (Throwable ignored) {
             }
@@ -301,6 +323,7 @@ public final class SeamOwnershipJournal {
         }
         long now = System.currentTimeMillis();
         long ttl = intentTtlMs();
+        ArrayList<SeamWriteIntent> ready = new ArrayList<>();
         for (Map.Entry<Long, SeamWriteIntent> entry : chunkIntents.entrySet()) {
             SeamWriteIntent intent = entry.getValue();
             if (intent == null) {
@@ -319,15 +342,31 @@ public final class SeamOwnershipJournal {
                 chunkIntents.remove(entry.getKey(), intent);
                 continue;
             }
-            try {
-                if (level.setBlock(pos, intent.state(), intent.flags())) {
-                    chunkIntents.remove(entry.getKey(), intent);
-                }
-            } catch (Throwable ignored) {
+            if (chunkIntents.remove(entry.getKey(), intent)) {
+                ready.add(intent);
             }
         }
+        enqueueLoadedChunkIntents(level, chunk, ready);
         if (chunkIntents.isEmpty()) {
             JOURNAL.remove(key, chunkIntents);
+        }
+    }
+
+    private static void enqueueLoadedChunkIntents(ServerLevel level, LevelChunk chunk, ArrayList<SeamWriteIntent> intents) {
+        if (level == null || chunk == null || intents == null || intents.isEmpty()) {
+            return;
+        }
+        ChunkCoord targetChunk = new ChunkCoord(level.dimension(), chunk.getPos().x, chunk.getPos().z);
+        ChunkShadowMutationPlan.Builder builder = ChunkShadowMutationPlan.builder(level, targetChunk);
+        for (SeamWriteIntent intent : intents) {
+            if (intent == null || intent.pos() == null || intent.state() == null) {
+                continue;
+            }
+            builder.add(intent.pos(), intent.state(), intent.flags(), false);
+        }
+        ChunkShadowMutationPlan plan = builder.build();
+        if (plan.size() > 0) {
+            ShadowBlockMutationApplier.enqueueDeferred(plan);
         }
     }
 
@@ -392,6 +431,17 @@ public final class SeamOwnershipJournal {
         }
         ConcurrentHashMap<Long, SeamWriteIntent> intents = JOURNAL.get(new SeamChunkKey(dimension, chunkX, chunkZ));
         return intents != null && !intents.isEmpty();
+    }
+
+    public static void flushLoadedChunk(ServerLevel level, int chunkX, int chunkZ) {
+        if (!enabled() || level == null) {
+            return;
+        }
+        LevelChunk chunk = level.getChunkSource().getChunkNow(chunkX, chunkZ);
+        if (chunk == null) {
+            return;
+        }
+        applyForLoadedChunk(level, chunk);
     }
 
     public static boolean hasActivePassNearby(ResourceLocation dimension, int chunkX, int chunkZ, int radiusChunks) {

@@ -539,16 +539,6 @@ private Component unsavedDiscardLabel = Component.empty();
                 tr("lc2h.config.option.city_blend_enabled.desc"),
                 Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendEnabled = val);
         addToggle(layout,
-                tr("lc2h.config.option.city_blend_clear_trees.title"),
-                working.cityBlendClearTrees,
-                tr("lc2h.config.option.city_blend_clear_trees.desc"),
-                Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendClearTrees = val);
-        addToggle(layout,
-                tr("lc2h.config.option.city_blend_tree_seam_fix.title"),
-                working.cityBlendTreeSeamFix,
-                tr("lc2h.config.option.city_blend_tree_seam_fix.desc"),
-                Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendTreeSeamFix = val);
-        addToggle(layout,
                 tr("lc2h.config.option.seam_ownership_enabled.title"),
                 working.seamOwnershipEnabled,
                 tr("lc2h.config.option.seam_ownership_enabled.desc"),

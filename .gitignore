@@ -17,6 +17,36 @@ out
 build
 .gradle
 
+# local editor and generated runtime data
+/.vscode/
+/config/
+/libraries/
+/local-maven/
+/logs/
+/run/
+/run-*/
+/live-*/
+/packaged-*/
+/benchmark-evidence/
+/showcase/
+/sustained-*/
+
+# one-off verification captures and generated server files
+*.out.txt
+*.err.txt
+*.log
+*.javap.txt
+*.cmd
+/eula.txt
+/installer.log
+/quantified-api.log
+/run.bat
+/run.sh
+/user_jvm_args.txt
+/terrain-*.json
+/V4_ARCHITECTURE_PLAN.md
+/.impeccable.md
+
 # other
 eclipse
 run

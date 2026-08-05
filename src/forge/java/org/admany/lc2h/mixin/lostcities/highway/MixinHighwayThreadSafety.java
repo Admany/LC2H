@@ -7,6 +7,7 @@ import mcjty.lostcities.worldgen.lost.Highway;
 import mcjty.lostcities.worldgen.lost.Orientation;
 import org.admany.lc2h.data.cache.LostCitiesCacheBridge;
 import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
+import org.admany.lc2h.worldgen.lostcities.PlannerHotPath;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Mutable;
@@ -31,9 +32,9 @@ public abstract class MixinHighwayThreadSafety {
     private static Map<ChunkCoord, Integer> Z_HIGHWAY_LEVEL_CACHE;
 
     private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_HIGHWAY_X_BUDGET =
-        LostCitiesCacheBudgetManager.register("lc_highway_x", 64, 4096, key -> X_HIGHWAY_LEVEL_CACHE.remove(key) != null);
+        LostCitiesCacheBudgetManager.register("lc_highway_x", 64, 1024, key -> X_HIGHWAY_LEVEL_CACHE.remove(key) != null);
     private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_HIGHWAY_Z_BUDGET =
-        LostCitiesCacheBudgetManager.register("lc_highway_z", 64, 4096, key -> Z_HIGHWAY_LEVEL_CACHE.remove(key) != null);
+        LostCitiesCacheBudgetManager.register("lc_highway_z", 64, 1024, key -> Z_HIGHWAY_LEVEL_CACHE.remove(key) != null);
 
     @Inject(method = "<clinit>", at = @At("TAIL"))
     private static void lc2h$makeHighwayCachesConcurrent(CallbackInfo ci) {
@@ -52,12 +53,14 @@ public abstract class MixinHighwayThreadSafety {
             cir.setReturnValue(cached);
             return;
         }
-        String diskName = cacheName(cache);
-        Integer disk = LostCitiesCacheBridge.getDisk(diskName, cp, Integer.class);
-        if (disk != null) {
-            Integer prev = cache.putIfAbsent(cp, disk);
-            LostCitiesCacheBudgetManager.recordPut(selectBudget(cache), cp, selectBudget(cache).defaultEntryBytes(), prev == null);
-            cir.setReturnValue(prev != null ? prev : disk);
+        if (!PlannerHotPath.isActive()) {
+            String diskName = cacheName(cache);
+            Integer disk = LostCitiesCacheBridge.getDisk(diskName, cp, Integer.class);
+            if (disk != null) {
+                Integer prev = cache.putIfAbsent(cp, disk);
+                LostCitiesCacheBudgetManager.recordPut(selectBudget(cache), cp, selectBudget(cache).defaultEntryBytes(), prev == null);
+                cir.setReturnValue(prev != null ? prev : disk);
+            }
         }
     }
 
@@ -73,7 +76,9 @@ public abstract class MixinHighwayThreadSafety {
         LostCitiesCacheBudgetManager.CacheGroup budget = selectBudget(cache);
         LostCitiesCacheBudgetManager.recordPut(budget, key, budget.defaultEntryBytes(), prev == null);
         if (key instanceof ChunkCoord coord && value instanceof Integer level) {
-            LostCitiesCacheBridge.putDisk(cacheName(cache), coord, level);
+            if (!PlannerHotPath.isActive()) {
+                LostCitiesCacheBridge.putDisk(cacheName(cache), coord, level);
+            }
         }
         return prev;
     }

@@ -7,6 +7,7 @@ import mcjty.lostcities.worldgen.lost.CitySphere;
 import mcjty.lostcities.worldgen.lost.Railway;
 import org.admany.lc2h.data.cache.LostCitiesCacheBridge;
 import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
+import org.admany.lc2h.worldgen.lostcities.PlannerHotPath;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
@@ -19,7 +20,7 @@ public abstract class MixinRailway {
 
     private static final ConcurrentMap<ChunkCoord, Railway.RailChunkInfo> LC2H_RAIL_INFO = new ConcurrentHashMap<>();
     private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_RAIL_BUDGET =
-        LostCitiesCacheBudgetManager.register("lc_rail_info", 64, 2048, key -> LC2H_RAIL_INFO.remove(key) != null);
+        LostCitiesCacheBudgetManager.register("lc_rail_info", 64, 512, key -> LC2H_RAIL_INFO.remove(key) != null);
 
     @Shadow
     private static Railway.RailChunkInfo getRailChunkTypeInternal(ChunkCoord key, IDimensionInfo provider) { return null; }
@@ -37,11 +38,13 @@ public abstract class MixinRailway {
             LostCitiesCacheBudgetManager.recordAccess(LC2H_RAIL_BUDGET, coord);
             return cached;
         }
-        Railway.RailChunkInfo disk = LostCitiesCacheBridge.getDisk("rail_info", coord, Railway.RailChunkInfo.class);
-        if (disk != null) {
-            Railway.RailChunkInfo prev = LC2H_RAIL_INFO.putIfAbsent(coord, disk);
-            LostCitiesCacheBudgetManager.recordPut(LC2H_RAIL_BUDGET, coord, LC2H_RAIL_BUDGET.defaultEntryBytes(), prev == null);
-            return prev != null ? prev : disk;
+        if (!PlannerHotPath.isActive()) {
+            Railway.RailChunkInfo disk = LostCitiesCacheBridge.getDisk("rail_info", coord, Railway.RailChunkInfo.class);
+            if (disk != null) {
+                Railway.RailChunkInfo prev = LC2H_RAIL_INFO.putIfAbsent(coord, disk);
+                LostCitiesCacheBudgetManager.recordPut(LC2H_RAIL_BUDGET, coord, LC2H_RAIL_BUDGET.defaultEntryBytes(), prev == null);
+                return prev != null ? prev : disk;
+            }
         }
 
         Railway.RailChunkInfo info = getRailChunkTypeInternal(coord, provider);
@@ -60,7 +63,9 @@ public abstract class MixinRailway {
 
         Railway.RailChunkInfo prev = LC2H_RAIL_INFO.putIfAbsent(coord, info);
         LostCitiesCacheBudgetManager.recordPut(LC2H_RAIL_BUDGET, coord, LC2H_RAIL_BUDGET.defaultEntryBytes(), prev == null);
-        LostCitiesCacheBridge.putDisk("rail_info", coord, info);
+        if (!PlannerHotPath.isActive()) {
+            LostCitiesCacheBridge.putDisk("rail_info", coord, info);
+        }
         return prev != null ? prev : info;
     }
 

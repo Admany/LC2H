@@ -15,7 +15,7 @@ public abstract class MixinDhRenderDataPointClamp {
             value = "INVOKE",
             target = "Lcom/seibel/distanthorizons/core/util/RenderDataPointUtil;getYMin(J)S"
         ),
-        require = 0
+        require = 0, expect = 0
     )
     private static short lc2h$correctSignedYMin(long packed) {
         int yMin = (int) ((packed >> 8) & 4095L);

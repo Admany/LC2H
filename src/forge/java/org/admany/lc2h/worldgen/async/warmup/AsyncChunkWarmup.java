@@ -20,9 +20,12 @@ import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.lc2h.worldgen.gpu.RegionBatchProcessingGPUTask;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
 import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
+import org.admany.lc2h.runtime.Lc2hRuntimeModes;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.lc2h.worldgen.lostcities.DeferredTreeQueue;
+import org.admany.quantified.api.QuantifiedAPI;
+import org.admany.quantified.api.compute.QuantifiedCompute;
 import org.admany.quantified.api.opencl.QuantifiedOpenCL;
 import org.admany.quantified.api.vulkan.QuantifiedVulkan;
 import org.admany.quantified.core.common.opencl.core.OpenCLManager;
@@ -30,7 +33,6 @@ import org.admany.quantified.core.common.opencl.gpu.GPUMonitor;
 import org.admany.quantified.core.common.util.TaskScheduler;
 import org.admany.quantified.core.common.util.TaskScheduler.ResourceHint;
 import org.admany.quantified.core.common.util.TaskScheduler.TaskBatchItem;
-import org.admany.quantified.core.common.vulkan.core.VulkanManager;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -54,6 +56,14 @@ public final class AsyncChunkWarmup {
 
     private static final int REGION_SIZE = 5;
     private static final int CHUNKS_PER_REGION = REGION_SIZE * REGION_SIZE;
+    /**
+     * Bootstrap uses Lost Cities' actual 16x16 MultiChunk ownership unit, not
+     * the legacy five-chunk warmup cell. Four-by-four plans cover one aligned
+     * 64x64 chunk planning macro-region and give the bounded planner a real
+     * batch to consume while initial spawn generation is still underway.
+     */
+    private static final int BOOTSTRAP_MULTICHUNK_WINDOW_SIDE = Math.max(1, Math.min(6,
+            Integer.getInteger("lc2h.warmup.bootstrapMultiWindowSide", 3)));
 
     private static final long STARTUP_DELAY_MS = 0;
     private static long firstCallTime = -1;
@@ -103,6 +113,14 @@ public final class AsyncChunkWarmup {
     private static volatile boolean gpuReadyOnce = false;
     private static final AtomicBoolean gpuAvailabilityListenerRegistered = new AtomicBoolean(false);
     private static final boolean GPU_ENABLED = Boolean.parseBoolean(System.getProperty("lc2h.gpu.enable", "true"));
+    private static final boolean EXPERIMENTAL_GPU_REGION_PREFILTER = Boolean.parseBoolean(
+        System.getProperty("lc2h.gpu.regionPrefilter.enabled", "false"));
+    private static final long GPU_AVAILABILITY_CACHE_MS = Math.max(100L, Long.getLong("lc2h.gpu.availabilityCacheMs", 1000L));
+    private static final Object GPU_AVAILABILITY_LOCK = new Object();
+    private static final int GPU_AVAILABILITY_VULKAN = 1;
+    private static final int GPU_AVAILABILITY_OPENCL = 2;
+    private static volatile long gpuAvailabilityCheckedAtMs = Long.MIN_VALUE;
+    private static volatile int gpuAvailabilityBits = 0;
     private static final long PRE_SCHEDULE_TTL_MS = Math.max(0L, Long.getLong("lc2h.warmup.preScheduleTtlMs", TimeUnit.MINUTES.toMillis(10)));
     private static final int PRE_SCHEDULE_PRUNE_SCAN = Math.max(10, Integer.getInteger("lc2h.warmup.preSchedulePruneScan", 512));
     private static final int PRE_SCHEDULE_PRUNE_EVERY = Math.max(10, Integer.getInteger("lc2h.warmup.preSchedulePruneEvery", 512));
@@ -111,6 +129,7 @@ public final class AsyncChunkWarmup {
     private static final AtomicLong lastFlushKickMs = new AtomicLong(0);
     private static final AtomicLong LAST_PLAYER_JOIN_MS = new AtomicLong(-1L);
     private static final ThreadLocal<Integer> CPU_WARMUP_DEPTH = ThreadLocal.withInitial(() -> 0);
+    private static final AtomicLong EXTERNAL_WORLDGEN_WARMUP_SKIPS = new AtomicLong(0L);
 
     private AsyncChunkWarmup() {
     }
@@ -132,7 +151,7 @@ public final class AsyncChunkWarmup {
                     LC2H.LOGGER.info("LC2H: Starting GPU warmup initialization using Vulkan");
                     ensureGpuReady();
                     if (gpuReadyOnce) {
-                        LC2H.LOGGER.info("LC2H: GPU warmup initialized successfully using Vulkan on {}", VulkanManager.deviceName());
+                        LC2H.LOGGER.info("LC2H: GPU warmup initialized successfully using Vulkan");
                     }
                 }
             } catch (Throwable t) {
@@ -203,18 +222,29 @@ public final class AsyncChunkWarmup {
         if (provider == null || center == null) {
             return;
         }
+        if (!prescheduleAllowedForCurrentMode()) {
+            return;
+        }
 
+        boolean bootstrap = false;
         try {
-            if (!org.admany.lc2h.util.server.ServerRescheduler.isServerAvailable()) {
-                if (VERBOSE_LOGGING) LC2H.LOGGER.debug("Skipping preSchedule because server is not yet available: {}", center);
-                return;
-            }
-
-            var server = org.admany.lc2h.util.server.ServerRescheduler.getServer();
+            MinecraftServer server = org.admany.lc2h.util.server.ServerRescheduler.getServer();
+            // LostCityFeature.place is already an authoritative worldgen entry
+            // point. During initial spawn generation it runs before the server
+            // lifecycle bridge publishes a MinecraftServer, and the old check
+            // discarded every look-ahead request. That made the initial world
+            // fall straight into synchronous MultiChunk calculation. With no
+            // server yet there is no tick-pressure signal to honour, so admit
+            // this bounded pre-schedule; once a server exists, retain the
+            // normal pressure gate unchanged.
+            bootstrap = server == null;
             if (server != null && !canPreschedule(server)) {
                 return;
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable ignored) {
+            // A bootstrap lookup failure must not convert a valid worldgen
+            // feature callback into a synchronous-only startup path.
+        }
 
         if (firstCallTime == -1) {
             firstCallTime = System.currentTimeMillis();
@@ -264,6 +294,15 @@ public final class AsyncChunkWarmup {
         cacheMisses.incrementAndGet();
         if (VERBOSE_LOGGING && gpuReady) {
             LC2H.LOGGER.debug("Scheduling region {} with GPU-ready warmup", region);
+        }
+
+        if (bootstrap) {
+            // Do this before the native getOrCreate path reaches its first
+            // synchronous calculation. The planner owns deduplication and its
+            // adaptive limiter, so repeated feature callbacks collapse into a
+            // single bounded macro-region instead of allocating a second pool.
+            AsyncMultiChunkPlanner.preScheduleWindow(provider, center, BOOTSTRAP_MULTICHUNK_WINDOW_SIDE);
+            return;
         }
 
         if (!enqueueRegion(provider, region)) {
@@ -377,13 +416,47 @@ public final class AsyncChunkWarmup {
     }
 
     public static boolean shouldAcceptPreschedule() {
+        if (!prescheduleAllowedForCurrentMode()) {
+            return false;
+        }
         MinecraftServer server = ServerRescheduler.getServer();
-        return server != null && canPreschedule(server);
+        // The feature callback is an authoritative opportunity even before
+        // ServerRescheduler has observed server-start.  Treat this short
+        // bootstrap interval as a low-pressure admission window so the first
+        // Lost Cities regions can populate prepared MultiChunks instead of
+        // permanently racing the native synchronous fallback.
+        return server == null || canPreschedule(server);
+    }
+
+    /**
+     * DH already owns and batches its distant-generation request. Starting an
+     * LC2H five-by-five speculative wave from every chunk inside that request
+     * multiplies work by 25 and competes with DH's own bounded queue. Detect the
+     * exact DH generation scope through DH's ThreadLocal marker and let the
+     * normal Lost Cities feature execute without recursive speculation.
+     */
+    public static boolean shouldWarmupFromCurrentThread() {
+        if (org.admany.lc2h.compat.DHCompat.isDistantWorldgenThread()) {
+            EXTERNAL_WORLDGEN_WARMUP_SKIPS.incrementAndGet();
+            return false;
+        }
+        return true;
+    }
+
+    public static long getExternalWorldgenWarmupSkips() {
+        return EXTERNAL_WORLDGEN_WARMUP_SKIPS.get();
     }
 
     private static boolean shouldAcceptGpuPreschedule() {
+        if (!EXPERIMENTAL_GPU_REGION_PREFILTER || !prescheduleAllowedForCurrentMode()) {
+            return false;
+        }
         MinecraftServer server = ServerRescheduler.getServer();
         return server != null && canGpuWarmup(server);
+    }
+
+    private static boolean prescheduleAllowedForCurrentMode() {
+        return !Lc2hRuntimeModes.anyParityAutorun();
     }
 
     public static boolean shouldInitializeGpuWarmupOnServerStart() {
@@ -414,16 +487,18 @@ public final class AsyncChunkWarmup {
         try {
             if (submitImmediateGpuAssist(provider, coord, source) != null) {
                 if (VERBOSE_LOGGING) {
-                    LC2H.LOGGER.debug("Deferred {} preschedule for {} to immediate GPU assist", source, coord);
+                    LC2H.LOGGER.debug("Submitted non-authoritative {} GPU prefilter for {}", source, coord);
                 }
-                return true;
+                // Region GPU output is only a prefilter/cache warmup. It cannot
+                // replace the authoritative Lost Cities planner for this chunk.
+                return false;
             }
             preSchedule(provider, coord);
             kickFlushMaybe();
             if (VERBOSE_LOGGING) {
-                LC2H.LOGGER.debug("Deferred {} preschedule for {} to queued GPU region warmup", source, coord);
+                LC2H.LOGGER.debug("Queued non-authoritative {} GPU prefilter for {}", source, coord);
             }
-            return true;
+            return false;
         } catch (Throwable t) {
             if (VERBOSE_LOGGING) {
                 LC2H.LOGGER.debug("Unable to defer {} preschedule for {} to GPU warmup: {}", source, coord, t.toString());
@@ -624,7 +699,8 @@ public final class AsyncChunkWarmup {
     }
 
     private static CompletableFuture<?> submitGpuRegionBatch(List<RegionProviderPair> regionsToProcess) {
-        if (!GPU_ENABLED || regionsToProcess.isEmpty() || isGpuWarmupTemporarilySuspended()) {
+        if (!GPU_ENABLED || !EXPERIMENTAL_GPU_REGION_PREFILTER
+            || regionsToProcess.isEmpty() || isGpuWarmupTemporarilySuspended()) {
             return null;
         }
         List<RegionBatchProcessingGPUTask.Entry> entries = new ArrayList<>(regionsToProcess.size());
@@ -645,15 +721,17 @@ public final class AsyncChunkWarmup {
         try {
             if (isVulkanAvailable()) {
                 if (VERBOSE_LOGGING) {
-                    LC2H.LOGGER.debug("Creating Vulkan region batch for {} regions on {}", entries.size(), VulkanManager.deviceName());
+                    LC2H.LOGGER.debug("Creating Vulkan region batch for {} regions", entries.size());
                 }
-                return QuantifiedVulkan.<Boolean>builder(LC2H.MODID, batchName, workload.taskKey())
-                    .cpuFallback(cpuFallback)
-                    .workload(workload)
+                return QuantifiedAPI.<Boolean>compute(LC2H.MODID, batchName)
+                    .key(workload.taskKey())
+                    .preferVulkan()
+                    .fallback(cpuFallback)
+                    .vulkanWorkload(workload)
                     .dataSizeBytes(workload.estimatedVramBytes())
                     .parallelUnits(workload.estimatedComputeUnits())
-                    .complexity(QuantifiedVulkan.Complexity.MASSIVE)
-                    .kind(QuantifiedVulkan.WorkloadKind.SPATIAL_ANALYSIS)
+                    .complexity(QuantifiedCompute.Complexity.MASSIVE)
+                    .kind(QuantifiedCompute.WorkloadKind.SPATIAL_ANALYSIS)
                     .timeout(Duration.ofSeconds(45))
                     .submit();
             }
@@ -661,13 +739,15 @@ public final class AsyncChunkWarmup {
                 if (VERBOSE_LOGGING) {
                     LC2H.LOGGER.debug("Creating OpenCL region batch for {} regions", entries.size());
                 }
-                return QuantifiedOpenCL.<Boolean>builder(LC2H.MODID, batchName, workload.taskKey())
-                    .cpuFallback(cpuFallback)
-                    .workload(workload)
+                return QuantifiedAPI.<Boolean>compute(LC2H.MODID, batchName)
+                    .key(workload.taskKey())
+                    .preferOpenCL()
+                    .fallback(cpuFallback)
+                    .openclWorkload(workload)
                     .dataSizeBytes(workload.estimatedVramBytes())
                     .parallelUnits(workload.estimatedComputeUnits())
-                    .complexity(QuantifiedOpenCL.Complexity.MASSIVE)
-                    .kind(QuantifiedOpenCL.WorkloadKind.SPATIAL_ANALYSIS)
+                    .complexity(QuantifiedCompute.Complexity.MASSIVE)
+                    .kind(QuantifiedCompute.WorkloadKind.SPATIAL_ANALYSIS)
                     .timeout(Duration.ofSeconds(45))
                     .submit();
             }
@@ -826,12 +906,11 @@ public final class AsyncChunkWarmup {
                     for (int localZ = 0; localZ < REGION_SIZE; localZ++) {
                         ChunkCoord chunk = region.getChunk(localX, localZ);
 
+                        // MultiChunk is the only warmup product consumed by Lost Cities.
+                        // The former terrain/palette/debris passes populated placeholder
+                        // caches that no generation path read, multiplying every region
+                        // into thousands of allocations and QAPI control-plane entries.
                         AsyncMultiChunkPlanner.preSchedule(provider, chunk);
-                        AsyncBuildingInfoPlanner.preSchedule(provider, chunk);
-                        AsyncTerrainFeaturePlanner.preSchedule(provider, chunk);
-                        AsyncPaletteGenerator.preSchedule(provider, chunk);
-                        AsyncDebrisGenerator.preSchedule(provider, chunk);
-                        AsyncTerrainCorrectionPlanner.preSchedule(provider, chunk);
                     }
                 }
 
@@ -862,6 +941,50 @@ public final class AsyncChunkWarmup {
     }
 
     private static boolean isOpenClAvailable() {
+        return (gpuAvailabilityBits() & GPU_AVAILABILITY_OPENCL) != 0;
+    }
+
+    private static boolean isVulkanAvailable() {
+        return (gpuAvailabilityBits() & GPU_AVAILABILITY_VULKAN) != 0;
+    }
+
+    private static boolean isGpuBackendAvailable() {
+        return gpuAvailabilityBits() != 0;
+    }
+
+    private static int gpuAvailabilityBits() {
+        if (!GPU_ENABLED) {
+            return 0;
+        }
+        long now = System.currentTimeMillis();
+        long checkedAt = gpuAvailabilityCheckedAtMs;
+        if (checkedAt != Long.MIN_VALUE && now - checkedAt <= GPU_AVAILABILITY_CACHE_MS) {
+            return gpuAvailabilityBits;
+        }
+        synchronized (GPU_AVAILABILITY_LOCK) {
+            checkedAt = gpuAvailabilityCheckedAtMs;
+            if (checkedAt != Long.MIN_VALUE && now - checkedAt <= GPU_AVAILABILITY_CACHE_MS) {
+                return gpuAvailabilityBits;
+            }
+            int bits = directGpuAvailabilityBits();
+            gpuAvailabilityBits = bits;
+            gpuAvailabilityCheckedAtMs = now;
+            return bits;
+        }
+    }
+
+    private static int directGpuAvailabilityBits() {
+        int bits = 0;
+        if (directVulkanAvailable()) {
+            bits |= GPU_AVAILABILITY_VULKAN;
+        }
+        if (directOpenClAvailable()) {
+            bits |= GPU_AVAILABILITY_OPENCL;
+        }
+        return bits;
+    }
+
+    private static boolean directOpenClAvailable() {
         if (QuantifiedOpenCL.isGpuReady()) {
             return true;
         }
@@ -875,7 +998,7 @@ public final class AsyncChunkWarmup {
         }
     }
 
-    private static boolean isVulkanAvailable() {
+    private static boolean directVulkanAvailable() {
         try {
             return QuantifiedVulkan.isGpuReady();
         } catch (Throwable t) {
@@ -884,13 +1007,6 @@ public final class AsyncChunkWarmup {
             }
             return false;
         }
-    }
-
-    private static boolean isGpuBackendAvailable() {
-        if (isVulkanAvailable()) {
-            return true;
-        }
-        return isOpenClAvailable();
     }
 
     private static int applyGpuPressureLimit(int base) {
@@ -972,12 +1088,14 @@ public final class AsyncChunkWarmup {
         try {
             OpenCLManager.initialize();
             openClProbeStarted.set(true);
+            gpuAvailabilityCheckedAtMs = Long.MIN_VALUE;
         } catch (Throwable t) {
             // If the core is not present or OpenCL initialization fails, we continue running CPU-only.
             if (VERBOSE_LOGGING) {
                 LC2H.LOGGER.debug("OpenCLManager.initialize() failed: {}", t.toString());
             }
             openClProbeStarted.set(true);
+            gpuAvailabilityCheckedAtMs = Long.MIN_VALUE;
         }
     }
 
@@ -1152,7 +1270,8 @@ public final class AsyncChunkWarmup {
         long openClRegions = getOpenClRegionsProcessed();
         long cpuFallbackRegions = getCpuFallbackRegionsProcessed();
         return String.format(java.util.Locale.ROOT,
-            "backend=%s vulkanOnly=%d regions/%d batches/%d chunks opencl=%d regions/%d batches/%d chunks cpuFallback=%d regions/%d chunks",
+            "prefilter=%s backend=%s vulkan=%d regions/%d batches/%d chunks opencl=%d regions/%d batches/%d chunks cpuFallback=%d regions/%d chunks",
+            EXPERIMENTAL_GPU_REGION_PREFILTER ? "experimental-non-authoritative" : "disabled",
             selectedGpuBackend(),
             vulkanRegions,
             getVulkanBatchesProcessed(),

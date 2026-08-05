@@ -3,7 +3,9 @@ package org.admany.lc2h.concurrency.parallel;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.concurrency.async.AsyncManager;
 import org.admany.lc2h.concurrency.async.Priority;
-import org.admany.quantified.api.parallel.ParallelCompute;
+import org.admany.quantified.api.CacheRequest;
+import org.admany.quantified.api.ParallelRequest;
+import org.admany.quantified.api.QuantifiedAPI;
 import net.minecraftforge.server.ServerLifecycleHooks;
 import net.minecraft.server.MinecraftServer;
 
@@ -76,111 +78,29 @@ public final class ParallelWorkQueue {
         final long startNanos = System.nanoTime();
         final int sliceCount = suppliers.size();
 
-        List<Integer> slices = new ArrayList<>(suppliers.size());
-        for (int i = 0; i < suppliers.size(); i++) {
-            slices.add(i);
+        long estimatedSequentialMs = estimateSequentialMs(name, sliceCount);
+        int maxParallelism = Math.max(1, Runtime.getRuntime().availableProcessors());
+        if (estimatedSequentialMs > 0 && estimatedSequentialMs <= SMALL_BATCH_THRESHOLD_MS) {
+            maxParallelism = Math.max(1, SMALL_BATCH_MAX_PARALLELISM);
+        } else if (estimatedSequentialMs == 0 && sliceCount <= 8) {
+            maxParallelism = Math.max(1, SMALL_BATCH_MAX_PARALLELISM);
         }
-        ParallelCompute.Builder<Integer, T, List<T>> builder = ParallelCompute.<Integer, T>builder(LC2H.MODID, name, SEQUENCE.incrementAndGet())
-            .slices(() -> slices)
-            .sliceExecutor(index -> {
-                T value = suppliers.get(index).get();
+
+        ParallelWorkOptions<T> effective = options == null ? ParallelWorkOptions.none() : options;
+        CacheRequest sliceCacheRequest = buildSliceCacheRequest(name, effective);
+        ParallelRequest.MappingPlan<Integer, T> mappingPlan = QuantifiedAPI
+            .parallel(LC2H.MODID, name)
+            .key(SEQUENCE.incrementAndGet())
+            .maxParallelism(maxParallelism)
+            .range(0, suppliers.size())
+            .map(index -> {
+                T value = loadSliceValue(suppliers, effective, sliceCacheRequest, index);
                 if (sliceListener != null) {
                     sliceListener.accept(new ParallelSliceResult<>(index, value));
                 }
                 return value;
-            })
-            .reducer(results -> {
-                List<T> ordered = new ArrayList<>(results.size());
-                ordered.addAll(results);
-                return Collections.unmodifiableList(ordered);
             });
-
-        long estimatedSequentialMs = estimateSequentialMs(name, sliceCount);
-        if (estimatedSequentialMs > 0 && estimatedSequentialMs <= SMALL_BATCH_THRESHOLD_MS) {
-            builder.maxParallelism(Math.max(1, SMALL_BATCH_MAX_PARALLELISM));
-        } else if (estimatedSequentialMs == 0 && sliceCount <= 8) {
-            builder.maxParallelism(Math.max(1, SMALL_BATCH_MAX_PARALLELISM));
-        }
-
-        ParallelWorkOptions<T> effective = options == null ? ParallelWorkOptions.none() : options;
-        if (effective.cacheEnabled()) {
-            Duration ttl = effective.cacheTtl();
-            if (ttl == null || ttl.isZero() || ttl.isNegative()) {
-                ttl = Duration.ofMinutes(30);
-            }
-            long maxEntries = effective.cacheMaxEntries() <= 0 ? 1024L : effective.cacheMaxEntries();
-            Function<Integer, String> keyFunction = effective.cacheKeyFunction();
-            Function<Integer, String> cacheKeySupplier = index -> {
-                if (keyFunction == null || index == null) {
-                    return null;
-                }
-                return keyFunction.apply(index);
-            };
-            if (effective.cachePersistent()) {
-                configurePersistentCache(
-                    builder,
-                    effective.cacheName() == null ? name : effective.cacheName(),
-                    cacheKeySupplier,
-                    effective.cacheSerializer(),
-                    effective.cacheDeserializer(),
-                    ttl,
-                    maxEntries,
-                    effective.cacheCompression(),
-                    effective.cacheCopyOnWrite()
-                );
-            } else {
-                configureMemoryCache(
-                    builder,
-                    effective.cacheName() == null ? name : effective.cacheName(),
-                    cacheKeySupplier,
-                    effective.cacheSerializer(),
-                    effective.cacheDeserializer(),
-                    ttl,
-                    maxEntries,
-                    effective.cacheCopyOnWrite()
-                );
-            }
-        }
-        return submitWithQueueFullHandling(name, sliceCount, startNanos, suppliers, sliceListener, options, builder, attempt);
-    }
-
-    private static <T> void configurePersistentCache(ParallelCompute.Builder<Integer, T, List<T>> builder,
-                                                     String cacheName,
-                                                     Function<Integer, String> keyFunction,
-                                                     Function<T, byte[]> serializer,
-                                                     Function<byte[], T> deserializer,
-                                                     Duration ttl,
-                                                     long maxEntries,
-                                                     boolean compression,
-                                                     boolean copyOnWrite) {
-        try {
-            builder.getClass()
-                .getMethod("persistentSliceCache", String.class, Function.class, Function.class, Function.class,
-                    Duration.class, long.class, boolean.class, boolean.class)
-                .invoke(builder, cacheName, keyFunction, serializer, deserializer, ttl, maxEntries, compression, copyOnWrite);
-            return;
-        } catch (ReflectiveOperationException ignored) {
-        }
-        builder.persistentSliceCache(cacheName, keyFunction, serializer, deserializer, ttl, maxEntries, compression);
-    }
-
-    private static <T> void configureMemoryCache(ParallelCompute.Builder<Integer, T, List<T>> builder,
-                                                 String cacheName,
-                                                 Function<Integer, String> keyFunction,
-                                                 Function<T, byte[]> serializer,
-                                                 Function<byte[], T> deserializer,
-                                                 Duration ttl,
-                                                 long maxEntries,
-                                                 boolean copyOnWrite) {
-        try {
-            builder.getClass()
-                .getMethod("memorySliceCache", String.class, Function.class, Function.class, Function.class,
-                    Duration.class, long.class, boolean.class)
-                .invoke(builder, cacheName, keyFunction, serializer, deserializer, ttl, maxEntries, copyOnWrite);
-            return;
-        } catch (ReflectiveOperationException ignored) {
-        }
-        builder.memorySliceCache(cacheName, keyFunction, serializer, deserializer, ttl, maxEntries);
+        return submitWithQueueFullHandling(name, sliceCount, startNanos, suppliers, sliceListener, options, mappingPlan, attempt);
     }
 
     private static <T> CompletableFuture<List<T>> submitWithQueueFullHandling(String name,
@@ -189,11 +109,11 @@ public final class ParallelWorkQueue {
                                                                               List<Supplier<T>> suppliers,
                                                                               Consumer<ParallelSliceResult<T>> sliceListener,
                                                                               ParallelWorkOptions<T> options,
-                                                                              ParallelCompute.Builder<Integer, T, List<T>> builder,
+                                                                              ParallelRequest.MappingPlan<Integer, T> mappingPlan,
                                                                               int attempt) {
         final CompletableFuture<List<T>> submitted;
         try {
-            submitted = builder.submit();
+            submitted = mappingPlan.submit();
         } catch (Throwable t) {
             Throwable root = unwrap(t);
             if (isQueueFull(root)) {
@@ -217,6 +137,48 @@ public final class ParallelWorkQueue {
             failed.completeExceptionally(root);
             return failed;
         }).thenCompose(Function.identity());
+    }
+
+    private static <T> T loadSliceValue(List<Supplier<T>> suppliers,
+                                        ParallelWorkOptions<T> options,
+                                        CacheRequest cacheRequest,
+                                        Integer index) {
+        Supplier<T> supplier = suppliers.get(index);
+        if (options == null || !options.cacheEnabled() || cacheRequest == null) {
+            return supplier.get();
+        }
+        Function<Integer, String> keyFunction = options.cacheKeyFunction();
+        String cacheKey = keyFunction == null ? null : keyFunction.apply(index);
+        if (cacheKey == null || cacheKey.isBlank()) {
+            return supplier.get();
+        }
+        return cacheRequest.get(cacheKey, supplier);
+    }
+
+    private static <T> CacheRequest buildSliceCacheRequest(String name, ParallelWorkOptions<T> options) {
+        if (options == null || !options.cacheEnabled()) {
+            return null;
+        }
+        Duration ttl = options.cacheTtl();
+        if (ttl == null || ttl.isZero() || ttl.isNegative()) {
+            ttl = Duration.ofMinutes(30);
+        }
+        long maxEntries = options.cacheMaxEntries() <= 0 ? 1024L : options.cacheMaxEntries();
+        String cacheName = options.cacheName() == null ? name : options.cacheName();
+
+        CacheRequest request = QuantifiedAPI.cache(LC2H.MODID, cacheName)
+            .ttl(ttl)
+            .maxEntries(maxEntries)
+            .refreshOnAccess();
+        if (options.cachePersistent()) {
+            request.diskPreferred();
+            if (options.cacheCompression()) {
+                request.compressed();
+            }
+        } else {
+            request.memoryOnly();
+        }
+        return request;
     }
 
     private static <T> CompletableFuture<List<T>> handleQueueFull(String name,
@@ -249,7 +211,7 @@ public final class ParallelWorkQueue {
 
         // Ultimate fallback: run the batch on the normal LC2H async scheduler.
         // This keeps progress even under Quantified parallel queue saturation.
-        return AsyncManager.submitSupplier("queuefull-fallback-" + (name == null ? "work" : name), () -> {
+        return AsyncManager.submitSupplierFallback("queuefull-fallback-" + (name == null ? "work" : name), () -> {
             List<T> out = new ArrayList<>(suppliers.size());
             for (int i = 0; i < suppliers.size(); i++) {
                 T value = suppliers.get(i).get();
@@ -259,7 +221,7 @@ public final class ParallelWorkQueue {
                 out.add(value);
             }
             return Collections.unmodifiableList(out);
-        }, Priority.LOW);
+        });
     }
 
     private static void rateLimitedQueueFullLog(String name, int sliceCount, int attempt, Throwable root) {

@@ -7,6 +7,11 @@ buildscript {
     }
 }
 
+abstract class Lc2hArchiveBuildService implements org.gradle.api.services.BuildService<org.gradle.api.services.BuildServiceParameters.None>, AutoCloseable {
+    @Override
+    void close() { }
+}
+
 plugins {
     id 'eclipse'
     id 'idea'
@@ -28,6 +33,52 @@ base {
 java.toolchain.languageVersion = JavaLanguageVersion.of(17)
 
 println "Java: ${System.getProperty 'java.version'}, JVM: ${System.getProperty 'java.vm.version'} (${System.getProperty 'java.vendor'}), Arch: ${System.getProperty 'os.arch'}"
+def lc2hRunDirProp = (findProperty('lc2h.runDir') ?: System.getProperty('lc2h.runDir') ?: 'run').toString()
+def lc2hJfrOutputProp = (findProperty('lc2h.jfrOutput') ?: System.getProperty('lc2h.jfrOutput') ?: '').toString().trim()
+def lc2hShadowtestProps = [
+    'lc2h.shadowtest.auto',
+    'lc2h.shadowtest.auto.stop',
+    'lc2h.shadowtest.x',
+    'lc2h.shadowtest.y',
+    'lc2h.shadowtest.z'
+]
+def lc2hParityProps = [
+    'lc2h.parity.auto',
+    'lc2h.parity.auto.stop',
+    'lc2h.parity.radius',
+    'lc2h.parity.samples',
+    'lc2h.parity.dimensions',
+    'lc2h.parity.centers',
+    'lc2h.parity.profiles',
+    'lc2h.parity.output',
+    'lc2h.parity.generateChunks',
+    'lc2h.parity.requireSeedMatch',
+    'lc2h.parity.primeChunksPerTick',
+    'lc2h.parity.primeTimeoutMs'
+]
+def lc2hWorldParityProps = [
+    'lc2h.baselineMode',
+    'lc2h.worldparity.auto',
+    'lc2h.worldparity.auto.stop',
+    'lc2h.worldparity.radius',
+    'lc2h.worldparity.samples',
+    'lc2h.worldparity.primeChunksPerTick',
+    'lc2h.worldparity.primeTimeoutMs',
+    'lc2h.worldparity.dimensions',
+    'lc2h.worldparity.centers',
+    'lc2h.worldparity.profiles',
+    'lc2h.worldparity.laneId',
+    'lc2h.worldparity.role',
+    'lc2h.worldparity.output',
+    'lc2h.worldparity.compareAgainst',
+    'lc2h.worldparity.compareOutput',
+    'lc2h.precaptureTrace.enabled',
+    'lc2h.precaptureTrace.dimension',
+    'lc2h.precaptureTrace.pos',
+    'lc2h.precaptureTrace.output',
+    'lc2h.precaptureTrace.chunkRadius',
+    'lc2h.precaptureTrace.captureCaller'
+]
 minecraft {
     // The mappings can be changed at any time and must be in the following format.
     // Channel:   Version:
@@ -76,7 +127,7 @@ minecraft {
     runs {
         // applies to all the run configs below
         configureEach {
-            workingDirectory project.file('run')
+            workingDirectory project.file(lc2hRunDirProp)
 
             // Recommended logging data for a userdev environment
             // The markers can be added/remove as needed separated by commas.
@@ -94,6 +145,32 @@ minecraft {
             property 'mixin.debug', 'true'
             property 'mixin.checks.interfaces', 'true'
             property 'mixin.env.remapRefMap', 'true'
+            jvmArg("-Dlc2h.runtimeMappings=${mapping_channel}:${mapping_version}")
+            if (lc2hJfrOutputProp) {
+                def jfrTarget = file(lc2hJfrOutputProp)
+                jfrTarget.parentFile.mkdirs()
+                def jfrFile = jfrTarget.absolutePath.replace('\\', '/')
+                jvmArg("-XX:StartFlightRecording=filename=${jfrFile},settings=profile,dumponexit=true,maxsize=512m")
+            }
+
+            lc2hShadowtestProps.each { propName ->
+                def propValue = findProperty(propName) ?: System.getProperty(propName)
+                if (propValue != null && propValue.toString().trim()) {
+                    jvmArg("-D${propName}=${propValue}")
+                }
+            }
+            lc2hParityProps.each { propName ->
+                def propValue = findProperty(propName) ?: System.getProperty(propName)
+                if (propValue != null && propValue.toString().trim()) {
+                    jvmArg("-D${propName}=${propValue}")
+                }
+            }
+            lc2hWorldParityProps.each { propName ->
+                def propValue = findProperty(propName) ?: System.getProperty(propName)
+                if (propValue != null && propValue.toString().trim()) {
+                    jvmArg("-D${propName}=${propValue}")
+                }
+            }
 
             mods {
                 "${mod_id}" {
@@ -149,7 +226,6 @@ repositories {
         name = 'Sponge / Mixin'
         url = 'https://repo.spongepowered.org/repository/maven-public/'
     }
-
     // Resolve CurseForge files by project/file ID so ForgeGradle can deobf in dev
     // Set gradle.properties: lostcitiesProjectId=XXXXX, lostcitiesFileId=YYYYY
     // See https://www.cursemaven.com for usage
@@ -171,16 +247,14 @@ repositories {
     mavenCentral()
 }
 
-def quantifiedJars = fileTree(dir: 'libs', include: ['quantified-*.jar']).files
-if (quantifiedJars.isEmpty()) {
-    throw new GradleException("Missing quantified jar in libs (expected quantified-*.jar)")
+def quantifiedJar = file("libs/quantified-api-omni-${project.property('quantified_version')}.jar")
+if (!quantifiedJar.isFile()) {
+    throw new GradleException("Missing Quantified API ${project.property('quantified_version')} at ${quantifiedJar}. Add the exact omni jar to libs before building.")
 }
-def quantifiedJar = quantifiedJars.sort { it.name }.last()
-def lostcitiesJars = fileTree(dir: 'libs', include: ['lostcities-*.jar']).files
-if (lostcitiesJars.isEmpty()) {
-    throw new GradleException("Missing lostcities jar in libs (expected lostcities-*.jar)")
+def lostCitiesJar = file("libs/lostcities-1.20-${project.property('lostcities_version')}.jar")
+if (!lostCitiesJar.isFile()) {
+    throw new GradleException("Missing Lost Cities ${project.property('lostcities_version')} at ${lostCitiesJar}. Add the exact jar to libs before building.")
 }
-def lostcitiesJar = lostcitiesJars.sort { it.name }.last()
 
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
@@ -189,9 +263,11 @@ dependencies {
 
 
     implementation fg.deobf(files(quantifiedJar))
-    compileOnly files(lostcitiesJar)
+    compileOnly fg.deobf("local.mods:lostcities-1.20:${project.property('lostcities_version')}")
+    runtimeOnly fg.deobf("local.mods:lostcities-1.20:${project.property('lostcities_version')}")
 
     implementation 'com.github.oshi:oshi-core:6.4.5'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
 }
 
 
@@ -232,7 +308,21 @@ tasks.named('jar', Jar).configure {
                 'Implementation-Timestamp': new Date().format("yyyy-MM-dd'T'HH:mm:ssZ")
         ])
     }
-    finalizedBy 'reobfJar'
+}
+
+def lc2hArchiveBuildService = gradle.sharedServices.registerIfAbsent('lc2hArchiveBuildService', Lc2hArchiveBuildService) {
+    maxParallelUsages = 1
+}
+
+tasks.named('jar', Jar).configure {
+    usesService(lc2hArchiveBuildService)
+}
+
+tasks.matching { it.name == 'reobfJar' }.configureEach {
+    usesService(lc2hArchiveBuildService)
+    dependsOn tasks.named('jar')
+    mustRunAfter tasks.named('jar')
+    inputs.files(tasks.named('jar').flatMap { it.archiveFile })
 }
 
 // Example configuration to allow publishing using the maven-publish plugin
@@ -274,7 +364,7 @@ tasks.register('lc2hCopyRefmap', Copy) {
     onlyIf {
         def src = file("$buildDir/tmp/compileJava/compileJava-refmap.json")
         def dst = file("$buildDir/resources/main/mixins.lc2h.refmap.json")
-        src.exists() && (!dst.exists() || dst.length() < 100)
+        src.exists() && (!dst.exists() || src.bytes != dst.bytes)
     }
 }
 
@@ -288,4 +378,77 @@ mixin {
     add sourceSets.main, "mixins.lc2h.refmap.json"
     config "mixins.lc2h.json"
     debug.export = true
+}
+
+tasks.register('lc2hRewriteBenchmark', JavaExec) {
+    group = 'verification'
+    description = 'Runs standalone rewrite-focused LC2H benchmarks and parity checks.'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'org.admany.lc2h.dev.benchmark.Lc2hRewriteBenchmark'
+}
+
+tasks.register('lc2hCompareWorldParityExports', JavaExec) {
+    group = 'verification'
+    description = 'Compares two existing world-parity exports with the production mismatch classifier.'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'org.admany.lc2h.dev.debug.WorldParityComparisonTool'
+    // Offline forensic compares occasionally need every representative sample,
+    // not the normal concise report cap.  Keep the production default intact.
+    if (project.hasProperty('paritySampleLimit')) {
+        jvmArgs "-Dlc2h.worldparity.sampleLimit=${project.property('paritySampleLimit')}"
+    }
+    if (project.hasProperty('parityBaseline')) {
+        args project.property('parityBaseline')
+    }
+    if (project.hasProperty('parityTest')) {
+        args project.property('parityTest')
+    }
+    if (project.hasProperty('parityOutput')) {
+        args project.property('parityOutput')
+    }
+}
+
+tasks.register('lc2hVerifyProductionMixins') {
+    group = 'verification'
+    description = 'Rejects diagnostic-only mixins from the production mixin configuration and verifies its refmap declaration.'
+    dependsOn tasks.named('processResources')
+    doLast {
+        def config = file("$buildDir/resources/main/mixins.lc2h.json")
+        if (!config.exists()) {
+            throw new GradleException("Missing processed production mixin config: ${config}")
+        }
+        def text = config.getText('UTF-8')
+        def denied = [
+                'MixinChunkGeneratorFeatureSeedTrace',
+                'MixinLostCityFeaturePreCaptureTrace',
+                'MixinLostCityTerrainFeaturePreCaptureTrace',
+                'MixinLostCityTerrainFeaturePaletteTrace',
+                'MixinLostCitySphereFeaturePreCaptureTrace',
+                'MixinSpheresPreCaptureTrace',
+                'MixinChunkDriverPreCaptureTrace',
+                'MixinBulkSectionAccessTargetTrace',
+                'MixinLevelChunkTargetTrace',
+                'MixinLevelChunkSectionTargetTrace',
+                'MixinMultifaceGrowthFeaturePreCaptureTrace',
+                'MixinChunkGeneratorPhaseTrace',
+                'MixinNoiseBasedChunkGeneratorPhaseTrace',
+                'MixinProtoChunkTargetTrace'
+        ].findAll { text.contains(it) }
+        if (!denied.isEmpty()) {
+            throw new GradleException("Diagnostic mixins leaked into production config: ${denied.join(', ')}")
+        }
+        if (!text.contains('"refmap": "mixins.lc2h.refmap.json"')) {
+            throw new GradleException('Production mixin config does not declare mixins.lc2h.refmap.json')
+        }
+        def refmap = file("$buildDir/resources/main/mixins.lc2h.refmap.json")
+        if (!refmap.exists() || refmap.length() < 100) {
+            throw new GradleException("Missing or empty production mixin refmap: ${refmap}")
+        }
+    }
+}
+
+tasks.named('test', Test).configure {
+    useJUnitPlatform()
 }

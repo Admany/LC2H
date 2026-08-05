@@ -5,7 +5,6 @@ import org.admany.lc2h.concurrency.async.AsyncManager;
 import org.admany.lc2h.concurrency.async.Priority;
 import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.quantified.api.QuantifiedAPI;
-import org.admany.quantified.api.model.QuantifiedTask;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -15,17 +14,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class CpuBatchScheduler {
     private record NamedTask(String name, Runnable action) {}
-        private static final int MAX_BATCH = Math.max(128, Integer.getInteger("lc.cpu_batch.size", 2048));
-        private static final int TARGET_BATCH = Math.max(
-            64,
-            Math.min(
-                MAX_BATCH,
-                Integer.getInteger("lc.cpu_batch.target", MAX_BATCH / 2)
-            )
-        );
-    private static final long SPIN_WAIT_MS = Math.max(0L, Long.getLong("lc.cpu_batch.spin_wait_ms", 4L));
+    private static final int MAX_BATCH = Math.max(128, Integer.getInteger("lc.cpu_batch.size", 2048));
+    private static final int TARGET_BATCH = Math.max(
+        64,
+        Math.min(
+            MAX_BATCH,
+            Integer.getInteger("lc.cpu_batch.target", MAX_BATCH / 2)
+        )
+    );
+    private static final long FLUSH_DELAY_MS = Math.max(0L, Long.getLong("lc.cpu_batch.flush_delay_ms", 4L));
     private static final Queue<NamedTask> QUEUE = new ConcurrentLinkedQueue<>();
     private static final AtomicBoolean FLUSH_SCHEDULED = new AtomicBoolean(false);
+    private static final AtomicBoolean FLUSH_RUNNING = new AtomicBoolean(false);
 
     private CpuBatchScheduler() {
     }
@@ -46,9 +46,8 @@ public final class CpuBatchScheduler {
 
     private static void requestFlush(String name, boolean immediate) {
         if (immediate) {
-            if (FLUSH_SCHEDULED.compareAndSet(false, true)) {
-                scheduleFlush(name, true);
-            }
+            FLUSH_SCHEDULED.set(true);
+            scheduleFlush(name, true);
             return;
         }
         if (FLUSH_SCHEDULED.compareAndSet(false, true)) {
@@ -57,33 +56,35 @@ public final class CpuBatchScheduler {
     }
 
     private static void scheduleFlush(String name, boolean immediate) {
+        Runnable dispatcher = CpuBatchScheduler::runScheduledFlush;
+        if (!immediate && FLUSH_DELAY_MS > 0L) {
+            AsyncManager.runLater("cpu-batch-flush", dispatcher, FLUSH_DELAY_MS, Priority.HIGH);
+            return;
+        }
         try {
-            QuantifiedAPI.submit(QuantifiedTask.<Void>builder(LC2H.MODID, name, () -> {
-                if (!immediate && SPIN_WAIT_MS > 0L) {
-                    final long deadline = System.nanoTime() + SPIN_WAIT_MS * 1_000_000L;
-                    int spinSleeps = 0;
-                    while (QUEUE.size() < TARGET_BATCH && System.nanoTime() < deadline) {
-                        if (QUEUE.size() >= MAX_BATCH) {
-                            break;
-                        }
-                        try {
-                            Thread.sleep(1L);
-                        } catch (InterruptedException ignored) {
-                            Thread.currentThread().interrupt();
-                            break;
-                        }
-                        if (++spinSleeps >= SPIN_WAIT_MS) {
-                            break;
-                        }
-                    }
-                }
-                flush();
-                return null;
-            }).priorityForeground()
-                .batchKey(AsyncManager.quantifiedBatchKey(name, Priority.HIGH)));
+            QuantifiedAPI.<Void>compute(LC2H.MODID, name)
+                .foreground()
+                .submit(() -> {
+                    runScheduledFlush();
+                    return null;
+                });
         } catch (Throwable t) {
             LC2H.LOGGER.debug("[LC2H] CpuBatchScheduler submit fallback: {}", t.toString());
+            runScheduledFlush();
+        }
+    }
+
+    private static void runScheduledFlush() {
+        if (!FLUSH_SCHEDULED.get()) {
+            return;
+        }
+        if (!FLUSH_RUNNING.compareAndSet(false, true)) {
+            return;
+        }
+        try {
             flush();
+        } finally {
+            FLUSH_RUNNING.set(false);
         }
     }
 
@@ -106,9 +107,7 @@ public final class CpuBatchScheduler {
             Lc2hTimingRegistry.record("cpu_batch.flush", System.nanoTime() - flushStartNs);
             FLUSH_SCHEDULED.set(false);
             if (!QUEUE.isEmpty()) {
-                if (FLUSH_SCHEDULED.compareAndSet(false, true)) {
-                    scheduleFlush("cpu_batch", false);
-                }
+                requestFlush("cpu_batch", QUEUE.size() >= TARGET_BATCH);
             }
         }
     }

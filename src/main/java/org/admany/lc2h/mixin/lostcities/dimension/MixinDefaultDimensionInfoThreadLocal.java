@@ -45,22 +45,7 @@ public abstract class MixinDefaultDimensionInfoThreadLocal implements IDimension
         this.world = world;
         this.lc2h$worldFallback = world;
         this.lc2h$worldLocal.set(world);
-
-        try {
-            Random random = lc2h$randomLocal.get();
-            if (random == null) {
-                random = new Random(world.getSeed());
-                lc2h$randomLocal.set(random);
-            }
-
-            long seed = world.getSeed();
-            if (world instanceof WorldGenRegion region) {
-                var center = region.getCenter();
-                seed = seed + center.z * 341873128712L + center.x * 132897987541L;
-            }
-            random.setSeed(seed);
-        } catch (Throwable ignored) {
-        }
+        this.lc2h$randomLocal.remove();
     }
 
     @Overwrite
@@ -104,11 +89,14 @@ public abstract class MixinDefaultDimensionInfoThreadLocal implements IDimension
     @Overwrite
     public LostCityProfile getOutsideProfile() {
         LostCityProfile effectiveProfile = getProfile();
-        if (effectiveProfile == profile) {
-            return profileOutside;
+        LostCityProfile fallback = profileOutside;
+        if (effectiveProfile != profile) {
+            LostCityProfile outside = ProfileSetup.STANDARD_PROFILES.get(effectiveProfile.CITYSPHERE_OUTSIDE_PROFILE);
+            if (outside != null) {
+                fallback = outside;
+            }
         }
-        LostCityProfile outside = ProfileSetup.STANDARD_PROFILES.get(effectiveProfile.CITYSPHERE_OUTSIDE_PROFILE);
-        return outside != null ? outside : profileOutside;
+        return LostCityProfileOverrideManager.resolveOutsideProfile(getType(), fallback);
     }
 
     @Overwrite

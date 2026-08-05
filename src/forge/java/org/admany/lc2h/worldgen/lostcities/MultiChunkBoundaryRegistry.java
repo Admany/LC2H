@@ -18,8 +18,8 @@ public final class MultiChunkBoundaryRegistry {
     private static final boolean ENABLED = Boolean.parseBoolean(System.getProperty("lc2h.multichunk.boundaryStitch", "true"));
     private static final int MAX_RADIUS = Math.max(1, Math.min(4, Integer.getInteger("lc2h.multichunk.boundaryLaneCount", 2)));
     private static final long TTL_MS = Math.max(30_000L,
-        Long.getLong("lc2h.multichunk.boundaryTtlMs", TimeUnit.MINUTES.toMillis(10)));
-    private static final int MAX_CACHE = Math.max(256, Integer.getInteger("lc2h.multichunk.boundaryCacheMax", 4096));
+        Long.getLong("lc2h.multichunk.boundaryTtlMs", TimeUnit.MINUTES.toMillis(3)));
+    private static final int MAX_CACHE = Math.max(128, Integer.getInteger("lc2h.multichunk.boundaryCacheMax", 1024));
     private static final int PRUNE_EVERY = Math.max(128, Integer.getInteger("lc2h.multichunk.boundaryPruneEvery", 512));
 
     private static final ConcurrentHashMap<ChunkCoord, SummaryEntry> SUMMARIES = new ConcurrentHashMap<>();
@@ -145,6 +145,12 @@ public final class MultiChunkBoundaryRegistry {
         CONTRACTS.keySet().removeIf(key -> key.dimension().equals(String.valueOf(topLeft.dimension().location()))
             && key.ax() >= minMultiX && key.ax() <= maxMultiX
             && key.az() >= minMultiZ && key.az() <= maxMultiZ);
+    }
+
+    public static void clearAll() {
+        SUMMARIES.clear();
+        CONTRACTS.clear();
+        OPS.set(0);
     }
 
     private static Decision checkEdge(IDimensionInfo provider,

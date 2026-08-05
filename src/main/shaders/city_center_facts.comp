@@ -1,0 +1,80 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer Inputs {
+    float values[];
+} inputData;
+
+layout(std430, binding = 1) writeonly buffer Outputs {
+    float radii[];
+} outputData;
+
+layout(push_constant) uniform Parameters {
+    uint candidateCount;
+} parameters;
+
+const uint64_t RANDOM_MULTIPLIER = 0x5deece66dul;
+const uint64_t RANDOM_ADDEND = 0xbul;
+const uint64_t RANDOM_MASK = 0xfffffffffffful;
+
+uint64_t nextSeed(uint64_t state) {
+    return (state * RANDOM_MULTIPLIER + RANDOM_ADDEND) & RANDOM_MASK;
+}
+
+uint64_t initialSeed(int64_t seed) {
+    return (uint64_t(seed) ^ RANDOM_MULTIPLIER) & RANDOM_MASK;
+}
+
+uint64_t firstDoubleNumerator(int64_t seed) {
+    uint64_t state = nextSeed(initialSeed(seed));
+    uint64_t high = state >> 22u;
+    state = nextSeed(state);
+    uint64_t low = state >> 21u;
+    return (high << 27u) + low;
+}
+
+int firstBoundedInt(int64_t seed, int bound) {
+    if (bound <= 1) {
+        return 0;
+    }
+    uint64_t state = nextSeed(initialSeed(seed));
+    int bits = int(state >> 17u);
+    if ((bound & -bound) == bound) {
+        return int((int64_t(bound) * int64_t(bits)) >> 31u);
+    }
+    int value = bits % bound;
+    while ((bits - value + (bound - 1)) < 0) {
+        state = nextSeed(state);
+        bits = int(state >> 17u);
+        value = bits % bound;
+    }
+    return value;
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= parameters.candidateCount) {
+        return;
+    }
+
+    uint base = index * 8u;
+    int chunkX = int(inputData.values[base]);
+    int chunkZ = int(inputData.values[base + 1u]);
+    int minRadius = int(inputData.values[base + 2u]);
+    int radiusRange = int(inputData.values[base + 3u]);
+    uint64_t chanceLimit = uint64_t(uint(inputData.values[base + 4u]))
+        | (uint64_t(uint(inputData.values[base + 5u])) << 16u)
+        | (uint64_t(uint(inputData.values[base + 6u])) << 32u)
+        | (uint64_t(uint(inputData.values[base + 7u])) << 48u);
+
+    int64_t centerSeed = int64_t(chunkZ) * 797003437l + int64_t(chunkX) * 295075153l;
+    if (firstDoubleNumerator(centerSeed) >= chanceLimit) {
+        outputData.radii[index] = 0.0;
+        return;
+    }
+
+    int64_t radiusSeed = int64_t(chunkZ) * 100001653l + int64_t(chunkX) * 295075153l;
+    outputData.radii[index] = float(minRadius + firstBoundedInt(radiusSeed, radiusRange));
+}

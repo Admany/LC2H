@@ -4,6 +4,7 @@ import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.util.cache.CacheTtl;
+import org.admany.lc2h.worldgen.dag.LostCityDagScheduler;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.quantified.core.common.util.TaskScheduler;
@@ -58,6 +59,22 @@ public final class AsyncTerrainCorrectionPlanner {
             LC2H.LOGGER.debug("Starting preSchedule for {}", coord);
         }
         long startTime = System.nanoTime();
+
+        if (LostCityDagScheduler.isEnabled()) {
+            LostCityDagScheduler.submitTerrainCorrections(provider, coord)
+                .whenComplete((result, throwable) -> {
+                    if (throwable != null) {
+                        COMPUTATION_CACHE.remove(coord);
+                        LC2H.LOGGER.error("Kernel terrain correction computation failed for {}: {}", coord, throwable.getMessage());
+                        return;
+                    }
+                    if (debugLogging) {
+                        long endTime = System.nanoTime();
+                        LC2H.LOGGER.debug("Finished kernel terrain correction compute for {} in {} ms", coord, (endTime - startTime) / 1_000_000);
+                    }
+                });
+            return;
+        }
 
         PlannerBatchQueue.enqueue(provider, coord, PlannerTaskKind.TERRAIN_CORRECTION,
             () -> runTerrainCorrectionComputation(coord, provider, debugLogging, startTime));

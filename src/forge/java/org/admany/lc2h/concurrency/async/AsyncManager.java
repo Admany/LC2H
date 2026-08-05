@@ -12,7 +12,6 @@ import org.admany.lc2h.dev.diagnostics.AsyncIssueMonitor;
 import org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner;
 import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
 import org.admany.quantified.api.QuantifiedAPI;
-import org.admany.quantified.api.model.QuantifiedTask;
 import net.minecraftforge.server.ServerLifecycleHooks;
 
 import java.util.List;
@@ -49,6 +48,7 @@ public class AsyncManager {
     private static final AtomicLong MAIN_QUEUE_DROPPED = new AtomicLong(0L);
     private static final AtomicLong MAIN_QUEUE_LAST_DROP_LOG_MS = new AtomicLong(0L);
     private static final ConcurrentHashMap<String, AtomicLong> MAIN_QUEUE_PRODUCERS = new ConcurrentHashMap<>();
+    private static final AtomicLong TASK_SEQUENCE = new AtomicLong();
 
     private static final ExecutorService FALLBACK_EXECUTOR = Executors.newFixedThreadPool(
         Math.max(2, Integer.getInteger("lc2h.async.fallbackThreads", Math.max(2, Runtime.getRuntime().availableProcessors() / 2))),
@@ -101,8 +101,17 @@ public class AsyncManager {
         return submitCallable(taskName, supplier, priority, gpuPreferred);
     }
 
+    public static <T> CompletableFuture<T> submitSupplierFallback(String taskName, java.util.function.Supplier<T> supplier) {
+        LC2H.LOGGER.debug("Running async task '{}' on isolated LC2H fallback executor", taskName);
+        return AsyncIssueMonitor.track(taskName,
+            wrapTaskFuture(taskName, CompletableFuture.supplyAsync(supplier, FALLBACK_EXECUTOR)));
+    }
+
     private static <T> CompletableFuture<T> submitCallable(String taskName, Supplier<T> supplier, Priority priority, boolean gpuPreferred) {
-        LC2H.LOGGER.debug("Submitting async task '{}' priority={} gpuPreferred={}", taskName, priority, gpuPreferred);
+        boolean traceTask = shouldTraceTask(taskName);
+        if (traceTask) {
+            LC2H.LOGGER.debug("Submitting async task '{}' priority={} gpuPreferred={}", taskName, priority, gpuPreferred);
+        }
 
         MinecraftServer server = serverRef;
         if (server == null) {
@@ -123,15 +132,17 @@ public class AsyncManager {
 
         if (!quantifiedBypass && quantifiedAvailable) {
             try {
-                QuantifiedTask.Builder<T> builder = QuantifiedTask.builder("lc2h", taskName, supplier);
+                var request = QuantifiedAPI.<T>compute(LC2H.MODID, quantifiedTaskName(taskName))
+                    .threadSafe();
                 if (priority == Priority.HIGH) {
-                    builder.priorityForeground();
+                    request.foreground();
                 } else {
-                    builder.priorityBackground();
+                    request.background();
                 }
-                builder.batchKey(quantifiedBatchKey(taskName, priority));
-                CompletableFuture<T> future = QuantifiedAPI.submit(builder);
-                LC2H.LOGGER.debug("Task '{}' submitted to Quantified API", taskName);
+                CompletableFuture<T> future = request.submit(supplier);
+                if (traceTask) {
+                    LC2H.LOGGER.debug("Task '{}' submitted to Quantified API", taskName);
+                }
                 return AsyncIssueMonitor.track(taskName, wrapTaskFuture(taskName, future));
             } catch (Throwable t) {
                 LC2H.LOGGER.error("Quantified API submit failed for task '{}': {}", taskName, t.toString());
@@ -139,9 +150,10 @@ public class AsyncManager {
             }
         }
 
-        LC2H.LOGGER.debug("Running async task '{}' on LC2H fallback executor", taskName);
-        return AsyncIssueMonitor.track(taskName,
-            wrapTaskFuture(taskName, CompletableFuture.supplyAsync(supplier, FALLBACK_EXECUTOR)));
+        if (traceTask) {
+            LC2H.LOGGER.debug("Running async task '{}' on LC2H fallback executor", taskName);
+        }
+        return submitSupplierFallback(taskName, supplier);
     }
 
     public static <T> CompletableFuture<List<T>> submitBatch(String batchName, List<Supplier<T>> suppliers, Priority priority) {
@@ -446,6 +458,11 @@ public class AsyncManager {
         return "lc2h:" + lane + ":" + normalizeTaskFamily(taskName);
     }
 
+    private static String quantifiedTaskName(String taskName) {
+        String family = normalizeTaskFamily(taskName);
+        return family + "#" + TASK_SEQUENCE.incrementAndGet();
+    }
+
     private static String normalizeTaskFamily(String taskName) {
         if (taskName == null || taskName.isBlank()) {
             return "task";
@@ -519,5 +536,19 @@ public class AsyncManager {
             }
         }
         return !value.isEmpty();
+    }
+
+    private static boolean shouldTraceTask(String taskName) {
+        if (taskName == null) {
+            return true;
+        }
+        return switch (taskName) {
+            case "cpu-batch-flush",
+                 "vine-cleaner-reschedule",
+                 "vine_cleaner_tick",
+                 "shadow-apply-drain",
+                 "vine-removal-drain" -> false;
+            default -> true;
+        };
     }
 }

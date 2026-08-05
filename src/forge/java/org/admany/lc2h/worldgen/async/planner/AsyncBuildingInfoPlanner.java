@@ -14,7 +14,6 @@ import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.quantified.api.QuantifiedAPI;
-import org.admany.quantified.api.model.QuantifiedTask;
 import org.admany.quantified.core.common.parallel.config.ParallelConfig;
 import org.admany.quantified.core.common.parallel.metrics.ParallelMetrics;
 import org.admany.quantified.core.common.util.TaskScheduler;
@@ -35,7 +34,7 @@ public final class AsyncBuildingInfoPlanner {
     private static final ConcurrentHashMap<ChunkCoord, Object> BUILDING_INFO_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<ChunkCoord, Long> BUILDING_INFO_CACHE_TS = new ConcurrentHashMap<>();
     private static final CacheBudgetManager.CacheGroup BUILDING_INFO_BUDGET =
-        CacheBudgetManager.register("lc2h_buildinginfo", 8192, 512,
+        CacheBudgetManager.register("lc2h_buildinginfo", 8192, 128,
             key -> BUILDING_INFO_CACHE.remove(key) != null);
     private static final long BUILDING_INFO_CACHE_TTL_MS = Math.max(30_000L,
         Long.getLong("lc2h.buildinginfo.cacheTtlMs", TimeUnit.MINUTES.toMillis(20)));
@@ -113,6 +112,7 @@ public final class AsyncBuildingInfoPlanner {
     private static final int BUILDING_INFO_OVERRIDE = Integer.getInteger("lc2h.buildinginfo.parallelism", -1);
     private static final int BUILDING_INFO_MAX = Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors()));
     private static final AdaptiveConcurrencyLimiter LIMITER = new AdaptiveConcurrencyLimiter(2, 1, BUILDING_INFO_MAX);
+    private static final AtomicLong UNSAFE_ASYNC_WARMUPS_AVOIDED = new AtomicLong();
 
     private static final AtomicLong EWMA_NANOS_PER_TASK = new AtomicLong(0L);
     private static volatile long lastTuneNs = 0L;
@@ -146,6 +146,15 @@ public final class AsyncBuildingInfoPlanner {
         return INTERNAL_DEPTH.get() > 0;
     }
 
+    public static <T> T runInternal(java.util.function.Supplier<T> supplier) {
+        INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() + 1);
+        try {
+            return supplier.get();
+        } finally {
+            INTERNAL_DEPTH.set(INTERNAL_DEPTH.get() - 1);
+        }
+    }
+
     public static void preSchedule(IDimensionInfo provider, ChunkCoord coord) {
         Objects.requireNonNull(provider, "provider");
         Objects.requireNonNull(coord, "coord");
@@ -159,193 +168,38 @@ public final class AsyncBuildingInfoPlanner {
             return;
         }
 
-        long now = System.currentTimeMillis();
-        Object existing = getCachedEntry(coord, now);
-        if (existing != null) {
-            if (existing instanceof FailureMarker fm) {
-                long nowNs = System.nanoTime();
-                if (fm.canRetry(nowNs)) {
-                    removeCachedEntry(coord, existing);
-                } else {
-                    return;
-                }
-            } else if (existing instanceof InFlightMarker) {
-                return;
-            } else {
-                return;
-            }
-        }
-
-        // This reserves the coord to avoid enqueuing duplicate warmup tasks.
-        if (BUILDING_INFO_CACHE.putIfAbsent(coord, new InFlightMarker()) != null) {
-            return;
-        }
-        BUILDING_INFO_CACHE_TS.put(coord, now);
-        CacheBudgetManager.recordPut(BUILDING_INFO_BUDGET, coord, 64L, true);
-        maybePrune(now);
-
-        boolean debugLogging = AsyncChunkWarmup.isWarmupDebugLoggingEnabled();
-
-        if (AsyncChunkWarmup.deferChunkPrescheduleToGpu(provider, coord, "building-info")) {
-            removeCachedEntry(coord, BUILDING_INFO_CACHE.get(coord));
-            return;
-        }
-
-        if (debugLogging) {
-            LC2H.LOGGER.debug("Starting preSchedule for {}", coord);
-        }
-        long startTime = System.nanoTime();
-
-        PlannerBatchQueue.enqueue(provider, coord, PlannerTaskKind.BUILDING_INFO,
-            () -> runBuildingInfo(provider, coord, debugLogging, startTime, false));
+        /*
+         * BuildingInfo is live worldgen state, not an immutable DAG payload.
+         * Its constructor may synchronously request chunks from ServerChunkCache,
+         * which deadlocks/stalls when executed on a Quantified worker. Prime only
+         * the independent MultiChunk plan here. The real owner thread constructs
+         * BuildingInfo once and MixinBuildingInfo's provider-scoped cache serves
+         * all later reads.
+         */
+        UNSAFE_ASYNC_WARMUPS_AVOIDED.incrementAndGet();
+        AsyncMultiChunkPlanner.ensureScheduled(provider, coord);
     }
 
     public static void preSchedulePriority(IDimensionInfo provider, ChunkCoord coord) {
         Objects.requireNonNull(provider, "provider");
         Objects.requireNonNull(coord, "coord");
 
-        long now = System.currentTimeMillis();
-        Object existing = getCachedEntry(coord, now);
-        if (existing != null) {
-            if (existing instanceof FailureMarker fm) {
-                long nowNs = System.nanoTime();
-                if (fm.canRetry(nowNs)) {
-                    removeCachedEntry(coord, existing);
-                } else {
-                    return;
-                }
-            } else if (existing instanceof InFlightMarker) {
-                return;
-            } else {
-                return;
-            }
-        }
-
-        if (SPAWN_PREFETCH_COUNT.get() >= SPAWN_PREFETCH_LIMIT) {
-            return;
-        }
-        if (SPAWN_PREFETCH.putIfAbsent(coord, Boolean.TRUE) != null) {
-            return;
-        }
-        SPAWN_PREFETCH_COUNT.incrementAndGet();
-
-        // This reserves the coord to avoid enqueuing duplicate warmup tasks.
-        if (BUILDING_INFO_CACHE.putIfAbsent(coord, new InFlightMarker()) != null) {
-            SPAWN_PREFETCH.remove(coord);
-            SPAWN_PREFETCH_COUNT.decrementAndGet();
-            return;
-        }
-        BUILDING_INFO_CACHE_TS.put(coord, now);
-        CacheBudgetManager.recordPut(BUILDING_INFO_BUDGET, coord, 64L, true);
-        maybePrune(now);
-
-        if (GPUMemoryManager.getGPUData(coord, GPU_DATA_CACHE) != null) {
-            GPUMemoryManager.markAsHot(coord);
-            TaskScheduler.recordExternalGpuTask();
-            removeCachedEntry(coord, BUILDING_INFO_CACHE.get(coord));
-            SPAWN_PREFETCH.remove(coord);
-            SPAWN_PREFETCH_COUNT.decrementAndGet();
-            return;
-        }
-
-        if (AsyncChunkWarmup.deferChunkPrescheduleToGpu(provider, coord, "building-info-priority")) {
-            removeCachedEntry(coord, BUILDING_INFO_CACHE.get(coord));
-            SPAWN_PREFETCH.remove(coord);
-            SPAWN_PREFETCH_COUNT.decrementAndGet();
-            return;
-        }
-
-        long startTime = System.nanoTime();
-        submitSpawnTask("spawn-buildinginfo", () -> runBuildingInfo(provider, coord, false, startTime, true))
-            .whenComplete((ignored, throwable) -> {
-                SPAWN_PREFETCH.remove(coord);
-                SPAWN_PREFETCH_COUNT.decrementAndGet();
-            });
+        // Spawn search is latency-sensitive, but BuildingInfo still owns live
+        // chunk/world state. Priority must not change that ownership rule.
+        UNSAFE_ASYNC_WARMUPS_AVOIDED.incrementAndGet();
+        AsyncMultiChunkPlanner.ensureScheduled(provider, coord);
     }
 
     public static void preSchedulePriorityBatch(IDimensionInfo provider, List<ChunkCoord> coords) {
         if (provider == null || coords == null || coords.isEmpty()) {
             return;
         }
-        java.util.ArrayList<ChunkCoord> batch = new java.util.ArrayList<>(coords.size());
-        long now = System.currentTimeMillis();
         for (ChunkCoord coord : coords) {
-            if (coord == null) {
-                continue;
+            if (coord != null) {
+                UNSAFE_ASYNC_WARMUPS_AVOIDED.incrementAndGet();
+                AsyncMultiChunkPlanner.ensureScheduled(provider, coord);
             }
-            Object existing = getCachedEntry(coord, now);
-            if (existing != null) {
-                if (existing instanceof FailureMarker fm) {
-                    long nowNs = System.nanoTime();
-                    if (fm.canRetry(nowNs)) {
-                        removeCachedEntry(coord, existing);
-                    } else {
-                        continue;
-                    }
-                } else if (existing instanceof InFlightMarker) {
-                    continue;
-                } else {
-                    continue;
-                }
-            }
-            if (GPUMemoryManager.getGPUData(coord, GPU_DATA_CACHE) != null) {
-                GPUMemoryManager.markAsHot(coord);
-                TaskScheduler.recordExternalGpuTask();
-                continue;
-            }
-            if (SPAWN_PREFETCH_COUNT.get() >= SPAWN_PREFETCH_LIMIT) {
-                break;
-            }
-            if (SPAWN_PREFETCH.putIfAbsent(coord, Boolean.TRUE) != null) {
-                continue;
-            }
-            SPAWN_PREFETCH_COUNT.incrementAndGet();
-            if (BUILDING_INFO_CACHE.putIfAbsent(coord, new InFlightMarker()) != null) {
-                SPAWN_PREFETCH.remove(coord);
-                SPAWN_PREFETCH_COUNT.decrementAndGet();
-                continue;
-            }
-            BUILDING_INFO_CACHE_TS.put(coord, now);
-            CacheBudgetManager.recordPut(BUILDING_INFO_BUDGET, coord, 64L, true);
-            batch.add(coord);
         }
-
-        if (batch.isEmpty()) {
-            return;
-        }
-
-        CompletableFuture<?> gpuAssist = AsyncChunkWarmup.submitGpuAssistBatch(provider, batch, "building-info-priority-batch");
-        if (gpuAssist != null) {
-            gpuAssist.whenComplete((ignored, throwable) -> {
-                for (ChunkCoord coord : batch) {
-                    removeCachedEntry(coord, BUILDING_INFO_CACHE.get(coord));
-                    SPAWN_PREFETCH.remove(coord);
-                    SPAWN_PREFETCH_COUNT.decrementAndGet();
-                }
-            });
-            return;
-        }
-
-        submitSpawnTask("spawn-buildinginfo-batch", () -> runBuildingInfoBatch(provider, batch))
-            .whenComplete((ignored, throwable) -> {
-                for (ChunkCoord coord : batch) {
-                    SPAWN_PREFETCH.remove(coord);
-                    SPAWN_PREFETCH_COUNT.decrementAndGet();
-                }
-            });
-    }
-
-    private static CompletableFuture<Void> submitSpawnTask(String taskName, Runnable action) {
-        try {
-            QuantifiedTask.Builder<Void> builder = QuantifiedTask.<Void>builder(LC2H.MODID, taskName, () -> {
-                action.run();
-                return null;
-            }).priorityForeground()
-                .batchKey(AsyncManager.quantifiedBatchKey(taskName, org.admany.lc2h.concurrency.async.Priority.HIGH));
-            return QuantifiedAPI.submit(builder);
-        } catch (Throwable ignored) {
-        }
-        return CompletableFuture.runAsync(action);
     }
 
     public static boolean isSpawnPrefetchSaturated() {
@@ -546,6 +400,46 @@ public final class AsyncBuildingInfoPlanner {
         );
     }
 
+    public static String telemetrySummary() {
+        int cached = 0;
+        int inFlight = 0;
+        int failed = 0;
+        for (Object value : BUILDING_INFO_CACHE.values()) {
+            if (value instanceof InFlightMarker) {
+                inFlight++;
+            } else if (value instanceof FailureMarker) {
+                failed++;
+            } else if (value != null) {
+                cached++;
+            }
+        }
+
+        int pendingBuilding = 0;
+        try {
+            PlannerBatchQueue.PlannerBatchStats stats = PlannerBatchQueue.snapshotStats();
+            Integer pending = stats.pendingByKind().get(PlannerTaskKind.BUILDING_INFO);
+            pendingBuilding = pending != null ? pending : 0;
+        } catch (Throwable ignored) {
+        }
+
+        return String.format(java.util.Locale.ROOT,
+            "cache=%d inFlight=%d failed=%d ready=%d readyQueue=%d gpu=%d pending=%d spawnPrefetch=%d limiter=%d/%d retries=%d spawnRetries=%d skippedWarmups=%d unsafeAsyncAvoided=%d",
+            cached,
+            inFlight,
+            failed,
+            READY_RESULTS.size(),
+            READY_QUEUE.size(),
+            GPU_DATA_CACHE.size(),
+            pendingBuilding,
+            SPAWN_PREFETCH_COUNT.get(),
+            LIMITER.availableSlots(),
+            LIMITER.getLimit(),
+            LIMITER_RETRY_TOTAL.get(),
+            SPAWN_RETRY_TOTAL.get(),
+            SKIPPED_FULL_WARMUPS.get(),
+            UNSAFE_ASYNC_WARMUPS_AVOIDED.get());
+    }
+
     public static boolean consumeGpuWarmup(ChunkCoord coord) {
         if (coord == null) {
             return false;
@@ -571,14 +465,6 @@ public final class AsyncBuildingInfoPlanner {
             return;
         }
         Lc2hTimingRegistry.record("building_info.ensure_multichunk_ready", System.nanoTime() - prepStartNs);
-
-        if (AsyncChunkWarmup.ensureImmediateGpuAssist(provider, coord, highPriority ? "building-info-priority" : "building-info", 0L)) {
-            if (!consumeGpuWarmup(coord)) {
-                clearWarmupReservation(coord);
-            }
-            Lc2hTimingRegistry.record(highPriority ? "building_info.gpu_redirect_priority" : "building_info.gpu_redirect", 1L);
-            return;
-        }
 
         long tuneStartNs = System.nanoTime();
         tuneIfNeeded();
@@ -890,16 +776,16 @@ public final class AsyncBuildingInfoPlanner {
         }
         try {
             long startNs = System.nanoTime();
+            AsyncMultiChunkPlanner.ensureScheduled(provider, coord);
+            boolean ready = AsyncMultiChunkPlanner.tryConsumePrepared(provider, coord) != null;
             if (highPriority) {
-                AsyncMultiChunkPlanner.ensureScheduled(provider, coord);
-                boolean ready = AsyncMultiChunkPlanner.tryConsumePrepared(provider, coord) != null;
                 Lc2hTimingRegistry.record(ready ? "building_info.multichunk_ready_fast" : "building_info.multichunk_pending_fast",
                     System.nanoTime() - startNs);
-                return ready;
+            } else {
+                Lc2hTimingRegistry.record(ready ? "building_info.multichunk_ready" : "building_info.multichunk_pending",
+                    System.nanoTime() - startNs);
             }
-            AsyncMultiChunkPlanner.syncWarmup(provider, coord);
-            Lc2hTimingRegistry.record("building_info.multichunk_sync", System.nanoTime() - startNs);
-            return true;
+            return ready;
         } catch (Throwable ignored) {
             return !highPriority;
         }

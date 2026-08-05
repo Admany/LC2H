@@ -6,17 +6,20 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.minecraftforge.event.server.ServerStartingEvent;
+import net.minecraftforge.event.server.ServerAboutToStartEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.event.server.ServerStoppedEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
-import net.minecraftforge.fml.DistExecutor;
+import net.minecraftforge.fml.loading.FMLEnvironment;
 import net.minecraftforge.registries.DeferredRegister;
 import net.minecraftforge.registries.ForgeRegistries;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.RegisterCommandsEvent;
 import org.admany.lc2h.compat.C2MECompat;
 import org.admany.lc2h.world.cleanup.VineClusterCleaner;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
+import org.admany.lc2h.worldgen.lostcities.LostCityProfileOverrideManager;
 
 import java.util.logging.Handler;
 import java.util.logging.Level;
@@ -25,6 +28,7 @@ import org.admany.lc2h.dev.diagnostics.DiagnosticsReporter;
 import org.admany.lc2h.dev.diagnostics.StallDetector;
 import org.admany.lc2h.dev.diagnostics.AsyncIssueMonitor;
 import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
+import org.admany.lc2h.dev.diagnostics.LifecycleTortureTracker;
 import org.admany.lc2h.dev.diagnostics.Lc2hMonitorService;
 import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
@@ -32,6 +36,11 @@ import org.admany.lc2h.util.ResourceLocations;
 import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.client.LC2HClient;
 import org.admany.lc2h.config.sync.ConfigSyncNetwork;
+import org.admany.lc2h.dev.debug.DebugCommands;
+import org.admany.lc2h.dev.debug.MultiChunkParityAutoRunner;
+import org.admany.lc2h.dev.debug.PreCaptureTargetTraceRegistry;
+import org.admany.lc2h.dev.debug.ShadowMutationAutoRunner;
+import org.admany.lc2h.dev.debug.WorldParityAutoRunner;
 import org.admany.lc2h.dev.debug.chunk.ChunkDebugNetwork;
 import org.admany.lc2h.dev.debug.chunk.ChunkDebugManager;
 import org.admany.lc2h.dev.debug.chunk.ChunkDebugExporter;
@@ -45,6 +54,7 @@ import org.admany.lc2h.worldgen.apply.MainThreadChunkApplier;
 import org.admany.lc2h.tweaks.TweaksActorSystem;
 import org.admany.lc2h.worldgen.gpu.GPUMemoryManager;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
+import org.admany.lc2h.runtime.Lc2hRuntimeModes;
 import org.admany.quantified.api.QuantifiedAPI;
 import org.admany.quantified.api.compute.GpuBackendPreference;
 import org.admany.quantified.core.common.cache.CacheManager;
@@ -55,6 +65,7 @@ import org.apache.logging.log4j.Logger;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.CommandSourceStack;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.server.level.ServerPlayer;
@@ -119,9 +130,15 @@ public class LC2H {
 
         redirectQuantifiedJulLogging();
 
+        if (Lc2hRuntimeModes.baselineMode()) {
+            LOGGER.warn("[LC2H] Baseline mode active. LC2H runtime is loaded for A/B parity export but gameplay mixins are disabled.");
+        }
 
 
-        DistExecutor.safeRunWhenOn(Dist.CLIENT, () -> LC2HClient::init);
+
+        if (FMLEnvironment.dist == Dist.CLIENT) {
+            LC2HClient.init();
+        }
 
         if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
             LOGGER.info("[LC2H] Multithreading Engine Started");
@@ -132,25 +149,17 @@ public class LC2H {
 
     private void registerWithQuantifiedApi() {
         try {
-            if (QuantifiedAPI.register(MODID)) {
-                LOGGER.info("[LC2H] Registered with Quantified API");
-                try {
-                    QuantifiedAPI.setGpuBackendPreference(MODID, GpuBackendPreference.VULKAN_PREFERRED);
-                    LOGGER.debug("[LC2H] Set Quantified GPU backend preference to Vulkan-first");
-                } catch (Throwable preferenceError) {
-                    LOGGER.warn("[LC2H] Could not set Quantified GPU backend preference: {}", preferenceError.getMessage());
-                }
-                try {
-                    ModPriorityManager.setMaxTasksForMod(MODID, 1_000_000L);
-                    LOGGER.debug("[LC2H] Applied Quantified mod priority tuning");
-                } catch (Throwable priorityError) {
-                    LOGGER.warn("[LC2H] Could not adjust Quantified mod priority: {}", priorityError.getMessage());
-                }
-            } else {
-                LOGGER.warn("[LC2H] Quantified API registration returned false");
+            QuantifiedAPI.setGpuBackendPreference(MODID, GpuBackendPreference.VULKAN_PREFERRED);
+            LOGGER.info("[LC2H] Connected to Quantified API V2");
+            LOGGER.debug("[LC2H] Set Quantified GPU backend preference to Vulkan-first");
+            try {
+                ModPriorityManager.setMaxTasksForMod(MODID, 1_000_000L);
+                LOGGER.debug("[LC2H] Applied Quantified mod priority tuning");
+            } catch (Throwable priorityError) {
+                LOGGER.warn("[LC2H] Could not adjust Quantified mod priority: {}", priorityError.getMessage());
             }
         } catch (Throwable t) {
-            LOGGER.debug("[LC2H] Quantified API not present or failed to register: {}", t.getMessage());
+            LOGGER.debug("[LC2H] Quantified API not present or failed to initialize: {}", t.getMessage());
         }
     }
 
@@ -200,6 +209,9 @@ public class LC2H {
 
     @SubscribeEvent
     public void onServerStarted(ServerStartedEvent event) {
+        org.admany.lc2h.worldgen.scope.WorldGenScope.refreshServer(event.getServer());
+        LifecycleTortureTracker.onServerStarted(event.getServer());
+        DiagnosticsReporter.logPerformanceSnapshot("server-started");
         try {
             if (requiresForcedSpawnAssets(event.getServer())) {
                 org.admany.lc2h.util.spawn.SpawnAssetIndex.refresh(event.getServer().overworld());
@@ -209,13 +221,37 @@ public class LC2H {
         } catch (Throwable t) {
             LOGGER.warn("[LC2H] Failed to refresh Lost Cities asset index on server start", t);
         }
+        try {
+            ShadowMutationAutoRunner.maybeRun(event.getServer());
+        } catch (Throwable t) {
+            LOGGER.warn("[LC2H] Failed to schedule shadow mutation autorun", t);
+        }
+        try {
+            if (Lc2hRuntimeModes.worldParityAuto()) {
+                WorldParityAutoRunner.maybeRun(event.getServer());
+            } else {
+                MultiChunkParityAutoRunner.maybeRun(event.getServer());
+            }
+        } catch (Throwable t) {
+            LOGGER.warn("[LC2H] Failed to schedule parity autorun", t);
+        }
+    }
+
+    @SubscribeEvent
+    public void onServerAboutToStart(ServerAboutToStartEvent event) {
+        SHUTDOWN_FINALIZED.set(false);
+        long lifecycleId = org.admany.lc2h.worldgen.scope.WorldGenScope.beginServer(event.getServer());
+        LOGGER.debug("[LC2H] Worldgen scope lifecycle started during about-to-start: {}", lifecycleId);
     }
 
     @SubscribeEvent
     public void onServerStarting(ServerStartingEvent event) {
         SHUTDOWN_FINALIZED.set(false);
+        LifecycleTortureTracker.onServerStarting(event.getServer());
+        LostCityProfileOverrideManager.clearAllOverrides();
         initializeAsyncDelay(event.getServer());
         registerWithQuantifiedApi();
+        org.admany.lc2h.dev.diagnostics.CriticalMixinHookValidator.resetWatch();
         try {
             org.admany.lc2h.worldgen.lostcities.LostCityFeatureGuards.reset();
             org.admany.lc2h.worldgen.lostcities.LostCityTerrainFeatureGuards.reset();
@@ -229,6 +265,17 @@ public class LC2H {
         } catch (Throwable t) {
             LOGGER.debug("[LC2H] Could not reset Lost Cities profile cache: {}", t.getMessage());
         }
+        try {
+            if (Lc2hRuntimeModes.worldParityAuto()) {
+                PreCaptureTargetTraceRegistry.armForUpcomingRun();
+                WorldParityAutoRunner.applyProfileOverrides(event.getServer());
+            } else {
+                MultiChunkParityAutoRunner.applyProfileOverrides();
+            }
+        } catch (Throwable t) {
+            LOGGER.warn("[LC2H] Failed to apply parity profile overrides", t);
+        }
+        resetLostCitiesLifecycleCaches("server start");
 
         try {
             if (AsyncChunkWarmup.shouldInitializeGpuWarmupOnServerStart()) {
@@ -307,147 +354,21 @@ public class LC2H {
             LOGGER.warn("Failed to start GPU memory cleanup: {}", t.getMessage());
         }
 
+    }
+
+    @SubscribeEvent
+    public void onRegisterCommands(RegisterCommandsEvent event) {
         try {
-            event.getServer().getCommands().getDispatcher().register(
-                Commands.literal("lc2h").then(
-                    Commands.literal("diagnostics").executes(ctx -> {
-                        StallDetector.triggerDump(ctx.getSource().getServer());
-                        ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.diagnostics.dump_triggered"), false);
-                        return 1;
-                    })
-                ).then(
-                Commands.literal("gpu").executes(ctx -> {
-                    String stats = org.admany.lc2h.worldgen.gpu.GPUMemoryManager.getComprehensiveMemoryStats()
-                        + " | " + AsyncChunkWarmup.describeGpuProcessingStats();
-                    ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.gpu.stats", stats), false);
-                    return 1;
-                }).then(
-                        Commands.literal("cleanup").executes(ctx -> {
-                            org.admany.lc2h.worldgen.gpu.GPUMemoryManager.comprehensiveCleanup();
-                            String stats = org.admany.lc2h.worldgen.gpu.GPUMemoryManager.getComprehensiveMemoryStats()
-                                + " | " + AsyncChunkWarmup.describeGpuProcessingStats();
-                            ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.gpu.cleanup_done", stats), false);
-                            return 1;
-                        })
-                    )
-                ).then(
-                    Commands.literal("rescanChunk").executes(ctx -> {
-                        ServerPlayer player = ctx.getSource().getPlayerOrException();
-                        ChunkPos pos = player.chunkPosition();
-                        ChunkPostProcessor.forceRescanChunk(player.serverLevel(), pos);
-                        ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.rescan.queued", pos), false);
-                        return 1;
-                    })
-                ).then(
-                    Commands.literal("stats").executes(ctx -> reportStats(ctx.getSource()))
-                ).then(
-                    Commands.literal("monitor")
-                        .executes(ctx -> {
-                            ctx.getSource().sendSuccess(() -> Lc2hMonitorService.status(ctx.getSource().getServer()), false);
-                            return 1;
-                        })
-                        .then(Commands.literal("start")
-                            .executes(ctx -> {
-                                String initiator = ctx.getSource().getTextName();
-                                ctx.getSource().sendSuccess(() -> Lc2hMonitorService.start(ctx.getSource().getServer(), initiator, 60), false);
-                                return 1;
-                            })
-                            .then(Commands.argument("seconds", IntegerArgumentType.integer(10, 300))
-                                .executes(ctx -> {
-                                    String initiator = ctx.getSource().getTextName();
-                                    int seconds = IntegerArgumentType.getInteger(ctx, "seconds");
-                                    ctx.getSource().sendSuccess(() -> Lc2hMonitorService.start(ctx.getSource().getServer(), initiator, seconds), false);
-                                    return 1;
-                                })
-                            )
-                        )
-                        .then(Commands.literal("status")
-                            .executes(ctx -> {
-                                ctx.getSource().sendSuccess(() -> Lc2hMonitorService.status(ctx.getSource().getServer()), false);
-                                return 1;
-                            })
-                        )
-                        .then(Commands.literal("stop")
-                            .executes(ctx -> {
-                                ctx.getSource().sendSuccess(() -> Lc2hMonitorService.stop(ctx.getSource().getServer()), false);
-                                return 1;
-                            })
-                        )
-                ).then(
-                    Commands.literal("chunkinfo").executes(ctx -> {
-                        ServerPlayer player = ctx.getSource().getPlayerOrException();
-                        ChunkPos pos = player.chunkPosition();
-                        ChunkCoord coord = new ChunkCoord(player.level().dimension(), pos.x, pos.z);
-                        net.minecraft.network.chat.Component report = ChunkGenTracker.buildReportComponent(coord);
-                        ctx.getSource().sendSuccess(() -> report, false);
-                        return 1;
-                    }).then(
-                        Commands.argument("chunkX", IntegerArgumentType.integer()).then(
-                            Commands.argument("chunkZ", IntegerArgumentType.integer()).executes(ctx -> {
-                                int chunkX = IntegerArgumentType.getInteger(ctx, "chunkX");
-                                int chunkZ = IntegerArgumentType.getInteger(ctx, "chunkZ");
-                                ChunkCoord coord = new ChunkCoord(ctx.getSource().getLevel().dimension(), chunkX, chunkZ);
-                                net.minecraft.network.chat.Component report = ChunkGenTracker.buildReportComponent(coord);
-                                ctx.getSource().sendSuccess(() -> report, false);
-                                return 1;
-                            })
-                        )
-                    )
-                ).then(
-                    Commands.literal("chunkdebug")
-                        .executes(ctx -> {
-                            ServerPlayer player = ctx.getSource().getPlayerOrException();
-                            ChunkDebugManager.setEnabled(player, true);
-                            return 1;
-                        })
-                        .then(Commands.literal("enable").executes(ctx -> {
-                            ServerPlayer player = ctx.getSource().getPlayerOrException();
-                            ChunkDebugManager.setEnabled(player, true);
-                            return 1;
-                        }))
-                        .then(Commands.literal("disable").executes(ctx -> {
-                            ServerPlayer player = ctx.getSource().getPlayerOrException();
-                            ChunkDebugManager.setEnabled(player, false);
-                            return 1;
-                        }))
-                        .then(Commands.literal("clear").executes(ctx -> {
-                            ServerPlayer player = ctx.getSource().getPlayerOrException();
-                            ChunkDebugManager.clearSelection(player);
-                            return 1;
-                        }))
-                        .then(Commands.literal("export")
-                            .executes(ctx -> exportChunkDebug(ctx.getSource().getPlayerOrException(), null))
-                            .then(Commands.argument("label", StringArgumentType.greedyString())
-                                .executes(ctx -> exportChunkDebug(ctx.getSource().getPlayerOrException(), StringArgumentType.getString(ctx, "label")))
-                            )
-                        )
-                )
-                .then(
-                    Commands.literal("frustumdebug")
-                        .executes(ctx -> {
-                            ServerPlayer player = ctx.getSource().getPlayerOrException();
-                            FrustumDebugManager.toggle(player);
-                            return 1;
-                        })
-                        .then(Commands.literal("enable").executes(ctx -> {
-                            ServerPlayer player = ctx.getSource().getPlayerOrException();
-                            FrustumDebugManager.setEnabled(player, true);
-                            return 1;
-                        }))
-                        .then(Commands.literal("disable").executes(ctx -> {
-                            ServerPlayer player = ctx.getSource().getPlayerOrException();
-                            FrustumDebugManager.setEnabled(player, false);
-                            return 1;
-                        }))
-                )
-            );
+            event.getDispatcher().register(buildLc2hCommand());
         } catch (Throwable t) {
-            LOGGER.warn("[LC2H] Failed to register /lc2h commands: {}", t.getMessage());
+            LOGGER.warn("[LC2H] Failed to register /lc2h commands", t);
         }
     }
 
     @SubscribeEvent
     public void onServerStopping(ServerStoppingEvent event) {
+        LifecycleTortureTracker.onServerStopping(event.getServer());
+        LostCityProfileOverrideManager.clearAllOverrides();
         resetAsyncDelay();
         try {
             org.admany.lc2h.worldgen.lostcities.LostCityFeatureGuards.reset();
@@ -475,6 +396,13 @@ public class LC2H {
         }
 
         LOGGER.info("[LC2H] Fast shutdown started");
+
+        try {
+            org.admany.lc2h.worldgen.dag.LostCityDagScheduler.shutdown();
+            LOGGER.info("[LC2H] DAG stage batches shut down");
+        } catch (Throwable t) {
+            LOGGER.warn("[LC2H] Error shutting down DAG stage batches: {}", t.getMessage());
+        }
 
         try {
             org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner.shutdown();
@@ -526,6 +454,13 @@ public class LC2H {
         }
 
         try {
+            org.admany.lc2h.worldgen.apply.ShadowBlockMutationApplier.clearAll();
+            LOGGER.info("[LC2H] Shadow mutation queue cleared");
+        } catch (Throwable t) {
+            LOGGER.warn("[LC2H] Error clearing shadow mutation queue: {}", t.getMessage());
+        }
+
+        try {
             org.admany.lc2h.world.cleanup.VineClusterCleaner.shutdown();
             LOGGER.info("[LC2H] Vine cluster cleaner shut down");
         } catch (Throwable t) {
@@ -551,6 +486,7 @@ public class LC2H {
         if (!(event.getEntity() instanceof ServerPlayer player)) {
             return;
         }
+        LifecycleTortureTracker.onPlayerJoin(player);
         AsyncChunkWarmup.initializeGpuWarmup();
         AsyncChunkWarmup.notifyPlayerJoin();
         tryStartAsyncAfterDelay(player);
@@ -558,8 +494,18 @@ public class LC2H {
 
     @SubscribeEvent
     public void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            LifecycleTortureTracker.onPlayerLeave(player);
+        }
         MinecraftServer server = event.getEntity() != null ? event.getEntity().getServer() : null;
         AsyncChunkWarmup.notifyPlayerLeave(server);
+    }
+
+    @SubscribeEvent
+    public void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            LifecycleTortureTracker.onPlayerChangedDimension(player, event.getFrom(), player.level().dimension());
+        }
     }
 
     @SubscribeEvent
@@ -612,7 +558,10 @@ public class LC2H {
         if (!SHUTDOWN_FINALIZED.compareAndSet(false, true)) {
             return;
         }
+        LifecycleTortureTracker.onServerStopped(event.getServer());
         try {
+            org.admany.lc2h.worldgen.gpu.CityCenterGpuCache.clearAll();
+            org.admany.lc2h.worldgen.gpu.TerrainCorrectionGpuPipeline.clearRegions();
             org.admany.lc2h.worldgen.gpu.GPUMemoryManager.clearAllGPUCaches();
             LOGGER.info("[LC2H] GPU caches cleared");
         } catch (Throwable t) {
@@ -624,6 +573,15 @@ public class LC2H {
             LOGGER.info("[LC2H] Feature cache system force shut down");
         } catch (Throwable t) {
             LOGGER.warn("[LC2H] Error force shutting down feature cache: {}", t.getMessage());
+        }
+
+        resetLostCitiesLifecycleCaches("server stop");
+
+        try {
+            org.admany.lc2h.worldgen.scope.WorldGenScope.endServer();
+            LOGGER.info("[LC2H] Worldgen scope lifecycle ended");
+        } catch (Throwable t) {
+            LOGGER.warn("[LC2H] Error ending worldgen scope lifecycle: {}", t.getMessage());
         }
     }
 
@@ -742,6 +700,197 @@ public class LC2H {
             return true;
         }
         return profile.FORCE_SPAWN_PARTS != null && profile.FORCE_SPAWN_PARTS.length > 0;
+    }
+
+    private static void resetLostCitiesLifecycleCaches(String phase) {
+        try {
+            mcjty.lostcities.worldgen.lost.BuildingInfo.cleanCache();
+        } catch (Throwable t) {
+            LOGGER.debug("[LC2H] Could not clear Lost Cities BuildingInfo cache at {}: {}", phase, t.getMessage());
+        }
+        try {
+            mcjty.lostcities.worldgen.lost.City.cleanCache();
+        } catch (Throwable t) {
+            LOGGER.debug("[LC2H] Could not clear Lost Cities City cache at {}: {}", phase, t.getMessage());
+        }
+        try {
+            mcjty.lostcities.worldgen.lost.MultiChunk.cleanCache();
+        } catch (Throwable t) {
+            LOGGER.debug("[LC2H] Could not clear Lost Cities MultiChunk cache at {}: {}", phase, t.getMessage());
+        }
+        try {
+            mcjty.lostcities.worldgen.lost.Railway.cleanCache();
+        } catch (Throwable t) {
+            LOGGER.debug("[LC2H] Could not clear Lost Cities Railway cache at {}: {}", phase, t.getMessage());
+        }
+        try {
+            org.admany.lc2h.worldgen.lostcities.MultiChunkPlanningCache.clear();
+        } catch (Throwable t) {
+            LOGGER.debug("[LC2H] Could not clear LC2H multichunk planning cache at {}: {}", phase, t.getMessage());
+        }
+        try {
+            org.admany.lc2h.worldgen.lostcities.MultiChunkBoundaryRegistry.clearAll();
+        } catch (Throwable t) {
+            LOGGER.debug("[LC2H] Could not clear LC2H multichunk boundary registry at {}: {}", phase, t.getMessage());
+        }
+        try {
+            org.admany.lc2h.worldgen.lostcities.FastMultiChunkPlanner.resetAuditDisabled();
+        } catch (Throwable t) {
+            LOGGER.debug("[LC2H] Could not reset fast multichunk audit exclusions at {}: {}", phase, t.getMessage());
+        }
+        try {
+            org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe.clear();
+        } catch (Throwable t) {
+            LOGGER.debug("[LC2H] Could not clear chunk role probe at {}: {}", phase, t.getMessage());
+        }
+        try {
+            org.admany.lc2h.worldgen.ConnectedMountainPlanner.clear();
+        } catch (Throwable t) {
+            LOGGER.debug("[LC2H] Could not clear connected mountain plans at {}: {}", phase, t.getMessage());
+        }
+        try {
+            org.admany.lc2h.worldgen.MountainCityBlendDiagnostics.clearLifecycleState();
+        } catch (Throwable t) {
+            LOGGER.debug("[LC2H] Could not clear terrain blend diagnostics at {}: {}", phase, t.getMessage());
+        }
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildLc2hCommand() {
+        LiteralArgumentBuilder<CommandSourceStack> root = Commands.literal("lc2h")
+            .then(Commands.literal("diagnostics").executes(ctx -> {
+                StallDetector.triggerDump(ctx.getSource().getServer());
+                ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.diagnostics.dump_triggered"), false);
+                return 1;
+            }))
+            .then(Commands.literal("gpu").executes(ctx -> {
+                String stats = org.admany.lc2h.worldgen.gpu.GPUMemoryManager.getComprehensiveMemoryStats()
+                    + " | " + AsyncChunkWarmup.describeGpuProcessingStats();
+                ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.gpu.stats", stats), false);
+                return 1;
+            }).then(
+                Commands.literal("cleanup").executes(ctx -> {
+                    org.admany.lc2h.worldgen.gpu.GPUMemoryManager.comprehensiveCleanup();
+                    String stats = org.admany.lc2h.worldgen.gpu.GPUMemoryManager.getComprehensiveMemoryStats()
+                        + " | " + AsyncChunkWarmup.describeGpuProcessingStats();
+                    ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.gpu.cleanup_done", stats), false);
+                    return 1;
+                })
+            ))
+            .then(Commands.literal("rescanChunk").executes(ctx -> {
+                ServerPlayer player = ctx.getSource().getPlayerOrException();
+                ChunkPos pos = player.chunkPosition();
+                ChunkPostProcessor.forceRescanChunk(player.serverLevel(), pos);
+                ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.rescan.queued", pos), false);
+                return 1;
+            }).then(Commands.argument("radius", IntegerArgumentType.integer(0, 8)).executes(ctx -> {
+                ServerPlayer player = ctx.getSource().getPlayerOrException();
+                ChunkPos pos = player.chunkPosition();
+                int radius = IntegerArgumentType.getInteger(ctx, "radius");
+                int queued = ChunkPostProcessor.forceRescanArea(player.serverLevel(), pos, radius);
+                ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal(
+                    "[LC2H] Queued full artifact cleanup for " + queued + " loaded chunks (radius " + radius + ")"), false);
+                return queued;
+            })))
+            .then(Commands.literal("stats").executes(ctx -> reportStats(ctx.getSource())))
+            .then(Commands.literal("monitor")
+                .executes(ctx -> {
+                    ctx.getSource().sendSuccess(() -> Lc2hMonitorService.status(ctx.getSource().getServer()), false);
+                    return 1;
+                })
+                .then(Commands.literal("start")
+                    .executes(ctx -> {
+                        String initiator = ctx.getSource().getTextName();
+                        ctx.getSource().sendSuccess(() -> Lc2hMonitorService.start(ctx.getSource().getServer(), initiator, 60), false);
+                        return 1;
+                    })
+                    .then(Commands.argument("seconds", IntegerArgumentType.integer(10, 300))
+                        .executes(ctx -> {
+                            String initiator = ctx.getSource().getTextName();
+                            int seconds = IntegerArgumentType.getInteger(ctx, "seconds");
+                            ctx.getSource().sendSuccess(() -> Lc2hMonitorService.start(ctx.getSource().getServer(), initiator, seconds), false);
+                            return 1;
+                        })
+                    )
+                )
+                .then(Commands.literal("status")
+                    .executes(ctx -> {
+                        ctx.getSource().sendSuccess(() -> Lc2hMonitorService.status(ctx.getSource().getServer()), false);
+                        return 1;
+                    })
+                )
+                .then(Commands.literal("stop")
+                    .executes(ctx -> {
+                        ctx.getSource().sendSuccess(() -> Lc2hMonitorService.stop(ctx.getSource().getServer()), false);
+                        return 1;
+                    })
+                )
+            )
+            .then(Commands.literal("chunkinfo").executes(ctx -> {
+                ServerPlayer player = ctx.getSource().getPlayerOrException();
+                ChunkPos pos = player.chunkPosition();
+                ChunkCoord coord = new ChunkCoord(player.level().dimension(), pos.x, pos.z);
+                net.minecraft.network.chat.Component report = ChunkGenTracker.buildReportComponent(coord);
+                ctx.getSource().sendSuccess(() -> report, false);
+                return 1;
+            }).then(
+                Commands.argument("chunkX", IntegerArgumentType.integer()).then(
+                    Commands.argument("chunkZ", IntegerArgumentType.integer()).executes(ctx -> {
+                        int chunkX = IntegerArgumentType.getInteger(ctx, "chunkX");
+                        int chunkZ = IntegerArgumentType.getInteger(ctx, "chunkZ");
+                        ChunkCoord coord = new ChunkCoord(ctx.getSource().getLevel().dimension(), chunkX, chunkZ);
+                        net.minecraft.network.chat.Component report = ChunkGenTracker.buildReportComponent(coord);
+                        ctx.getSource().sendSuccess(() -> report, false);
+                        return 1;
+                    })
+                )
+            ))
+            .then(Commands.literal("chunkdebug")
+                .executes(ctx -> {
+                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                    ChunkDebugManager.setEnabled(player, true);
+                    return 1;
+                })
+                .then(Commands.literal("enable").executes(ctx -> {
+                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                    ChunkDebugManager.setEnabled(player, true);
+                    return 1;
+                }))
+                .then(Commands.literal("disable").executes(ctx -> {
+                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                    ChunkDebugManager.setEnabled(player, false);
+                    return 1;
+                }))
+                .then(Commands.literal("clear").executes(ctx -> {
+                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                    ChunkDebugManager.clearSelection(player);
+                    return 1;
+                }))
+                .then(Commands.literal("export")
+                    .executes(ctx -> exportChunkDebug(ctx.getSource().getPlayerOrException(), null))
+                    .then(Commands.argument("label", StringArgumentType.greedyString())
+                        .executes(ctx -> exportChunkDebug(ctx.getSource().getPlayerOrException(), StringArgumentType.getString(ctx, "label")))
+                    )
+                )
+            )
+            .then(Commands.literal("frustumdebug")
+                .executes(ctx -> {
+                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                    FrustumDebugManager.toggle(player);
+                    return 1;
+                })
+                .then(Commands.literal("enable").executes(ctx -> {
+                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                    FrustumDebugManager.setEnabled(player, true);
+                    return 1;
+                }))
+                .then(Commands.literal("disable").executes(ctx -> {
+                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                    FrustumDebugManager.setEnabled(player, false);
+                    return 1;
+                }))
+            );
+        DebugCommands.appendTo(root);
+        return root;
     }
 
     private static int reportStats(CommandSourceStack source) {

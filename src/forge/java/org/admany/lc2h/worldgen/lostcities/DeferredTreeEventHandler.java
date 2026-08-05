@@ -1,10 +1,16 @@
 package org.admany.lc2h.worldgen.lostcities;
 
+import net.minecraft.core.BlockPos;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.util.RandomSource;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.level.EmptyBlockGetter;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkGenerator;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.levelgen.feature.FeaturePlaceContext;
 import net.minecraft.world.level.levelgen.feature.configurations.TreeConfiguration;
 import net.minecraftforge.event.TickEvent;
@@ -16,35 +22,119 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
+import org.admany.lc2h.worldgen.apply.ChunkShadowMutationPlan;
+import org.admany.lc2h.worldgen.apply.ShadowBlockMutationApplier;
+import mcjty.lostcities.setup.Registration;
+import mcjty.lostcities.varia.ChunkCoord;
+import mcjty.lostcities.worldgen.IDimensionInfo;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.level.Level;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Mod.EventBusSubscriber(modid = LC2H.MODID)
 public final class DeferredTreeEventHandler {
 
+    private static final int TREE_CAPTURE_SET_FLAGS = Block.UPDATE_NEIGHBORS | Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE;
     private static final int MAX_READY_ENQUEUES_PER_CHUNK_LOAD = 8;
-    private static final int MAX_REPLAYS_PER_SERVER_TICK = 4;
+    private static final int MAX_READY_SWEEP_PROMOTIONS_PER_TICK = Math.max(8,
+        Integer.getInteger("lc2h.treeReplay.maxReadySweepPromotionsPerTick", 32));
+    private static final int MAX_REPLAYS_PER_SERVER_TICK = Math.max(1,
+        Integer.getInteger("lc2h.treeReplay.maxReplaysPerTick", 2));
+    private static final int MAX_REPLAY_BLOCKS_PER_SERVER_TICK = Math.max(128,
+        Integer.getInteger("lc2h.treeReplay.maxBlocksPerTick", 1024));
+    // A single captured BOP tree can contain thousands of blocks.  Keep each
+    // server-thread apply unit comfortably below the shadow drain budget so a
+    // tree can never monopolise a tick just because it crossed a chunk edge.
+    private static final int MAX_CAPTURED_TREE_PLAN_BLOCKS = Math.max(32,
+        Integer.getInteger("lc2h.treeReplay.maxPlanBlocks", 96));
+    private static final int MAX_CAPTURED_TREE_BLOCKS = 4096;
+    private static final int MAX_CAPTURED_TREE_HEIGHT = 96;
+    private static final boolean ENABLE_LEGACY_TREE_REPLAY_FALLBACK =
+        Boolean.parseBoolean(System.getProperty("lc2h.treeReplay.legacyFallback", "false"));
+    private static final AtomicInteger CHUNK_LOAD_REPLAY_SUPPRESSIONS = new AtomicInteger(0);
+    private static final AtomicInteger SERVER_TICK_REPLAY_SUPPRESSIONS = new AtomicInteger(0);
+    private static final AtomicLong CAPTURED_TREES_APPLIED = new AtomicLong();
+    private static final AtomicLong CAPTURED_TREES_DROPPED_SHAPE = new AtomicLong();
+    private static final AtomicLong CAPTURED_TREES_DROPPED_ROOT = new AtomicLong();
+    private static final AtomicLong CAPTURED_TREES_DROPPED_OVERLAP = new AtomicLong();
+    private static final AtomicLong CAPTURED_BLOCKS_QUEUED = new AtomicLong();
+    private static final AtomicLong LEGACY_REPLAY_EXECUTED = new AtomicLong();
+    private static final AtomicLong LEGACY_REPLAY_DISABLED_DROPS = new AtomicLong();
 
     private DeferredTreeEventHandler() {
     }
 
+    public static ReplaySuppression suppressChunkLoadReplay() {
+        CHUNK_LOAD_REPLAY_SUPPRESSIONS.incrementAndGet();
+        return ReplaySuppression.chunkLoadOnly();
+    }
+
+    public static ReplaySuppression holdReplaySuppression() {
+        CHUNK_LOAD_REPLAY_SUPPRESSIONS.incrementAndGet();
+        SERVER_TICK_REPLAY_SUPPRESSIONS.incrementAndGet();
+        return ReplaySuppression.fullReplay();
+    }
+
+    public static int forceReplayReadyForDebug(MinecraftServer server, int maxReplays, int maxBlocks) {
+        if (!DeferredTreeQueue.isDeferredReplayEnabled() || server == null) {
+            return 0;
+        }
+        if (SERVER_TICK_REPLAY_SUPPRESSIONS.get() > 0) {
+            return 0;
+        }
+        return drainReadyTrees(server.getAllLevels(), Math.max(1, maxReplays), Math.max(128, maxBlocks), null);
+    }
+
+    public static int forceReplayReadyForDebug(MinecraftServer server,
+                                               int maxReplays,
+                                               int maxBlocks,
+                                               Set<Long> interestChunks) {
+        if (!DeferredTreeQueue.isDeferredReplayEnabled() || server == null) {
+            return 0;
+        }
+        if (SERVER_TICK_REPLAY_SUPPRESSIONS.get() > 0) {
+            return 0;
+        }
+        return drainReadyTrees(server.getAllLevels(),
+            Math.max(1, maxReplays),
+            Math.max(128, maxBlocks),
+            interestChunks == null || interestChunks.isEmpty() ? null : Set.copyOf(interestChunks));
+    }
+
     @SubscribeEvent
     public static void onChunkLoad(ChunkEvent.Load event) {
+        if (!DeferredTreeQueue.isDeferredReplayEnabled()) {
+            return;
+        }
         if (!(event.getLevel() instanceof ServerLevel level)) {
             return;
         }
         if (event.getChunk() == null) {
             return;
         }
-
-        var dim = level.dimension();
-        DeferredTreeQueue.loadFromDisk(level);
-        if (DeferredTreeQueue.pendingCount(dim) == 0) {
+        if (CHUNK_LOAD_REPLAY_SUPPRESSIONS.get() > 0) {
             return;
         }
 
-        List<DeferredTreeQueue.PendingTree> ready = DeferredTreeQueue.drainReady(dim, level);
+        var dim = level.dimension();
+        DeferredTreeQueue.loadFromDisk(level);
+        if (DeferredTreeQueue.pendingCount(level) == 0) {
+            return;
+        }
+
+        List<DeferredTreeQueue.PendingTree> ready = DeferredTreeQueue.drainReady(
+            dim,
+            level,
+            event.getChunk().getPos().x,
+            event.getChunk().getPos().z
+        );
         if (ready.isEmpty()) {
             return;
         }
@@ -62,58 +152,90 @@ public final class DeferredTreeEventHandler {
 
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent event) {
+        if (!DeferredTreeQueue.isDeferredReplayEnabled()) {
+            return;
+        }
         if (event.phase != TickEvent.Phase.END || event.getServer() == null) {
             return;
         }
+        if (SERVER_TICK_REPLAY_SUPPRESSIONS.get() > 0) {
+            return;
+        }
+        drainReadyTrees(event.getServer().getAllLevels(), MAX_REPLAYS_PER_SERVER_TICK, MAX_REPLAY_BLOCKS_PER_SERVER_TICK, null);
+    }
 
+    private static int drainReadyTrees(Iterable<ServerLevel> levels,
+                                       int maxReplays,
+                                       int maxReplayBlocks,
+                                       Set<Long> interestChunks) {
         int replayed = 0;
-        for (ServerLevel level : event.getServer().getAllLevels()) {
+        int queuedBlocks = 0;
+        for (ServerLevel level : levels) {
             if (level == null) {
                 continue;
+            }
+            if (replayed >= maxReplays || queuedBlocks >= maxReplayBlocks) {
+                return replayed;
             }
             ChunkGenerator generator = level.getChunkSource().getGenerator();
             if (generator == null) {
                 continue;
             }
 
-            List<DeferredTreeQueue.PendingTree> ready = DeferredTreeQueue.pollReady(
-                level.dimension(),
-                MAX_REPLAYS_PER_SERVER_TICK - replayed
-            );
+            DeferredTreeQueue.promoteReadyLoaded(level, MAX_READY_SWEEP_PROMOTIONS_PER_TICK);
+
+            List<DeferredTreeQueue.PendingTree> ready = interestChunks == null
+                ? DeferredTreeQueue.pollReady(level, maxReplays - replayed)
+                : DeferredTreeQueue.pollReady(level,
+                    maxReplays - replayed,
+                    interestChunks,
+                    Math.max(MAX_READY_SWEEP_PROMOTIONS_PER_TICK, interestChunks.size() * 8));
             if (ready.isEmpty()) {
                 continue;
             }
 
             for (DeferredTreeQueue.PendingTree pending : ready) {
-                replayTree(level, generator, pending);
+                int queued = replayTree(level, generator, pending);
                 replayed++;
-                if (replayed >= MAX_REPLAYS_PER_SERVER_TICK) {
-                    return;
+                queuedBlocks += Math.max(0, queued);
+                if (replayed >= maxReplays || queuedBlocks >= maxReplayBlocks) {
+                    return replayed;
                 }
             }
         }
+        return replayed;
     }
 
-    private static void replayTree(ServerLevel level, ChunkGenerator generator, DeferredTreeQueue.PendingTree pending) {
+    private static int replayTree(ServerLevel level, ChunkGenerator generator, DeferredTreeQueue.PendingTree pending) {
         if (level == null || generator == null || pending == null) {
-            return;
+            return 0;
         }
         if (pending.pos() == null) {
-            return;
+            DeferredTreeChunkRetainer.release(pending);
+            return 0;
         }
         if (!level.isLoaded(pending.pos())) {
             // Retry later if this position unloaded between readiness check and replay.
-            DeferredTreeQueue.enqueue(pending.dim(), pending);
-            return;
+            DeferredTreeQueue.requeue(pending);
+            return 0;
         }
 
         if (pending.hasCapturedBlocks()) {
-            applyCapturedTree(level, pending);
-            return;
+            return applyCapturedTree(level, pending);
+        }
+
+        if (!pending.allowLegacyReplay()) {
+            return 0;
+        }
+
+        if (!ENABLE_LEGACY_TREE_REPLAY_FALLBACK) {
+            LEGACY_REPLAY_DISABLED_DROPS.incrementAndGet();
+            TreeCompatTracker.recordFallback(TreeCompatTracker.FallbackReason.MISSING_RUNTIME_DEPENDENCY);
+            return 0;
         }
 
         if (pending.config() == null || pending.feature() == null) {
-            return;
+            return 0;
         }
 
         try {
@@ -131,6 +253,7 @@ public final class DeferredTreeEventHandler {
 
             DeferredTreeQueue.runReplay(() -> {
                 try {
+                    LEGACY_REPLAY_EXECUTED.incrementAndGet();
                     pending.feature().place(replayContext);
                 } catch (Throwable t) {
                     LC2H.LOGGER.debug("[LC2H] Deferred tree replay failed at {}: {}", pending.pos(), t.toString());
@@ -139,37 +262,142 @@ public final class DeferredTreeEventHandler {
         } catch (Throwable t) {
             LC2H.LOGGER.debug("[LC2H] Deferred tree replay setup failed at {}: {}", pending.pos(), t.toString());
         }
+        DeferredTreeChunkRetainer.release(pending);
+        return 0;
     }
 
-    private static void applyCapturedTree(ServerLevel level, DeferredTreeQueue.PendingTree pending) {
+    private static int applyCapturedTree(ServerLevel level, DeferredTreeQueue.PendingTree pending) {
+        CapturedTreeReplayPlan replayPlan = CapturedTreeReplayPlan.from(pending);
+        if (!replayPlan.validShape()) {
+            DeferredTreeChunkRetainer.release(pending);
+            CAPTURED_TREES_DROPPED_SHAPE.incrementAndGet();
+            TreeCompatTracker.recordFallback(TreeCompatTracker.FallbackReason.INVALID_CAPTURE);
+            return 0;
+        }
+        if (!hasStableTreeRoot(level, pending, replayPlan)) {
+            DeferredTreeChunkRetainer.release(pending);
+            CAPTURED_TREES_DROPPED_ROOT.incrementAndGet();
+            TreeCompatTracker.recordFallback(TreeCompatTracker.FallbackReason.ROOT_REJECTED);
+            return 0;
+        }
+        if (hasConflictingTreeAtTarget(level, pending, replayPlan)) {
+            DeferredTreeChunkRetainer.release(pending);
+            CAPTURED_TREES_DROPPED_OVERLAP.incrementAndGet();
+            TreeCompatTracker.recordFallback(TreeCompatTracker.FallbackReason.OVERLAP_REJECTED);
+            return 0;
+        }
+        // Enqueue only blocks whose destination chunk is loaded right now.
+        //
+        // This used to be an all-or-nothing precheck that requeued the WHOLE
+        // tree if any single block was in an unloaded chunk. Once full
+        // canopies were kept, trees span more chunks, so at a worldgen
+        // frontier that condition is often permanently true: the plan was
+        // re-queued forever (missingChunkRetries climbing into the tens of
+        // thousands with entries stuck for minutes) and the tree never
+        // landed at all - the same visual truncation, one stage later.
+        // Placing the loaded part immediately puts the tree in the world;
+        // an unloaded fringe block is not worth stalling the whole tree.
+        LinkedHashMap<ChunkCoord, ChunkShadowMutationPlan.Builder> plans = new LinkedHashMap<>();
+        int queued = 0;
+        int unloadedSkipped = 0;
         for (DeferredTreeQueue.CapturedBlock block : pending.blocks()) {
             if (block == null || block.pos() == null || block.state() == null) {
                 continue;
             }
-            if (!level.isLoaded(block.pos())) {
-                DeferredTreeQueue.enqueue(pending.dim(), pending);
-                return;
+            if (level.getChunkSource().getChunkNow(block.pos().getX() >> 4, block.pos().getZ() >> 4) == null) {
+                unloadedSkipped++;
+                continue;
+            }
+            if (shouldApplyCapturedBlock(level, block.pos(), block.state(), replayPlan)) {
+                ChunkCoord chunk = new ChunkCoord(level.dimension(), block.pos().getX() >> 4, block.pos().getZ() >> 4);
+                plans.computeIfAbsent(chunk, key -> ChunkShadowMutationPlan.builder(level, key))
+                    .transaction(pending.transactionId(), pending.createdAtMs(), ChunkShadowMutationPlan.MutationKind.TREE_CAPTURE)
+                    .add(block.pos(), block.state(), TREE_CAPTURE_SET_FLAGS, true);
+                queued++;
             }
         }
+        if (unloadedSkipped > 0) {
+            TreeCompatTracker.recordFallback(TreeCompatTracker.FallbackReason.UNLOADED_DESTINATION);
+        }
 
-        for (DeferredTreeQueue.CapturedBlock block : pending.blocks()) {
-            if (shouldApplyCapturedBlock(level, block.pos(), block.state())) {
-                try {
-                    level.setBlock(block.pos(), block.state(), 2);
-                    ChunkPostProcessor.markTreePlacement(level, block.pos(), block.state());
-                } catch (Throwable t) {
-                    LC2H.LOGGER.debug("[LC2H] Deferred captured tree block apply failed at {}: {}", block.pos(), t.toString());
+        if (queued == 0) {
+            DeferredTreeChunkRetainer.release(pending);
+            return 0;
+        }
+        CAPTURED_TREES_APPLIED.incrementAndGet();
+        CAPTURED_BLOCKS_QUEUED.addAndGet(queued);
+        TreeCompatTracker.recordApplied(pending.source());
+        for (ChunkShadowMutationPlan.Builder builder : plans.values()) {
+            try {
+                // Do not retain a captured tree as one cross-chunk mutation
+                // transaction.  That bypassed the applier's per-tick budget
+                // and made a single replay synchronously write every leaf and
+                // log it captured.  Tree support is checked per entry, so safe
+                // bounded chunk slices preserve deterministic placement while
+                // allowing unloaded boundary decorations to retry normally.
+                ChunkShadowMutationPlan plan = builder.build().withoutTransaction();
+                for (int offset = 0; offset < plan.size(); offset += MAX_CAPTURED_TREE_PLAN_BLOCKS) {
+                    ShadowBlockMutationApplier.enqueueDeferred(plan.slice(offset, MAX_CAPTURED_TREE_PLAN_BLOCKS));
+                }
+            } catch (Throwable t) {
+                LC2H.LOGGER.debug("[LC2H] Deferred captured tree block queue failed: {}", t.toString());
+            }
+        }
+        DeferredTreeChunkRetainer.release(pending);
+        return queued;
+    }
+
+    private static BlockState getLoadedState(ServerLevel level, BlockPos pos) {
+        if (level == null || pos == null) {
+            return Blocks.AIR.defaultBlockState();
+        }
+        LevelChunk chunk = level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
+        return chunk == null ? Blocks.AIR.defaultBlockState() : chunk.getBlockState(pos);
+    }
+
+    private static boolean hasLoadedConflictWindow(ServerLevel level,
+                                                   DeferredTreeQueue.PendingTree pending,
+                                                   CapturedTreeReplayPlan replayPlan) {
+        if (level == null || pending == null || pending.pos() == null || replayPlan == null) {
+            return false;
+        }
+        BlockPos root = pending.pos();
+        int minChunkX = (root.getX() - 3) >> 4;
+        int maxChunkX = (root.getX() + 3) >> 4;
+        int minChunkZ = (root.getZ() - 3) >> 4;
+        int maxChunkZ = (root.getZ() + 3) >> 4;
+        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                if (level.getChunkSource().getChunkNow(chunkX, chunkZ) == null) {
+                    return false;
                 }
             }
         }
+        return true;
     }
 
-    private static boolean shouldApplyCapturedBlock(ServerLevel level, net.minecraft.core.BlockPos pos, BlockState planned) {
+    private static boolean shouldApplyCapturedBlock(ServerLevel level,
+                                                    BlockPos pos,
+                                                    BlockState planned,
+                                                    CapturedTreeReplayPlan replayPlan) {
         if (level == null || pos == null || planned == null) {
             return false;
         }
 
-        BlockState existing = level.getBlockState(pos);
+        boolean plannedLog = planned.is(BlockTags.LOGS);
+        boolean plannedLeaves = planned.is(BlockTags.LEAVES);
+        // Logs and leaves come straight from the capture of the real feature
+        // run, so they ARE the tree by definition - re-deriving membership
+        // from a guessed radius truncated wide canopies (a large BOP spruce
+        // has leaves further from any trunk column than the old 6/4 window
+        // allowed), which is what made replayed trees look chopped. Only
+        // non-tree incidentals still need a proximity sanity check, since
+        // those can legitimately be unrelated blocks caught by the capture.
+        if (!plannedLog && !plannedLeaves && !replayPlan.nearLog(pos, 6, 4)) {
+            return false;
+        }
+
+        BlockState existing = getLoadedState(level, pos);
         if (existing.equals(planned)) {
             return false;
         }
@@ -177,30 +405,330 @@ public final class DeferredTreeEventHandler {
             return true;
         }
 
-        boolean plannedLog = planned.is(BlockTags.LOGS);
-        boolean plannedLeaves = planned.is(BlockTags.LEAVES);
         boolean existingTreeish = existing.is(BlockTags.LOGS) || existing.is(BlockTags.LEAVES);
-
         if (existingTreeish) {
+            if (plannedLog) {
+                return existing.is(BlockTags.LEAVES);
+            }
+            if (plannedLeaves) {
+                return existing.is(BlockTags.LEAVES);
+            }
+            return false;
+        }
+
+        // Solid, non-tree terrain sits here. A live (non-deferred) tree
+        // placement never checks this - vanilla TreeFeature happily punches
+        // a trunk through a hillside on a slope - so refusing to overwrite
+        // it here truncated trunks wherever a captured tree's home chunk
+        // (never touched by Lost Cities) simply had ordinary terrain in the
+        // way. The only real reason to refuse is protecting an LC building
+        // that was built, after capture, in a neighboring city chunk the
+        // tree's canopy spilled into - so only enforce it there.
+        return !isLostCityOwnedChunk(level, pos);
+    }
+
+    private static boolean isLostCityOwnedChunk(ServerLevel level, BlockPos pos) {
+        try {
+            IDimensionInfo dimInfo = Registration.LOSTCITY_FEATURE.get().getDimensionInfo(level);
+            if (dimInfo == null) {
+                return true;
+            }
+            ResourceKey<Level> dim = dimInfo.getType();
+            if (dim == null) {
+                return true;
+            }
+            return LostCityTreeSafety.isUnsafeChunk(dimInfo, dim, pos.getX() >> 4, pos.getZ() >> 4);
+        } catch (Throwable ignored) {
             return true;
         }
+    }
 
-        if (plannedLeaves) {
+    private static boolean hasStableTreeRoot(ServerLevel level,
+                                             DeferredTreeQueue.PendingTree pending,
+                                             CapturedTreeReplayPlan replayPlan) {
+        if (level == null || pending == null || pending.pos() == null) {
             return false;
         }
-
-        if (plannedLog) {
+        BlockPos rootPos = pending.pos();
+        if (!level.isLoaded(rootPos) || !level.isLoaded(rootPos.below())) {
             return false;
         }
+        if (!replayPlan.rootLogPresent()) {
+            return false;
+        }
+        BlockState below = getLoadedState(level, rootPos.below());
+        if (below == null || below.isAir() || below.canBeReplaced()) {
+            return false;
+        }
+        if (below.is(BlockTags.LOGS) || below.is(BlockTags.LEAVES)) {
+            return false;
+        }
+        return below.is(BlockTags.DIRT) || below.isCollisionShapeFullBlock(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
+    }
 
+    public static String capturedTreeDiagnostics() {
+        return "enabled=" + DeferredTreeQueue.isDeferredReplayEnabled()
+            + ", authoritativeShadow=true"
+            + ", pending=" + DeferredTreeQueue.pendingCountAll()
+            + ", ready=" + DeferredTreeQueue.readyCountAll()
+            + ", applied=" + CAPTURED_TREES_APPLIED.get()
+            + ", droppedShape=" + CAPTURED_TREES_DROPPED_SHAPE.get()
+            + ", droppedRoot=" + CAPTURED_TREES_DROPPED_ROOT.get()
+            + ", droppedOverlap=" + CAPTURED_TREES_DROPPED_OVERLAP.get()
+            + ", blocksQueued=" + CAPTURED_BLOCKS_QUEUED.get()
+            + ", legacyFallbackEnabled=" + ENABLE_LEGACY_TREE_REPLAY_FALLBACK
+            + ", legacyReplayExecuted=" + LEGACY_REPLAY_EXECUTED.get()
+            + ", legacyReplayDisabledDrops=" + LEGACY_REPLAY_DISABLED_DROPS.get()
+            + ", suppressions[chunkLoad=" + CHUNK_LOAD_REPLAY_SUPPRESSIONS.get()
+            + ", serverTick=" + SERVER_TICK_REPLAY_SUPPRESSIONS.get() + "]"
+            + ", todoGuard[" + LostCityTodoTreeGuard.diagnostics() + "]"
+            + ", queue[" + DeferredTreeQueue.diagnostics() + "]"
+            + ", compat=" + TreeCompatTracker.compactSummary();
+    }
+
+    public static String capturedTreeDiagnostics(ServerLevel level) {
+        if (level == null) {
+            return capturedTreeDiagnostics();
+        }
+        return "enabled=" + DeferredTreeQueue.isDeferredReplayEnabled()
+            + ", authoritativeShadow=true"
+            + ", pending=" + DeferredTreeQueue.pendingCount(level)
+            + ", ready=" + DeferredTreeQueue.readyCount(level)
+            + ", applied=" + CAPTURED_TREES_APPLIED.get()
+            + ", droppedShape=" + CAPTURED_TREES_DROPPED_SHAPE.get()
+            + ", droppedRoot=" + CAPTURED_TREES_DROPPED_ROOT.get()
+            + ", droppedOverlap=" + CAPTURED_TREES_DROPPED_OVERLAP.get()
+            + ", blocksQueued=" + CAPTURED_BLOCKS_QUEUED.get()
+            + ", legacyFallbackEnabled=" + ENABLE_LEGACY_TREE_REPLAY_FALLBACK
+            + ", legacyReplayExecuted=" + LEGACY_REPLAY_EXECUTED.get()
+            + ", legacyReplayDisabledDrops=" + LEGACY_REPLAY_DISABLED_DROPS.get()
+            + ", suppressions[chunkLoad=" + CHUNK_LOAD_REPLAY_SUPPRESSIONS.get()
+            + ", serverTick=" + SERVER_TICK_REPLAY_SUPPRESSIONS.get() + "]"
+            + ", todoGuard[" + LostCityTodoTreeGuard.diagnostics() + "]"
+            + ", queue[" + DeferredTreeQueue.diagnostics(level) + "]"
+            + ", compat=" + TreeCompatTracker.compactSummary();
+    }
+
+    public static final class ReplaySuppression implements AutoCloseable {
+        private final boolean releaseChunkLoad;
+        private final boolean releaseServerTick;
+        private boolean closed;
+
+        private ReplaySuppression(boolean releaseChunkLoad, boolean releaseServerTick) {
+            this.releaseChunkLoad = releaseChunkLoad;
+            this.releaseServerTick = releaseServerTick;
+        }
+
+        private static ReplaySuppression chunkLoadOnly() {
+            return new ReplaySuppression(true, false);
+        }
+
+        private static ReplaySuppression fullReplay() {
+            return new ReplaySuppression(true, true);
+        }
+
+        @Override
+        public void close() {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            if (releaseChunkLoad) {
+                CHUNK_LOAD_REPLAY_SUPPRESSIONS.updateAndGet(current -> Math.max(0, current - 1));
+            }
+            if (releaseServerTick) {
+                SERVER_TICK_REPLAY_SUPPRESSIONS.updateAndGet(current -> Math.max(0, current - 1));
+            }
+        }
+    }
+
+    private static boolean hasConflictingTreeAtTarget(ServerLevel level,
+                                                      DeferredTreeQueue.PendingTree pending,
+                                                      CapturedTreeReplayPlan replayPlan) {
+        if (level == null || pending == null || pending.pos() == null || replayPlan == null) {
+            return false;
+        }
+        if (!hasLoadedConflictWindow(level, pending, replayPlan)) {
+            DeferredTreeQueue.requeue(pending);
+            TreeCompatTracker.recordFallback(TreeCompatTracker.FallbackReason.UNLOADED_DESTINATION);
+            return false;
+        }
+        for (DeferredTreeQueue.CapturedBlock block : pending.blocks()) {
+            if (block == null || block.pos() == null || block.state() == null) {
+                continue;
+            }
+            if (!block.state().is(BlockTags.LOGS)) {
+                continue;
+            }
+            BlockState existing = getLoadedState(level, block.pos());
+            if (existing != null
+                && existing.is(BlockTags.LOGS)
+                && !replayPlan.containsLog(block.pos())) {
+                return true;
+            }
+        }
+        // A second tree's TRUNK sharing our footprint is a real conflict.
+        // Neighboring *foliage* is not: canopies overlap constantly in a
+        // dense forest, and rejecting on that dropped whole legitimate trees
+        // (visible as gaps/stumps near city borders). Restrict the check to
+        // foreign logs intruding into this tree's own trunk column.
+        BlockPos root = pending.pos();
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        for (int x = root.getX() - 1; x <= root.getX() + 1; x++) {
+            for (int z = root.getZ() - 1; z <= root.getZ() + 1; z++) {
+                for (int y = root.getY(); y <= root.getY() + 6; y++) {
+                    cursor.set(x, y, z);
+                    if (replayPlan.containsAny(cursor)) {
+                        continue;
+                    }
+                    BlockState existing = getLoadedState(level, cursor);
+                    if (existing != null && existing.is(BlockTags.LOGS)) {
+                        return true;
+                    }
+                }
+            }
+        }
         return false;
+    }
+
+    private static final class CapturedTreeReplayPlan {
+        private final BlockPos origin;
+        private final Set<Long> logs;
+        private final Set<Long> captured;
+        private final int blockCount;
+        private final int logCount;
+        private final int minLogY;
+        private final int maxY;
+        private final boolean rootLogPresent;
+
+        private CapturedTreeReplayPlan(BlockPos origin,
+                                       Set<Long> logs,
+                                       Set<Long> captured,
+                                       int blockCount,
+                                       int logCount,
+                                       int minLogY,
+                                       int maxY,
+                                       boolean rootLogPresent) {
+            this.origin = origin;
+            this.logs = logs;
+            this.captured = captured;
+            this.blockCount = blockCount;
+            this.logCount = logCount;
+            this.minLogY = minLogY;
+            this.maxY = maxY;
+            this.rootLogPresent = rootLogPresent;
+        }
+
+        private static CapturedTreeReplayPlan from(DeferredTreeQueue.PendingTree pending) {
+            BlockPos origin = pending == null ? null : pending.pos();
+            List<DeferredTreeQueue.CapturedBlock> blocks = pending == null ? null : pending.blocks();
+            if (origin == null || blocks == null || blocks.isEmpty()) {
+                return new CapturedTreeReplayPlan(origin, Set.of(), Set.of(), 0, 0, Integer.MAX_VALUE, Integer.MIN_VALUE, false);
+            }
+
+            Set<Long> logs = new HashSet<>();
+            Set<Long> captured = new HashSet<>(blocks.size());
+            int logCount = 0;
+            int minLogY = Integer.MAX_VALUE;
+            int maxY = Integer.MIN_VALUE;
+            for (DeferredTreeQueue.CapturedBlock block : blocks) {
+                if (block == null || block.pos() == null || block.state() == null) {
+                    continue;
+                }
+                captured.add(block.pos().asLong());
+                maxY = Math.max(maxY, block.pos().getY());
+                if (block.state().is(BlockTags.LOGS)) {
+                    logs.add(block.pos().asLong());
+                    logCount++;
+                    minLogY = Math.min(minLogY, block.pos().getY());
+                }
+            }
+
+            boolean rootLog = logs.contains(origin.asLong()) || logs.contains(origin.above().asLong());
+            if (!rootLog) {
+                for (long packed : logs) {
+                    BlockPos logPos = BlockPos.of(packed);
+                    if (Math.abs(logPos.getX() - origin.getX()) <= 1
+                        && Math.abs(logPos.getZ() - origin.getZ()) <= 1
+                        && logPos.getY() >= origin.getY()
+                        && logPos.getY() <= origin.getY() + 1) {
+                        rootLog = true;
+                        break;
+                    }
+                }
+            }
+
+            return new CapturedTreeReplayPlan(origin, logs, captured, blocks.size(), logCount, minLogY, maxY, rootLog);
+        }
+
+        private boolean validShape() {
+            if (origin == null || blockCount <= 0 || blockCount > MAX_CAPTURED_TREE_BLOCKS) {
+                return false;
+            }
+            if (logCount <= 0 || !rootLogPresent) {
+                return false;
+            }
+            if (minLogY < origin.getY() || minLogY > origin.getY() + 2) {
+                return false;
+            }
+            return maxY >= minLogY && (maxY - minLogY) <= MAX_CAPTURED_TREE_HEIGHT;
+        }
+
+        private boolean rootLogPresent() {
+            return rootLogPresent;
+        }
+
+        private boolean containsLog(BlockPos pos) {
+            return pos != null && logs.contains(pos.asLong());
+        }
+
+        private boolean containsAny(BlockPos pos) {
+            return pos != null && captured.contains(pos.asLong());
+        }
+
+        private boolean attachedLog(BlockPos pos) {
+            if (pos == null || !logs.contains(pos.asLong())) {
+                return false;
+            }
+            if (pos.equals(origin) || pos.equals(origin.above())) {
+                return true;
+            }
+            return nearLog(pos, 1, 1);
+        }
+
+        private boolean attachedLeaf(BlockPos pos) {
+            return nearLog(pos, 6, 4);
+        }
+
+        private boolean nearLog(BlockPos pos, int horizontalRadius, int verticalRadius) {
+            if (pos == null || logs.isEmpty()) {
+                return false;
+            }
+            BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+            int minY = Math.max(origin.getY(), pos.getY() - verticalRadius);
+            int maxY = pos.getY() + verticalRadius;
+            for (int x = pos.getX() - horizontalRadius; x <= pos.getX() + horizontalRadius; x++) {
+                for (int z = pos.getZ() - horizontalRadius; z <= pos.getZ() + horizontalRadius; z++) {
+                    for (int y = minY; y <= maxY; y++) {
+                        cursor.set(x, y, z);
+                        long packed = cursor.asLong();
+                        if (packed != pos.asLong() && logs.contains(packed)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
     }
 
     @SubscribeEvent
     public static void onLevelUnload(LevelEvent.Unload event) {
         if (event.getLevel() instanceof ServerLevel level) {
+            org.admany.lc2h.worldgen.gpu.TerrainCorrectionGpuPipeline.clearRegions();
             DeferredTreeQueue.flushToDisk(level);
-            DeferredTreeQueue.clearDimension(level.dimension());
+            DeferredTreeQueue.clearDimension(level);
+            LostCityTodoTreeGuard.clearDimension(level);
         }
     }
 
@@ -218,6 +746,8 @@ public final class DeferredTreeEventHandler {
 
     @SubscribeEvent
     public static void onServerStopped(ServerStoppedEvent event) {
+        org.admany.lc2h.worldgen.gpu.TerrainCorrectionGpuPipeline.clearRegions();
         DeferredTreeQueue.clearAll();
+        LostCityTodoTreeGuard.clearAll();
     }
 }

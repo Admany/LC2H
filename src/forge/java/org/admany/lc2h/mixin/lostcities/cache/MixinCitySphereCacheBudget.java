@@ -23,7 +23,7 @@ public class MixinCitySphereCacheBudget {
     private static Map<ChunkCoord, CitySphere> CITY_SPHERE_CACHE;
 
     private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_CITY_SPHERE_BUDGET =
-        LostCitiesCacheBudgetManager.register("lc_city_sphere", 512, 2048, key -> CITY_SPHERE_CACHE.remove(key) != null);
+        LostCitiesCacheBudgetManager.register("lc_city_sphere", 512, 512, key -> CITY_SPHERE_CACHE.remove(key) != null);
 
     @Inject(method = "<clinit>", at = @At("TAIL"))
     private static void lc2h$makeCitySphereCacheConcurrent(CallbackInfo ci) {

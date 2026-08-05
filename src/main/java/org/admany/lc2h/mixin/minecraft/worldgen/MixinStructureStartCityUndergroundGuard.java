@@ -3,7 +3,6 @@ package org.admany.lc2h.mixin.minecraft.worldgen;
 import mcjty.lostcities.setup.Registration;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
-import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.WorldGenLevel;
@@ -12,17 +11,17 @@ import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.levelgen.structure.StructureStart;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.admany.lc2h.config.ConfigManager;
+import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 
 @Mixin(StructureStart.class)
 public class MixinStructureStartCityUndergroundGuard {
-
-    private static final int CITY_UNDERGROUND_BUFFER = Math.max(0,
-        Integer.getInteger("lc2h.cityUndergroundStructureBuffer", 20));
-    private static final int CITY_BUFFER_RADIUS = Math.max(0,
-        Integer.getInteger("lc2h.cityStructureBufferRadius", 1));
+    @Unique
+    private Boolean lc2h$intersectsCity;
 
     @Inject(method = "placeInChunk", at = @At("HEAD"), cancellable = true)
     private void lc2h$skipStructuresNearCityGround(WorldGenLevel level,
@@ -32,7 +31,7 @@ public class MixinStructureStartCityUndergroundGuard {
                                                    BoundingBox box,
                                                    ChunkPos chunkPos,
                                                    CallbackInfo ci) {
-        if (CITY_UNDERGROUND_BUFFER <= 0 || level == null || box == null || chunkPos == null) {
+        if (!ConfigManager.REJECT_STRUCTURES_IN_CITY_CHUNKS || level == null || chunkPos == null) {
             return;
         }
 
@@ -46,74 +45,38 @@ public class MixinStructureStartCityUndergroundGuard {
             return;
         }
 
-        CityContext context = resolveCityContext(dimInfo, chunkPos.x, chunkPos.z);
-        if (context == null) {
-            return;
+        if (lc2h$intersectsCity == null) {
+            StructureStart self = (StructureStart) (Object) this;
+            BoundingBox structureBox;
+            try {
+                structureBox = self.getBoundingBox();
+            } catch (Throwable ignored) {
+                structureBox = box;
+            }
+            lc2h$intersectsCity = intersectsCity(dimInfo, structureBox == null ? box : structureBox);
         }
-        int ground = context.groundLevel();
-        if (ground <= 0) {
-            return;
-        }
-
-        int cutoffY = ground - CITY_UNDERGROUND_BUFFER;
-        if (box.maxY() >= cutoffY) {
+        if (Boolean.TRUE.equals(lc2h$intersectsCity)) {
             ci.cancel();
         }
     }
 
-    private record CityContext(int groundLevel, boolean city) {
-    }
-
-    private static CityContext resolveCityContext(IDimensionInfo dimInfo, int chunkX, int chunkZ) {
-        if (dimInfo == null) {
-            return null;
+    @Unique
+    private static boolean intersectsCity(IDimensionInfo dimInfo, BoundingBox box) {
+        if (dimInfo == null || dimInfo.getType() == null || box == null) {
+            return false;
         }
-        ChunkCoord origin = new ChunkCoord(dimInfo.getType(), chunkX, chunkZ);
-        if (BuildingInfo.isCity(origin, dimInfo)) {
-            Integer ground = getGround(dimInfo, origin);
-            if (ground != null) {
-                return new CityContext(ground, true);
-            }
-            return new CityContext(0, true);
-        }
-        if (CITY_BUFFER_RADIUS <= 0) {
-            return null;
-        }
-        int bestGround = Integer.MIN_VALUE;
-        boolean found = false;
-        for (int dx = -CITY_BUFFER_RADIUS; dx <= CITY_BUFFER_RADIUS; dx++) {
-            for (int dz = -CITY_BUFFER_RADIUS; dz <= CITY_BUFFER_RADIUS; dz++) {
-                if (dx == 0 && dz == 0) {
-                    continue;
-                }
-                ChunkCoord check = new ChunkCoord(dimInfo.getType(), chunkX + dx, chunkZ + dz);
-                if (!BuildingInfo.isCity(check, dimInfo)) {
-                    continue;
-                }
-                Integer ground = getGround(dimInfo, check);
-                if (ground != null) {
-                    found = true;
-                    if (ground > bestGround) {
-                        bestGround = ground;
-                    }
+        int buffer = ConfigManager.CITY_STRUCTURE_REJECTION_BUFFER_CHUNKS;
+        int minChunkX = (box.minX() >> 4) - buffer;
+        int maxChunkX = (box.maxX() >> 4) + buffer;
+        int minChunkZ = (box.minZ() >> 4) - buffer;
+        int maxChunkZ = (box.maxZ() >> 4) + buffer;
+        for (int cx = minChunkX; cx <= maxChunkX; cx++) {
+            for (int cz = minChunkZ; cz <= maxChunkZ; cz++) {
+                if (ChunkRoleProbe.isCity(dimInfo, dimInfo.getType(), cx, cz)) {
+                    return true;
                 }
             }
         }
-        if (!found) {
-            return null;
-        }
-        return new CityContext(bestGround, false);
-    }
-
-    private static Integer getGround(IDimensionInfo dimInfo, ChunkCoord coord) {
-        try {
-            BuildingInfo info = BuildingInfo.getBuildingInfo(coord, dimInfo);
-            if (info == null) {
-                return null;
-            }
-            return info.getCityGroundLevel();
-        } catch (Throwable ignored) {
-            return null;
-        }
+        return false;
     }
 }

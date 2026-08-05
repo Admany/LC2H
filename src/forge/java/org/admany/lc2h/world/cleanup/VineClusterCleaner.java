@@ -17,11 +17,15 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.concurrency.async.AsyncManager;
+import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.data.cache.FeatureCache;
+import org.admany.lc2h.runtime.Lc2hRuntimeModes;
 import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.quantified.api.QuantifiedAPI;
-import org.admany.quantified.api.model.QuantifiedTask;
 import org.admany.lc2h.concurrency.async.Priority;
+import org.admany.lc2h.worldgen.apply.ChunkShadowMutationPlan;
+import org.admany.lc2h.worldgen.apply.ShadowBlockMutationApplier;
+import mcjty.lostcities.varia.ChunkCoord;
 
 import java.util.ArrayDeque;
 import java.util.HashMap;
@@ -36,9 +40,19 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
 
 @Mod.EventBusSubscriber(modid = LC2H.MODID)
 public final class VineClusterCleaner {
+    private enum AttachmentFamily {
+        VINE,
+        CAVE_VINES,
+        TWISTING_VINES,
+        WEEPING_VINES,
+        HANGING_ROOTS,
+        CHAIN
+    }
+
     private static volatile boolean initialized = false;
     private static volatile boolean shutdown = false;
 
@@ -47,7 +61,7 @@ public final class VineClusterCleaner {
     private static final int MAX_REMOVALS_PER_TICK = Math.max(16, Integer.getInteger("lc2h.vine.max_removals_per_tick", 128));
     private static final long MIN_RESCAN_INTERVAL_MS = 15_000L;
     private static final int VINE_SCAN_BATCH_SIZE = Math.max(512, Integer.getInteger("lc2h.vine.scan_batch_size", 2048));
-    private static final int VINE_SCAN_CACHE_VERSION = 2;
+    private static final int VINE_SCAN_CACHE_VERSION = 3;
 
     private static final Map<ResourceKey<net.minecraft.world.level.Level>, Integer> CHUNK_CURSOR = new ConcurrentHashMap<>();
     private static final Map<ResourceKey<net.minecraft.world.level.Level>, Map<Long, Long>> LAST_SCAN = new ConcurrentHashMap<>();
@@ -57,6 +71,9 @@ public final class VineClusterCleaner {
     private static final int MAX_IN_FLIGHT = Math.max(1, Integer.getInteger("lc2h.vine.max_in_flight", 16));
     private static final AtomicInteger IN_FLIGHT = new AtomicInteger(0);
     private static final AtomicBoolean SCAN_REQUESTED = new AtomicBoolean(false);
+    private static final LongAdder SCANS_SUBMITTED = new LongAdder();
+    private static final LongAdder SCANS_COMPLETED = new LongAdder();
+    private static final LongAdder SCAN_TIME_NS = new LongAdder();
     private static volatile MinecraftServer LAST_SERVER;
 
     private static final int REMOVAL_Y_OFFSET = 1024;
@@ -95,6 +112,9 @@ public final class VineClusterCleaner {
 
     @SubscribeEvent
     public static void onChunkLoad(ChunkEvent.Load event) {
+        if (!isAutomaticCleanupEnabled() || Lc2hRuntimeModes.anyParityAutorun()) {
+            return;
+        }
         if (shutdown) {
             return;
         }
@@ -113,6 +133,9 @@ public final class VineClusterCleaner {
 
     @SubscribeEvent
     public static void onChunkUnload(ChunkEvent.Unload event) {
+        if (!isAutomaticCleanupEnabled() || Lc2hRuntimeModes.anyParityAutorun()) {
+            return;
+        }
         if (shutdown) {
             return;
         }
@@ -133,6 +156,16 @@ public final class VineClusterCleaner {
     }
 
     public static void initialize(MinecraftServer server) {
+        if (!isAutomaticCleanupEnabled()) {
+            initialized = false;
+            SCAN_REQUESTED.set(false);
+            return;
+        }
+        if (Lc2hRuntimeModes.anyParityAutorun()) {
+            shutdown = true;
+            initialized = false;
+            return;
+        }
         if (initialized || shutdown) {
             return;
         }
@@ -160,6 +193,9 @@ public final class VineClusterCleaner {
     }
 
     public static void cleanVinesOnFirstLoad(ServerLevel level, ChunkPos chunkPos) {
+        if (!isAutomaticCleanupEnabled() || Lc2hRuntimeModes.anyParityAutorun()) {
+            return;
+        }
         if (shutdown || level == null || chunkPos == null) {
             return;
         }
@@ -218,13 +254,16 @@ public final class VineClusterCleaner {
     }
 
     private static void runTurboScan(MinecraftServer server) {
+        if (!isAutomaticCleanupEnabled()) {
+            return;
+        }
         LAST_SERVER = server;
         SCAN_REQUESTED.set(true);
     }
 
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (shutdown || event.phase != TickEvent.Phase.END) {
+        if (!isAutomaticCleanupEnabled() || shutdown || event.phase != TickEvent.Phase.END) {
             return;
         }
         if (!SCAN_REQUESTED.compareAndSet(true, false)) {
@@ -245,6 +284,9 @@ public final class VineClusterCleaner {
     }
 
     private static boolean startQuantifiedLoop(MinecraftServer server) {
+        if (!isAutomaticCleanupEnabled()) {
+            return false;
+        }
         try {
             scheduleNextQuantifiedScan(server);
             if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
@@ -260,18 +302,12 @@ public final class VineClusterCleaner {
     }
 
     private static void scheduleNextQuantifiedScan(MinecraftServer server) {
-        if (shutdown) return;
-        
-        CompletableFuture<Void> future = QuantifiedAPI.submit(
-                QuantifiedTask.<Void>builder(LC2H.MODID, "vine_cleaner_tick", () -> {
-                    runTurboScan(server);
-                    return null;
-                })
-                .batchKey(AsyncManager.quantifiedBatchKey("vine_cleaner_tick", Priority.LOW))
-        );
+        if (shutdown || !isAutomaticCleanupEnabled()) return;
+
+        CompletableFuture<Void> future = AsyncManager.submitTask("vine_cleaner_tick", () -> runTurboScan(server), null, Priority.LOW);
 
         future.whenComplete((r, t) -> {
-            if (!shutdown) {
+            if (!shutdown && isAutomaticCleanupEnabled()) {
                 AsyncManager.runLater("vine-cleaner-reschedule", () -> scheduleNextQuantifiedScan(server),
                     TimeUnit.SECONDS.toMillis(SCAN_PERIOD_SECONDS), Priority.LOW);
             }
@@ -280,7 +316,7 @@ public final class VineClusterCleaner {
 
     private static void runTurboScanOnServerThread(MinecraftServer server) {
         try {
-            if (shutdown) {
+            if (shutdown || !isAutomaticCleanupEnabled()) {
                 return;
             }
 
@@ -392,40 +428,47 @@ public final class VineClusterCleaner {
     }
 
     private static boolean scanChunkForVinesAsync(ServerLevel level, LevelChunk chunk) {
+        if (!isAutomaticCleanupEnabled()) {
+            return false;
+        }
         if (!tryEnterScan()) {
             return false;
         }
-        QuantifiedTask.Builder<Void> builder = QuantifiedTask.<Void>builder(LC2H.MODID, "vine_cleanup", () -> {
-            try {
-                performVineScan(level, chunk);
-            } catch (Exception e) {
-                LC2H.LOGGER.error("[LC2H] Error in async vine cleanup: " + e.getMessage(), e);
-            } finally {
-                exitScan();
-            }
-            return null;
-        }).batchKey(AsyncManager.quantifiedBatchKey("vine_cleanup", Priority.LOW));
 
         try {
-            QuantifiedAPI.submit(builder);
+            SCANS_SUBMITTED.increment();
+            AsyncManager.submitSupplier(
+                "vine_cleanup",
+                () -> {
+                    long startedNs = System.nanoTime();
+                    try {
+                        performVineScan(level, chunk);
+                    } catch (Exception e) {
+                        LC2H.LOGGER.error("[LC2H] Error in async vine cleanup: " + e.getMessage(), e);
+                    } finally {
+                        SCAN_TIME_NS.add(System.nanoTime() - startedNs);
+                        SCANS_COMPLETED.increment();
+                        exitScan();
+                    }
+                    return null;
+                },
+                Priority.LOW
+            );
             return true;
-        } catch (IllegalStateException notRegistered) {
-            try {
-                QuantifiedAPI.register(LC2H.MODID);
-                QuantifiedAPI.submit(builder);
-                return true;
-            } catch (Throwable ignored) {
-            }
         } catch (Throwable ignored) {
         }
 
         try {
+            SCANS_SUBMITTED.increment();
             AsyncManager.submitSupplier(
                 "vine_cleanup_fallback",
                 () -> {
+                    long startedNs = System.nanoTime();
                     try {
                         performVineScan(level, chunk);
                     } finally {
+                        SCAN_TIME_NS.add(System.nanoTime() - startedNs);
+                        SCANS_COMPLETED.increment();
                         exitScan();
                     }
                     return null;
@@ -440,6 +483,9 @@ public final class VineClusterCleaner {
     }
 
     private static void performVineScan(ServerLevel level, LevelChunk chunk) {
+        if (!isAutomaticCleanupEnabled()) {
+            return;
+        }
         try {
             ChunkPos chunkPos = chunk.getPos();
             String cacheKey = vineScanKey(level.dimension(), chunkPos.x, chunkPos.z);
@@ -502,7 +548,7 @@ public final class VineClusterCleaner {
                 for (int y = minY; y <= boundedMaxY; y++) {
                     cursor.set(baseX + x, y, baseZ + z);
                     try {
-                        if (chunk.getBlockState(cursor).is(Blocks.VINE)) {
+                        if (attachmentFamily(chunk.getBlockState(cursor)) != null) {
                             vineStarts.add(cursor.immutable());
                             if (vineStarts.size() >= VINE_SCAN_BATCH_SIZE) {
                                 return vineStarts;
@@ -523,6 +569,17 @@ public final class VineClusterCleaner {
         for (BlockPos start : vineStarts) {
             if (!visited.add(start)) continue;
 
+            net.minecraft.world.level.block.state.BlockState startState;
+            try {
+                startState = level.getBlockState(start);
+            } catch (Throwable ignored) {
+                continue;
+            }
+            AttachmentFamily family = attachmentFamily(startState);
+            if (family == null) {
+                continue;
+            }
+
             java.util.List<BlockPos> component = new java.util.ArrayList<>();
             queue.clear();
             queue.add(start);
@@ -538,24 +595,21 @@ public final class VineClusterCleaner {
                 } catch (Throwable ignored) {
                     continue;
                 }
-                if (!currentState.is(Blocks.VINE)) {
+                if (attachmentFamily(currentState) != family) {
                     continue;
                 }
                 try {
-                    if (hasExternalVineSupport(level, current, currentState)) {
+                    if (hasExternalAttachmentSupport(level, current, currentState, family)) {
                         anyExternallySupportedVine = true;
                     }
                 } catch (Throwable ignored) {
                 }
-                BlockPos[] neighbors = {
-                    current.north(), current.south(), current.east(), current.west(),
-                    current.above(), current.below()
-                };
+                BlockPos[] neighbors = connectedNeighbors(current, family);
 
                 for (BlockPos neighbor : neighbors) {
                     try {
                         net.minecraft.world.level.block.state.BlockState neighborState = level.getBlockState(neighbor);
-                        if (neighborState.is(Blocks.VINE)) {
+                        if (attachmentFamily(neighborState) == family) {
                             if (visited.add(neighbor)) {
                                 queue.add(neighbor);
                                 component.add(neighbor);
@@ -573,11 +627,14 @@ public final class VineClusterCleaner {
         }
     }
 
-    private static boolean hasExternalVineSupport(ServerLevel level, BlockPos pos, net.minecraft.world.level.block.state.BlockState state) {
+    private static boolean hasExternalAttachmentSupport(ServerLevel level,
+                                                        BlockPos pos,
+                                                        net.minecraft.world.level.block.state.BlockState state,
+                                                        AttachmentFamily family) {
         if (level == null || pos == null || state == null) {
             return false;
         }
-        if (!state.is(Blocks.VINE)) {
+        if (family == null || attachmentFamily(state) != family) {
             return false;
         }
 
@@ -591,7 +648,7 @@ public final class VineClusterCleaner {
             return false;
         }
 
-        for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
+        for (Direction direction : supportDirections(family)) {
             BlockPos neighborPos = pos.relative(direction);
             net.minecraft.world.level.block.state.BlockState neighborState;
             try {
@@ -603,13 +660,59 @@ public final class VineClusterCleaner {
             if (neighborState.isAir()) {
                 continue;
             }
-            if (neighborState.is(Blocks.VINE)) {
+            if (attachmentFamily(neighborState) == family) {
                 continue;
             }
             return true;
         }
 
         return false;
+    }
+
+    private static AttachmentFamily attachmentFamily(net.minecraft.world.level.block.state.BlockState state) {
+        if (state == null) {
+            return null;
+        }
+        if (state.is(Blocks.VINE)) {
+            return AttachmentFamily.VINE;
+        }
+        if (state.is(Blocks.CAVE_VINES) || state.is(Blocks.CAVE_VINES_PLANT)) {
+            return AttachmentFamily.CAVE_VINES;
+        }
+        if (state.is(Blocks.TWISTING_VINES) || state.is(Blocks.TWISTING_VINES_PLANT)) {
+            return AttachmentFamily.TWISTING_VINES;
+        }
+        if (state.is(Blocks.WEEPING_VINES) || state.is(Blocks.WEEPING_VINES_PLANT)) {
+            return AttachmentFamily.WEEPING_VINES;
+        }
+        if (state.is(Blocks.HANGING_ROOTS)) {
+            return AttachmentFamily.HANGING_ROOTS;
+        }
+        if (state.is(Blocks.CHAIN)) {
+            return AttachmentFamily.CHAIN;
+        }
+        return null;
+    }
+
+    private static BlockPos[] connectedNeighbors(BlockPos pos, AttachmentFamily family) {
+        return switch (family) {
+            case VINE -> new BlockPos[]{
+                pos.north(), pos.south(), pos.east(), pos.west(), pos.above(), pos.below()
+            };
+            case CAVE_VINES, TWISTING_VINES, WEEPING_VINES, CHAIN -> new BlockPos[]{
+                pos.above(), pos.below()
+            };
+            case HANGING_ROOTS -> new BlockPos[]{pos.above()};
+        };
+    }
+
+    private static Direction[] supportDirections(AttachmentFamily family) {
+        return switch (family) {
+            case VINE -> new Direction[]{Direction.UP, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST};
+            case CAVE_VINES, WEEPING_VINES, HANGING_ROOTS -> new Direction[]{Direction.UP};
+            case TWISTING_VINES -> new Direction[]{Direction.DOWN};
+            case CHAIN -> new Direction[]{Direction.UP, Direction.DOWN};
+        };
     }
 
     private static void removeVineComponent(ServerLevel level, java.util.List<BlockPos> component) {
@@ -623,29 +726,27 @@ public final class VineClusterCleaner {
         if (shutdown || level == null || component == null || component.isEmpty()) {
             return;
         }
-        Map<Long, LinkedHashSet<Integer>> removalsByChunk = new HashMap<>();
+        Map<Long, ChunkShadowMutationPlan.Builder> removalsByChunk = new HashMap<>();
         for (BlockPos pos : component) {
             if (pos == null) {
                 continue;
             }
-            long chunkKey = ChunkPos.asLong(pos.getX() >> 4, pos.getZ() >> 4);
-            removalsByChunk.computeIfAbsent(chunkKey, unused -> new LinkedHashSet<>())
-                .add(packLocalRemovalPos(pos));
+            int chunkX = pos.getX() >> 4;
+            int chunkZ = pos.getZ() >> 4;
+            long chunkKey = ChunkPos.asLong(chunkX, chunkZ);
+            removalsByChunk.computeIfAbsent(chunkKey, unused -> ChunkShadowMutationPlan.builder(
+                    level,
+                    new ChunkCoord(level.dimension(), chunkX, chunkZ)))
+                .add(pos, Blocks.AIR.defaultBlockState(), 3, false);
         }
 
-        for (Map.Entry<Long, LinkedHashSet<Integer>> entry : removalsByChunk.entrySet()) {
-            long chunkKey = entry.getKey();
-            int[] packedPositions = entry.getValue().stream().mapToInt(Integer::intValue).toArray();
-            if (packedPositions.length == 0) {
+        for (ChunkShadowMutationPlan.Builder builder : removalsByChunk.values()) {
+            ChunkShadowMutationPlan plan = builder.build();
+            if (plan.size() <= 0) {
                 continue;
             }
-            REMOVAL_QUEUE.add(new RemovalBatch(
-                level,
-                new ChunkPos(ChunkPos.getX(chunkKey), ChunkPos.getZ(chunkKey)),
-                packedPositions
-            ));
+            ShadowBlockMutationApplier.enqueue(plan);
         }
-        scheduleRemovalDrain(level);
     }
 
     private static void scheduleRemovalDrain(ServerLevel level) {
@@ -754,6 +855,30 @@ public final class VineClusterCleaner {
         CHUNK_CURSOR.clear();
         LAST_SCAN.clear();
         LOADED_CHUNKS.clear();
+    }
+
+    public static boolean isAutomaticCleanupEnabled() {
+        return ConfigManager.ENABLE_AUTOMATIC_CHUNK_SCANS
+            && ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL;
+    }
+
+    public static String diagnostics() {
+        long submitted = SCANS_SUBMITTED.sum();
+        long completed = SCANS_COMPLETED.sum();
+        long totalNs = SCAN_TIME_NS.sum();
+        double averageMs = completed == 0L ? 0.0D : (totalNs / 1_000_000.0D) / completed;
+        int indexedChunks = 0;
+        for (LevelChunkIndex index : LOADED_CHUNKS.values()) {
+            indexedChunks += index.loaded.size();
+        }
+        return "automatic=" + isAutomaticCleanupEnabled()
+            + " initialized=" + initialized
+            + " requested=" + SCAN_REQUESTED.get()
+            + " inFlight=" + IN_FLIGHT.get()
+            + " indexedChunks=" + indexedChunks
+            + " submitted=" + submitted
+            + " completed=" + completed
+            + " avgMs=" + String.format(java.util.Locale.ROOT, "%.3f", averageMs);
     }
 
     private static IDimensionInfo getDimensionInfo(ServerLevel level) {

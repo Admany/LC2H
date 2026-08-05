@@ -29,7 +29,7 @@ public final class ChunkGenTracker {
     private static final long MAX_AGE_MS = Long.getLong("lc2h.chunkinfo.maxAgeMs", 30L * 60L * 1000L);
     private static final ConcurrentHashMap<ChunkCoord, ChunkGenTrace> TRACE = new ConcurrentHashMap<>();
     private static final CacheBudgetManager.CacheGroup TRACE_BUDGET =
-        CacheBudgetManager.register("lc2h_chunkgen_trace", 512, 1024, key -> TRACE.remove(key) != null);
+        CacheBudgetManager.register("lc2h_chunkgen_trace", 512, 256, key -> TRACE.remove(key) != null);
     private static final DateTimeFormatter TIME_FORMAT =
         DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
     private static final LongAdder PRIORITY_FOREGROUND = new LongAdder();
@@ -238,6 +238,33 @@ public final class ChunkGenTracker {
         return root;
     }
 
+    public static ChunkGenEvidence evidence(ChunkCoord coord) {
+        if (coord == null) {
+            return null;
+        }
+        ChunkGenSnapshot snapshot = snapshot(coord);
+        if (snapshot == null) {
+            return null;
+        }
+        List<String> recentEvents = snapshot.events().stream()
+            .map(event -> {
+                StringBuilder line = new StringBuilder(event.event());
+                if (event.detail() != null && !event.detail().isBlank()) {
+                    line.append(" ").append(event.detail());
+                }
+                return line.toString();
+            })
+            .toList();
+        return new ChunkGenEvidence(
+            snapshot.generateStartCount(),
+            snapshot.generateEndCount(),
+            snapshot.generateSkipCount(),
+            snapshot.buildingInfoCount(),
+            snapshot.lastBuildingDetail(),
+            recentEvents
+        );
+    }
+
     public static PrioritySnapshot prioritySnapshot() {
         return new PrioritySnapshot(PRIORITY_FOREGROUND.sum(), PRIORITY_BACKGROUND.sum());
     }
@@ -415,5 +442,18 @@ public final class ChunkGenTracker {
         long priorityForeground,
         long priorityBackground
     ) {
+    }
+
+    public record ChunkGenEvidence(
+        int generateStartCount,
+        int generateEndCount,
+        int generateSkipCount,
+        int buildingInfoCount,
+        String lastBuildingDetail,
+        List<String> recentEvents
+    ) {
+        public boolean hasRuntimeEvidence() {
+            return generateStartCount > 0 || generateEndCount > 0 || generateSkipCount > 0 || buildingInfoCount > 0;
+        }
     }
 }

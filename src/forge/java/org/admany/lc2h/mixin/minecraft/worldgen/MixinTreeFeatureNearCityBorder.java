@@ -10,16 +10,25 @@ import net.minecraft.world.level.levelgen.feature.FeaturePlaceContext;
 import net.minecraft.world.level.levelgen.feature.TreeFeature;
 import net.minecraft.world.level.levelgen.feature.configurations.TreeConfiguration;
 import org.admany.lc2h.worldgen.lostcities.DeferredTreeCaptureContext;
-import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.worldgen.lostcities.DeferredTreeQueue;
-import org.admany.lc2h.worldgen.lostcities.LostCityTreeSafety;
+import org.admany.lc2h.worldgen.lostcities.TreeCompatTracker;
+import org.admany.lc2h.worldgen.lostcities.TreeCapturePolicy;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(TreeFeature.class)
 public class MixinTreeFeatureNearCityBorder {
+
+    @Unique
+    private static final int LC2H_BOP_CAPTURE_RADIUS_BLOCKS = 48;
+
+    @Unique
+    private boolean lc2h$isBiomesOPlentyTree() {
+        return ((Object) this).getClass().getName().startsWith("biomesoplenty.common.worldgen.feature.tree.");
+    }
 
     @Inject(method = "place", at = @At("HEAD"), cancellable = true)
     private void lc2h$deferTreesNearCityBorder(
@@ -30,11 +39,10 @@ public class MixinTreeFeatureNearCityBorder {
         if (DeferredTreeQueue.isReplaying()) {
             return;
         }
-        if (!ConfigManager.CITY_BLEND_TREE_SEAM_FIX
-            && (!ConfigManager.CITY_BLEND_ENABLED || !ConfigManager.CITY_BLEND_CLEAR_TREES)) {
-            return;
+        boolean biomesOPlentyTree = lc2h$isBiomesOPlentyTree();
+        if (biomesOPlentyTree) {
+            TreeCompatTracker.markHookObserved("biomesoplenty.tree_feature.place");
         }
-
         WorldGenLevel level = context.level();
         if (level == null) {
             return;
@@ -59,42 +67,25 @@ public class MixinTreeFeatureNearCityBorder {
         if (origin == null || context.config() == null) {
             return;
         }
-        int x = origin.getX();
-        int z = origin.getZ();
-        int originChunkX = x >> 4;
-        int originChunkZ = z >> 4;
-
-        if (ConfigManager.CITY_BLEND_TREE_SEAM_FIX) {
-            if (LostCityTreeSafety.isUnsafeChunk(dimInfo, dim, originChunkX, originChunkZ)) {
-                DeferredTreeCaptureContext.begin(origin, dim);
-                return;
-            }
-            int seamRadius = getTreeSeamRadiusBlocks();
-            if (LostCityTreeSafety.isNearUnsafeTransition(dimInfo, dim, x, z, seamRadius)) {
-                DeferredTreeCaptureContext.begin(origin, dim);
-                return;
-            }
-        }
-
-        if (!ConfigManager.CITY_BLEND_ENABLED || !ConfigManager.CITY_BLEND_CLEAR_TREES) {
-            return;
-        }
-
-        if (LostCityTreeSafety.isUnsafeChunk(dimInfo, dim, originChunkX, originChunkZ)) {
-            return;
-        }
-
-        int maxDistance = Math.max(8, ConfigManager.CITY_BLEND_WIDTH);
-        if (LostCityTreeSafety.isNearUnsafeChunk(dimInfo, dim, x, z, maxDistance)) {
+        TreeCapturePolicy.Decision decision = TreeCapturePolicy.decideAt(
+            level.getLevel(), origin, biomesOPlentyTree ? LC2H_BOP_CAPTURE_RADIUS_BLOCKS : 0);
+        if (decision == TreeCapturePolicy.Decision.REJECT) {
             cir.setReturnValue(false);
+            return;
         }
-    }
+        if (decision == TreeCapturePolicy.Decision.CAPTURE) {
+            if (DeferredTreeQueue.isDeferredReplayEnabled()) {
+                DeferredTreeCaptureContext.begin(origin, dim, level.getSeed(),
+                    biomesOPlentyTree
+                        ? DeferredTreeCaptureContext.CaptureSource.BOP_TREE
+                        : DeferredTreeCaptureContext.CaptureSource.VANILLA_TREE);
+            } else {
+                cir.setReturnValue(false);
+            }
+            return;
+        }
 
-    private static int getTreeSeamRadiusBlocks() {
-        int buffer = Math.max(1, ConfigManager.CITY_BLEND_TREE_SEAM_BUFFER);
-        float multiplier = Math.max(0.5f, ConfigManager.TREE_SEAM_RADIUS_MULTIPLIER);
-        int radius = Math.round((8.0f + buffer) * multiplier);
-        return Math.max(buffer, Math.min(48, radius));
+        // PASS_THROUGH intentionally leaves vanilla generation untouched.
     }
 
     @Inject(method = "place", at = @At("RETURN"), cancellable = true)
@@ -106,12 +97,17 @@ public class MixinTreeFeatureNearCityBorder {
         if (captured == null) {
             return;
         }
+        if (!DeferredTreeQueue.isDeferredReplayEnabled()) {
+            cir.setReturnValue(false);
+            return;
+        }
         if (!cir.getReturnValue() || captured.blocks().isEmpty()) {
             return;
         }
+        TreeCompatTracker.recordCapture(captured.source(), captured.blocks().size());
         DeferredTreeQueue.enqueue(
             captured.dim(),
-            DeferredTreeQueue.PendingTree.captured(captured.origin(), captured.blocks(), captured.dim())
+            DeferredTreeQueue.PendingTree.captured(captured.origin(), captured.blocks(), captured.dim(), captured.seed(), captured.source())
         );
         cir.setReturnValue(true);
     }

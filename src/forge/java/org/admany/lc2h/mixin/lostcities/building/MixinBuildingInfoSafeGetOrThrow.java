@@ -6,6 +6,7 @@ import net.minecraft.world.level.CommonLevelAccessor;
 import mcjty.lostcities.api.ILostCityAsset;
 import org.admany.lc2h.LC2H;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
 
@@ -39,7 +40,7 @@ public abstract class MixinBuildingInfoSafeGetOrThrow {
             return value;
         }
 
-        String fixed = normalizeName(name);
+        String fixed = lc2h$normalizeName(name);
         if (fixed != null && !fixed.equals(name)) {
             value = (ILostCityAsset) registry.getOrWarn(world, fixed);
             if (value != null) {
@@ -69,7 +70,8 @@ public abstract class MixinBuildingInfoSafeGetOrThrow {
         throw new RuntimeException("Error getting resource " + (name == null ? "<null>" : name) + "!");
     }
 
-    private static String normalizeName(String name) {
+    @Unique
+    private static String lc2h$normalizeName(String name) {
         if (name == null) {
             return null;
         }
@@ -91,30 +93,32 @@ public abstract class MixinBuildingInfoSafeGetOrThrow {
         }
 
         // Strip trailing _<number> segments up to 3 times.
-        String stripped3 = stripTrailingNumbers(path, 3);
+        String stripped3 = lc2h$stripTrailingNumbers(path, 3);
         if (!stripped3.equals(path)) {
-            return withNs(ns, stripped3);
+            return lc2h$withNs(ns, stripped3);
         }
-        String stripped2 = stripTrailingNumbers(path, 2);
+        String stripped2 = lc2h$stripTrailingNumbers(path, 2);
         if (!stripped2.equals(path)) {
-            return withNs(ns, stripped2);
+            return lc2h$withNs(ns, stripped2);
         }
-        String stripped1 = stripTrailingNumbers(path, 1);
+        String stripped1 = lc2h$stripTrailingNumbers(path, 1);
         if (!stripped1.equals(path)) {
-            return withNs(ns, stripped1);
+            return lc2h$withNs(ns, stripped1);
         }
 
         return s;
     }
 
-    private static String withNs(String ns, String path) {
+    @Unique
+    private static String lc2h$withNs(String ns, String path) {
         if (path == null) {
             return null;
         }
         return ns == null || ns.isBlank() ? path : ns + ":" + path;
     }
 
-    private static String stripTrailingNumbers(String path, int count) {
+    @Unique
+    private static String lc2h$stripTrailingNumbers(String path, int count) {
         if (path == null || count <= 0) {
             return path;
         }

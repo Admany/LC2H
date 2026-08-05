@@ -137,7 +137,7 @@ public final class RegionBatchProcessingGPUTask
     private static void processGPUResults(List<Entry> entries, float[] results) {
         int regionResultOffset = 0;
         for (Entry entry : entries) {
-            RegionProcessingGPUTask.processGPUResults(results, regionResultOffset, entry.region());
+            RegionProcessingGPUTask.processGPUResults(entry.provider(), results, regionResultOffset, entry.region());
             regionResultOffset += RegionProcessingGPUTask.RESULTS_PER_REGION;
         }
         GPUMemoryManager.continuousCleanup();

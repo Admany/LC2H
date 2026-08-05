@@ -35,14 +35,19 @@ import org.admany.lc2h.LC2H;
 import org.admany.lc2h.log.LCLogger;
 import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
+import org.admany.lc2h.runtime.Lc2hRuntimeModes;
 import org.admany.lc2h.util.batch.CpuBatchScheduler;
 import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.util.server.ServerTickLoad;
+import org.admany.lc2h.worldgen.apply.ChunkShadowMutationPlan;
+import org.admany.lc2h.worldgen.apply.ShadowBlockMutationApplier;
 import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 import org.admany.lc2h.worldgen.lostcities.DeferredTreeQueue;
 
 import java.util.Arrays;
+import java.util.ArrayDeque;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -86,6 +91,7 @@ public class ChunkPostProcessor {
     private static final String HORROR_ELEMENT_NAMESPACE = "horror_element_mod";
     private static final ConcurrentHashMap<Block, Boolean> TRACKED_BLOCK_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<Block, Boolean> TREE_PROTECTED_BLOCK_CACHE = new ConcurrentHashMap<>();
+    private static final Direction[] DIRECTIONS = Direction.values();
 
     private static final int MAX_CHUNKS_PER_TICK = Math.max(1, Integer.getInteger("lc.floating.max_chunks_per_tick", 1));
     private static final int MAX_ASYNC_CHUNKS_PER_TICK = Math.max(1, Integer.getInteger("lc.floating.async_chunks_per_tick", MAX_CHUNKS_PER_TICK));
@@ -154,6 +160,7 @@ public class ChunkPostProcessor {
 
     private static final Map<ChunkScanKey, ScanCursor> CHUNK_SCAN_PROGRESS = new ConcurrentHashMap<>();
     private static final Set<ChunkScanKey> INFLIGHT_CHUNK_SCANS = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private static final Set<ChunkScanKey> FORCED_CLEANUP_SCANS = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private static final Set<ChunkScanKey> COMPLETED_CHUNKS = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private static final AtomicBoolean LOGGED_QUEUE_ALERT = new AtomicBoolean(false);
     private static final AtomicBoolean LOGGED_QUEUE_HARD_LIMIT = new AtomicBoolean(false);
@@ -224,7 +231,7 @@ public class ChunkPostProcessor {
         }
     }
 
-    private record ChunkScanResult(ChunkScanKey key, ScanCursor next, List<Long> floating, List<Long> doubleBlocks) {
+    private record ChunkScanResult(ChunkScanKey key, ScanCursor next, List<Long> floating, List<Long> doubleBlocks, boolean forcedCleanup) {
     }
 
     public static boolean isTracked(Block block) {
@@ -251,7 +258,10 @@ public class ChunkPostProcessor {
         }
         return isTracked(state.getBlock())
             || isPotentialFloatingSourceFluid(state)
-            || isHorrorElementBlock(state);
+            || isHorrorElementBlock(state)
+            || isAttachmentDecoration(state)
+            || state.is(BlockTags.LEAVES)
+            || isModdedTreeDecoration(state);
     }
 
     private static boolean isPotentialFloatingSourceFluid(BlockState state) {
@@ -287,8 +297,12 @@ public class ChunkPostProcessor {
         if (!shouldWatchFloatingCandidate(state)) {
             return false;
         }
+        if (hasDoubleHalf(state)) {
+            return false;
+        }
 
-        BlockPos below = pos.below();
+        BlockPos.MutableBlockPos below = LOCAL_BELOW_POS.get();
+        below.set(pos.getX(), pos.getY() - 1, pos.getZ());
         BlockState belowState = level.getBlockState(below);
         boolean unsupported = isUnsupportedSupport(level, below, belowState);
 
@@ -298,11 +312,22 @@ public class ChunkPostProcessor {
             }
             return shouldRemoveTallCityFluidSource(level, pos, state);
         }
+        if (isAttachmentDecoration(state)) {
+            return !canSurviveAt(level, pos, state, unsupported)
+                || !hasConnectedArtifactAnchor(level, pos, ArtifactFamily.ATTACHMENT);
+        }
+        if (state.is(BlockTags.LEAVES)) {
+            return isDecayMarkedLeaf(state);
+        }
+        if (isModdedTreeDecoration(state)) {
+            return !canSurviveAt(level, pos, state, unsupported)
+                || !hasConnectedArtifactAnchor(level, pos, ArtifactFamily.TREE_DECORATION);
+        }
         if (isHorrorElementBlock(state)) {
             return shouldRemoveFloatingHorrorElement(level, pos, state, unsupported);
         }
         if (isTracked(state.getBlock())) {
-            return unsupported;
+            return !canSurviveAt(level, pos, state, unsupported);
         }
         return false;
     }
@@ -337,7 +362,7 @@ public class ChunkPostProcessor {
         if (level == null || pos == null) {
             return false;
         }
-        for (Direction direction : Direction.values()) {
+        for (Direction direction : DIRECTIONS) {
             BlockPos neighborPos = pos.relative(direction);
             if (!level.isLoaded(neighborPos)) {
                 return false;
@@ -354,7 +379,7 @@ public class ChunkPostProcessor {
         if (region == null || pos == null) {
             return false;
         }
-        for (Direction direction : Direction.values()) {
+        for (Direction direction : DIRECTIONS) {
             BlockState neighborState = region.getBlockState(pos.relative(direction));
             if (!isVanillaAir(neighborState)) {
                 return false;
@@ -367,7 +392,7 @@ public class ChunkPostProcessor {
         if (level == null || pos == null) {
             return false;
         }
-        for (Direction direction : Direction.values()) {
+        for (Direction direction : DIRECTIONS) {
             BlockPos neighborPos = pos.relative(direction);
             if (!level.isLoaded(neighborPos)) {
                 continue;
@@ -390,7 +415,7 @@ public class ChunkPostProcessor {
         if (region == null || pos == null) {
             return false;
         }
-        for (Direction direction : Direction.values()) {
+        for (Direction direction : DIRECTIONS) {
             BlockPos neighborPos = pos.relative(direction);
             BlockState neighborState = region.getBlockState(neighborPos);
             if (neighborState.isAir() || neighborState.canBeReplaced()) {
@@ -415,12 +440,15 @@ public class ChunkPostProcessor {
             return false;
         }
         boolean hasConnectedFluid = false;
-        for (Direction direction : Direction.values()) {
+        for (Direction direction : DIRECTIONS) {
             BlockPos neighborPos = pos.relative(direction);
             if (!level.isLoaded(neighborPos)) {
                 return false;
             }
-            BlockState neighborState = level.getBlockState(neighborPos);
+            BlockState neighborState = getLoadedState(level, neighborPos);
+            if (neighborState == null) {
+                return false;
+            }
             net.minecraft.world.level.material.FluidState neighborFluid = neighborState.getFluidState();
             if (neighborFluid != null && !neighborFluid.isEmpty()) {
                 if (isSameFloatingFluidFamily(sourceFluid, neighborFluid)) {
@@ -451,7 +479,7 @@ public class ChunkPostProcessor {
             return false;
         }
         boolean hasConnectedFluid = false;
-        for (Direction direction : Direction.values()) {
+        for (Direction direction : DIRECTIONS) {
             BlockPos neighborPos = pos.relative(direction);
             BlockState neighborState = region.getBlockState(neighborPos);
             net.minecraft.world.level.material.FluidState neighborFluid = neighborState.getFluidState();
@@ -478,49 +506,68 @@ public class ChunkPostProcessor {
     private static boolean isFloatingFluidClusterUnsupported(ServerLevel level,
                                                              BlockPos origin,
                                                              net.minecraft.world.level.material.FluidState sourceFluid) {
-        java.util.ArrayDeque<BlockPos> queue = new java.util.ArrayDeque<>();
-        java.util.HashSet<Long> visited = new java.util.HashSet<>();
-        queue.add(origin.immutable());
+        long[] queue = new long[MAX_FLUID_CLUSTER_SCAN + 8];
+        long[] visited = new long[MAX_FLUID_CLUSTER_SCAN + 8];
+        int head = 0;
+        int tail = 0;
+        int visitedCount = 0;
+        queue[tail++] = origin.asLong();
+        BlockPos.MutableBlockPos currentPos = new BlockPos.MutableBlockPos();
+        BlockPos.MutableBlockPos belowPos = new BlockPos.MutableBlockPos();
+        BlockPos.MutableBlockPos neighborPos = new BlockPos.MutableBlockPos();
 
-        while (!queue.isEmpty()) {
-            BlockPos current = queue.poll();
-            long packed = current.asLong();
-            if (!visited.add(packed)) {
+        while (head < tail) {
+            long packed = queue[head++];
+            if (containsPackedPos(visited, visitedCount, packed)) {
                 continue;
             }
-            if (visited.size() > MAX_FLUID_CLUSTER_SCAN) {
-                // Large clusters are likely natural or intentional; leave them untouched.
+            if (visitedCount >= MAX_FLUID_CLUSTER_SCAN) {
                 return false;
             }
+            visited[visitedCount++] = packed;
+            currentPos.set(BlockPos.getX(packed), BlockPos.getY(packed), BlockPos.getZ(packed));
 
-            if (!level.isLoaded(current)) {
+            if (!level.isLoaded(currentPos)) {
                 return false;
             }
-            BlockState currentState = level.getBlockState(current);
+            BlockState currentState = getLoadedState(level, currentPos);
+            if (currentState == null) {
+                return false;
+            }
             net.minecraft.world.level.material.FluidState currentFluid = currentState.getFluidState();
             if (currentFluid == null || currentFluid.isEmpty() || !isSameFloatingFluidFamily(sourceFluid, currentFluid)) {
                 continue;
             }
 
-            BlockPos belowPos = current.below();
+            belowPos.set(currentPos.getX(), currentPos.getY() - 1, currentPos.getZ());
             if (!level.isLoaded(belowPos)) {
                 return false;
             }
-            BlockState belowState = level.getBlockState(belowPos);
+            BlockState belowState = getLoadedState(level, belowPos);
+            if (belowState == null) {
+                return false;
+            }
             if (!isUnsupportedSupport(level, belowPos, belowState)) {
                 return false;
             }
 
-            for (Direction direction : Direction.values()) {
-                BlockPos neighborPos = current.relative(direction);
+            for (Direction direction : DIRECTIONS) {
+                neighborPos.setWithOffset(currentPos, direction);
                 if (!level.isLoaded(neighborPos)) {
                     return false;
                 }
-                BlockState neighborState = level.getBlockState(neighborPos);
+                BlockState neighborState = getLoadedState(level, neighborPos);
+                if (neighborState == null) {
+                    return false;
+                }
                 net.minecraft.world.level.material.FluidState neighborFluid = neighborState.getFluidState();
                 if (neighborFluid != null && !neighborFluid.isEmpty()) {
                     if (isSameFloatingFluidFamily(sourceFluid, neighborFluid)) {
-                        queue.add(neighborPos.immutable());
+                        long neighborPacked = neighborPos.asLong();
+                        if (tail < queue.length && !containsPackedPos(visited, visitedCount, neighborPacked)
+                            && !containsPackedPos(queue, head, tail, neighborPacked)) {
+                            queue[tail++] = neighborPacked;
+                        }
                         continue;
                     }
                     return false;
@@ -539,39 +586,50 @@ public class ChunkPostProcessor {
     private static boolean isFloatingFluidClusterUnsupported(net.minecraft.server.level.WorldGenRegion region,
                                                              BlockPos origin,
                                                              net.minecraft.world.level.material.FluidState sourceFluid) {
-        java.util.ArrayDeque<BlockPos> queue = new java.util.ArrayDeque<>();
-        java.util.HashSet<Long> visited = new java.util.HashSet<>();
-        queue.add(origin.immutable());
+        long[] queue = new long[MAX_FLUID_CLUSTER_SCAN + 8];
+        long[] visited = new long[MAX_FLUID_CLUSTER_SCAN + 8];
+        int head = 0;
+        int tail = 0;
+        int visitedCount = 0;
+        queue[tail++] = origin.asLong();
+        BlockPos.MutableBlockPos currentPos = new BlockPos.MutableBlockPos();
+        BlockPos.MutableBlockPos belowPos = new BlockPos.MutableBlockPos();
+        BlockPos.MutableBlockPos neighborPos = new BlockPos.MutableBlockPos();
 
-        while (!queue.isEmpty()) {
-            BlockPos current = queue.poll();
-            long packed = current.asLong();
-            if (!visited.add(packed)) {
+        while (head < tail) {
+            long packed = queue[head++];
+            if (containsPackedPos(visited, visitedCount, packed)) {
                 continue;
             }
-            if (visited.size() > MAX_FLUID_CLUSTER_SCAN) {
+            if (visitedCount >= MAX_FLUID_CLUSTER_SCAN) {
                 return false;
             }
+            visited[visitedCount++] = packed;
+            currentPos.set(BlockPos.getX(packed), BlockPos.getY(packed), BlockPos.getZ(packed));
 
-            BlockState currentState = region.getBlockState(current);
+            BlockState currentState = region.getBlockState(currentPos);
             net.minecraft.world.level.material.FluidState currentFluid = currentState.getFluidState();
             if (currentFluid == null || currentFluid.isEmpty() || !isSameFloatingFluidFamily(sourceFluid, currentFluid)) {
                 continue;
             }
 
-            BlockPos belowPos = current.below();
+            belowPos.set(currentPos.getX(), currentPos.getY() - 1, currentPos.getZ());
             BlockState belowState = region.getBlockState(belowPos);
             if (!isUnsupportedSupport(region, belowPos, belowState)) {
                 return false;
             }
 
-            for (Direction direction : Direction.values()) {
-                BlockPos neighborPos = current.relative(direction);
+            for (Direction direction : DIRECTIONS) {
+                neighborPos.setWithOffset(currentPos, direction);
                 BlockState neighborState = region.getBlockState(neighborPos);
                 net.minecraft.world.level.material.FluidState neighborFluid = neighborState.getFluidState();
                 if (neighborFluid != null && !neighborFluid.isEmpty()) {
                     if (isSameFloatingFluidFamily(sourceFluid, neighborFluid)) {
-                        queue.add(neighborPos.immutable());
+                        long neighborPacked = neighborPos.asLong();
+                        if (tail < queue.length && !containsPackedPos(visited, visitedCount, neighborPacked)
+                            && !containsPackedPos(queue, head, tail, neighborPacked)) {
+                            queue[tail++] = neighborPacked;
+                        }
                         continue;
                     }
                     return false;
@@ -585,6 +643,24 @@ public class ChunkPostProcessor {
             }
         }
         return true;
+    }
+
+    private static boolean containsPackedPos(long[] values, int size, long packed) {
+        for (int i = 0; i < size; i++) {
+            if (values[i] == packed) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsPackedPos(long[] values, int startInclusive, int endExclusive, long packed) {
+        for (int i = startInclusive; i < endExclusive; i++) {
+            if (values[i] == packed) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean shouldRemoveTallCityFluidSource(ServerLevel level, BlockPos pos, BlockState state) {
@@ -608,7 +684,10 @@ public class ChunkPostProcessor {
         if (!level.isLoaded(belowPos)) {
             return false;
         }
-        BlockState belowState = level.getBlockState(belowPos);
+        BlockState belowState = getLoadedState(level, belowPos);
+        if (belowState == null) {
+            return false;
+        }
         net.minecraft.world.level.material.FluidState belowFluid = belowState.getFluidState();
         if (belowFluid == null || belowFluid.isEmpty() || !isSameFloatingFluidFamily(sourceFluid, belowFluid)) {
             return false;
@@ -635,8 +714,102 @@ public class ChunkPostProcessor {
             return removeFloatingFluidColumn(level, pos, state.getFluidState());
         }
         level.removeBlockEntity(pos);
-        level.setBlock(pos, AIR_STATE, SAFE_SET_FLAGS);
+        int flags = isAttachmentDecoration(state) ? 3 : SAFE_SET_FLAGS;
+        level.setBlock(pos, AIR_STATE, flags);
         return 1;
+    }
+
+    private static boolean isAttachmentDecoration(BlockState state) {
+        if (state == null) {
+            return false;
+        }
+        if (state.is(Blocks.VINE)
+            || state.is(Blocks.CAVE_VINES)
+            || state.is(Blocks.CAVE_VINES_PLANT)
+            || state.is(Blocks.TWISTING_VINES)
+            || state.is(Blocks.TWISTING_VINES_PLANT)
+            || state.is(Blocks.WEEPING_VINES)
+            || state.is(Blocks.WEEPING_VINES_PLANT)
+            || state.is(Blocks.HANGING_ROOTS)
+            || state.is(Blocks.GLOW_LICHEN)) {
+            return true;
+        }
+        ResourceLocation key = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+        if (key == null || "minecraft".equals(key.getNamespace())) {
+            return false;
+        }
+        String path = key.getPath();
+        return path.contains("vine") || path.contains("lichen") || path.contains("hanging_root");
+    }
+
+    private static boolean isModdedTreeDecoration(BlockState state) {
+        if (state == null) {
+            return false;
+        }
+        ResourceLocation key = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+        if (key == null || "minecraft".equals(key.getNamespace())) {
+            return false;
+        }
+        String path = key.getPath();
+        return path.contains("branch")
+            || path.contains("twig")
+            || path.contains("foliage")
+            || path.contains("needles")
+            || path.contains("frond");
+    }
+
+    private static boolean isDecayMarkedLeaf(BlockState state) {
+        if (state == null || !state.is(BlockTags.LEAVES) || !state.hasProperty(BlockStateProperties.DISTANCE)) {
+            return false;
+        }
+        int distance = state.getValue(BlockStateProperties.DISTANCE);
+        boolean persistent = state.hasProperty(BlockStateProperties.PERSISTENT)
+            && state.getValue(BlockStateProperties.PERSISTENT);
+        return !persistent && distance >= 7;
+    }
+
+    private enum ArtifactFamily {
+        ATTACHMENT,
+        TREE_DECORATION
+    }
+
+    private static boolean hasConnectedArtifactAnchor(ServerLevel level, BlockPos start, ArtifactFamily family) {
+        if (level == null || start == null || family == null) {
+            return true;
+        }
+        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        HashSet<Long> visited = new HashSet<>();
+        queue.add(start.immutable());
+        visited.add(start.asLong());
+        while (!queue.isEmpty()) {
+            if (visited.size() > 256) {
+                return true; // Large components are retained conservatively.
+            }
+            BlockPos current = queue.removeFirst();
+            for (Direction direction : DIRECTIONS) {
+                BlockPos neighbor = current.relative(direction);
+                if (!level.isLoaded(neighbor)) {
+                    return true;
+                }
+                BlockState neighborState = level.getBlockState(neighbor);
+                boolean sameFamily = family == ArtifactFamily.ATTACHMENT
+                    ? isAttachmentDecoration(neighborState)
+                    : isModdedTreeDecoration(neighborState);
+                if (sameFamily) {
+                    if (visited.add(neighbor.asLong())) {
+                        queue.addLast(neighbor);
+                    }
+                    continue;
+                }
+                if (neighborState.isAir() || neighborState.canBeReplaced() || neighborState.is(BlockTags.LEAVES)) {
+                    continue;
+                }
+                if (isSolidOrFixedBlock(level, neighbor, neighborState)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static int removeFloatingCandidate(net.minecraft.server.level.WorldGenRegion region, BlockPos pos, BlockState state) {
@@ -728,7 +901,10 @@ public class ChunkPostProcessor {
             if (!level.isLoaded(current)) {
                 return 0;
             }
-            BlockState state = level.getBlockState(current);
+            BlockState state = getLoadedState(level, current);
+            if (state == null) {
+                return 0;
+            }
             net.minecraft.world.level.material.FluidState fluid = state.getFluidState();
             if (fluid == null || fluid.isEmpty() || !isSameFloatingFluidFamily(sourceFluid, fluid)) {
                 break;
@@ -754,7 +930,10 @@ public class ChunkPostProcessor {
             if (!level.isLoaded(neighborPos)) {
                 return 0;
             }
-            BlockState neighborState = level.getBlockState(neighborPos);
+            BlockState neighborState = getLoadedState(level, neighborPos);
+            if (neighborState == null) {
+                return 0;
+            }
             net.minecraft.world.level.material.FluidState neighborFluid = neighborState.getFluidState();
             if (neighborFluid != null && !neighborFluid.isEmpty() && isSameFloatingFluidFamily(sourceFluid, neighborFluid)) {
                 continue;
@@ -777,7 +956,10 @@ public class ChunkPostProcessor {
             if (!level.isLoaded(neighborPos)) {
                 return true;
             }
-            BlockState neighborState = level.getBlockState(neighborPos);
+            BlockState neighborState = getLoadedState(level, neighborPos);
+            if (neighborState == null) {
+                return true;
+            }
             net.minecraft.world.level.material.FluidState neighborFluid = neighborState.getFluidState();
             if (neighborFluid != null && !neighborFluid.isEmpty() && isSameFloatingFluidFamily(sourceFluid, neighborFluid)) {
                 continue;
@@ -808,6 +990,14 @@ public class ChunkPostProcessor {
 
     private static boolean isSolidOrFixedBlock(ServerLevel level, BlockPos pos, BlockState state) {
         return !state.getCollisionShape(level, pos).isEmpty() || !state.canBeReplaced();
+    }
+
+    private static BlockState getLoadedState(ServerLevel level, BlockPos pos) {
+        if (level == null || pos == null) {
+            return null;
+        }
+        net.minecraft.world.level.chunk.LevelChunk chunk = level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
+        return chunk == null ? null : chunk.getBlockState(pos);
     }
 
     private static boolean isSolidOrFixedBlock(net.minecraft.server.level.WorldGenRegion region, BlockPos pos, BlockState state) {
@@ -841,6 +1031,7 @@ public class ChunkPostProcessor {
 
         BlockState state = region.getBlockState(pos);
         if (!shouldWatchFloatingCandidate(state)) return;
+        if (hasDoubleHalf(state)) return;
 
         BlockPos below = pos.below();
         BlockState belowState = region.getBlockState(below);
@@ -859,7 +1050,13 @@ public class ChunkPostProcessor {
         } else if (isHorrorElementBlock(state)) {
             enqueue = shouldRemoveFloatingHorrorElement(region, pos, state, unsupported);
         } else if (isTracked(state.getBlock())) {
-            enqueue = unsupported;
+            // A generic "full solid block below" check is not a valid
+            // survival rule for vegetation.  In particular, bamboo is
+            // supported by another bamboo stalk, which has no full collision
+            // shape.  Ask the block state for its actual vanilla survival
+            // predicate so we remove only vegetation that Minecraft itself
+            // considers invalid.
+            enqueue = !canSurviveAt(region, pos, state, unsupported);
         }
 
         if (enqueue) {
@@ -878,6 +1075,42 @@ public class ChunkPostProcessor {
             } catch (Throwable ignored) {
             }
         }
+    }
+
+    private static boolean canSurviveAt(net.minecraft.server.level.WorldGenRegion region,
+                                        BlockPos pos,
+                                        BlockState state,
+                                        boolean fallbackUnsupported) {
+        try {
+            return state.canSurvive(region, pos);
+        } catch (Throwable ignored) {
+            // Preserve the old conservative behavior only for an unexpected
+            // third-party predicate failure.
+            return !fallbackUnsupported;
+        }
+    }
+
+    private static boolean canSurviveAt(ServerLevel level,
+                                        BlockPos pos,
+                                        BlockState state,
+                                        boolean fallbackUnsupported) {
+        try {
+            return state.canSurvive(level, pos);
+        } catch (Throwable ignored) {
+            return !fallbackUnsupported;
+        }
+    }
+
+    private static boolean hasTrackedPlantSelfSupport(BlockState state, BlockState belowState) {
+        if (state == null || belowState == null) {
+            return false;
+        }
+        Block block = state.getBlock();
+        Block below = belowState.getBlock();
+        return (block == Blocks.BAMBOO && below == Blocks.BAMBOO)
+            || (block == Blocks.SUGAR_CANE && below == Blocks.SUGAR_CANE)
+            || ((block == Blocks.KELP || block == Blocks.KELP_PLANT)
+                && (below == Blocks.KELP || below == Blocks.KELP_PLANT));
     }
 
     private static ServerLevel resolveServerLevel(net.minecraft.server.level.WorldGenRegion region) {
@@ -978,6 +1211,12 @@ public class ChunkPostProcessor {
 
     @SubscribeEvent
     public static void onChunkLoad(ChunkEvent.Load event) {
+        // A full vertical scan for every loaded chunk is a repair tool, not a
+        // normal worldgen stage. Running it automatically duplicates work done
+        // by Lost Cities and explodes under DH, which can load thousands of
+        // chunks without a nearby player. Targeted block events and explicit
+        // /lc2h rescanChunk repairs remain active when this is disabled.
+        if (!ConfigManager.ENABLE_AUTOMATIC_CHUNK_SCANS) return;
         boolean floatingScanEnabled = ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL && ENABLE_FLOATING_SCAN;
         boolean doubleBlockEnabled = ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER;
         if (!floatingScanEnabled && !doubleBlockEnabled) return;
@@ -1065,6 +1304,8 @@ public class ChunkPostProcessor {
         }
         ChunkScanKey key = chunkKey(chunk.getLevel().dimension().location(), chunk.getPos().x, chunk.getPos().z);
         CHUNK_SCAN_PROGRESS.remove(key);
+        INFLIGHT_CHUNK_SCANS.remove(key);
+        FORCED_CLEANUP_SCANS.remove(key);
         COMPLETED_CHUNKS.remove(key);
         CITY_CHUNK_CACHE.remove(key);
         PROTECTED_TREE_BLOCKS.remove(key);
@@ -1106,7 +1347,7 @@ public class ChunkPostProcessor {
     @SubscribeEvent
     public static void onLevelTick(TickEvent.LevelTickEvent event) {
         boolean floatingScanEnabled = ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL && ENABLE_FLOATING_SCAN;
-        if (!floatingScanEnabled && !ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER) return;
+        if (!floatingScanEnabled && !ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER && FORCED_CLEANUP_SCANS.isEmpty()) return;
         if (!(event.level instanceof ServerLevel level) || event.phase != TickEvent.Phase.END) return;
 
         // Hard governor: never contribute to lag. If the tick is already "spent", skip all post-processing.
@@ -1123,8 +1364,8 @@ public class ChunkPostProcessor {
             LAST_SHADOW_REMOVAL_DRAIN_TICK = tick;
             drainShadowRemovals(level.getServer());
         }
-        boolean canAutoRescan = AUTO_RESCAN_STARTUP || level.getServer().getPlayerCount() > 0;
-        if (!RESCAN_TRIGGERED && canAutoRescan && tick > 100) { // ~5 seconds after server start (or after first join)
+        boolean canAutoRescan = ConfigManager.ENABLE_AUTOMATIC_CHUNK_SCANS && AUTO_RESCAN_STARTUP;
+        if (!RESCAN_TRIGGERED && canAutoRescan && tick > 100) {
             RESCAN_TRIGGERED = true;
             RESCAN_IN_PROGRESS = true;
             RESCAN_START_TICK = tick;
@@ -1182,12 +1423,16 @@ public class ChunkPostProcessor {
                 continue;
             }
 
-            LevelChunk chunk = level.getChunk(chunkX, chunkZ);
+            LevelChunk chunk = level.getChunkSource().getChunkNow(chunkX, chunkZ);
+            if (chunk == null) {
+                continue;
+            }
             ScanCursor cursor = entry.getValue();
+            boolean forcedCleanup = FORCED_CLEANUP_SCANS.contains(key);
             if (ENABLE_THREADED_SCAN) {
                 if (INFLIGHT_CHUNK_SCANS.add(key)) {
-                    boolean allowFloating = floatingScanEnabled && shouldScanFloatingInChunk(level, chunkX, chunkZ);
-                    submitAsyncScan(level, key, chunk, cursor, allowFloating, scanSamplesPerTask);
+                    boolean allowFloating = forcedCleanup || (floatingScanEnabled && shouldScanFloatingInChunk(level, chunkX, chunkZ));
+                    submitAsyncScan(level, key, chunk, cursor, allowFloating, forcedCleanup, scanSamplesPerTask);
                     processed++;
                 }
                 if (processed >= MAX_ASYNC_CHUNKS_PER_TICK) {
@@ -1195,10 +1440,11 @@ public class ChunkPostProcessor {
                 }
                 continue;
             }
-            boolean allowFloating = floatingScanEnabled && shouldScanFloatingInChunk(level, chunkX, chunkZ);
+            boolean allowFloating = forcedCleanup || (floatingScanEnabled && shouldScanFloatingInChunk(level, chunkX, chunkZ));
             ScanCursor next = processChunk(level, chunk, cursor, deadlineNs, allowFloating, scanSamplesPerTask);
             if (next == null) {
                 markChunkComplete(chunk);
+                FORCED_CLEANUP_SCANS.remove(key);
                 it.remove();
             } else {
                 entry.setValue(next);
@@ -1295,12 +1541,13 @@ public class ChunkPostProcessor {
         }
     }
 
-    private static void submitAsyncScan(ServerLevel level, ChunkScanKey key, LevelChunk chunk, ScanCursor cursor, boolean floatingScanEnabled, int sampleBudget) {
+    private static void submitAsyncScan(ServerLevel level, ChunkScanKey key, LevelChunk chunk, ScanCursor cursor,
+                                        boolean floatingScanEnabled, boolean forcedCleanup, int sampleBudget) {
         int budget = Math.max(MIN_SAMPLES_PER_TASK, Math.min(SAMPLES_PER_CHUNK, sampleBudget));
         CpuBatchScheduler.submit("chunk_post_scan", () -> {
             long startNs = System.nanoTime();
             try {
-                ChunkScanResult result = scanChunkAsync(key, chunk, cursor, floatingScanEnabled, budget);
+                ChunkScanResult result = scanChunkAsync(key, chunk, cursor, floatingScanEnabled, forcedCleanup, budget);
                 ServerRescheduler.runOnServer(() -> applyScanResult(level, result));
             } catch (Throwable t) {
                 INFLIGHT_CHUNK_SCANS.remove(key);
@@ -1310,7 +1557,8 @@ public class ChunkPostProcessor {
         });
     }
 
-    private static ChunkScanResult scanChunkAsync(ChunkScanKey key, LevelChunk chunk, ScanCursor cursor, boolean floatingScanEnabled, int sampleBudget) {
+    private static ChunkScanResult scanChunkAsync(ChunkScanKey key, LevelChunk chunk, ScanCursor cursor,
+                                                  boolean floatingScanEnabled, boolean forcedCleanup, int sampleBudget) {
         long startNs = System.nanoTime();
         int minY = chunk.getLevel().getMinBuildHeight();
         int maxY = chunk.getLevel().getMaxBuildHeight() - 1;
@@ -1331,7 +1579,8 @@ public class ChunkPostProcessor {
                 current = new ScanCursor(current.x, minY, current.z);
             }
             if (current.y > maxY) {
-                return new ChunkScanResult(key, null, floating == null ? List.of() : floating, doubleBlocks == null ? List.of() : doubleBlocks);
+                return new ChunkScanResult(key, null, floating == null ? List.of() : floating,
+                    doubleBlocks == null ? List.of() : doubleBlocks, forcedCleanup);
             }
 
             int sectionIndex = chunk.getSectionIndex(current.y);
@@ -1373,7 +1622,14 @@ public class ChunkPostProcessor {
                         belowState = chunk.getBlockState(below);
                     }
                     boolean unsupported = isUnsupportedSupport(levelFromChunk(chunk), below, belowState);
-                    boolean queueCandidate = unsupported;
+                    // This branch runs on the snapshot worker. Avoid calling
+                    // arbitrary third-party survival predicates off-thread,
+                    // while preserving vertical-plant support chains that the
+                    // old full-block rule incorrectly erased.
+                    boolean queueCandidate = isDecayMarkedLeaf(state)
+                        || isAttachmentDecoration(state)
+                        || isModdedTreeDecoration(state)
+                        || (unsupported && !hasTrackedPlantSelfSupport(state, belowState));
                     TIMING_ASYNC_FLOATING_CANDIDATE.record(System.nanoTime() - candidateStartNs);
                     if (queueCandidate) {
                         if (floating == null) {
@@ -1400,7 +1656,8 @@ public class ChunkPostProcessor {
             current = current.advance(maxY);
         }
 
-        return new ChunkScanResult(key, current, floating == null ? List.of() : floating, doubleBlocks == null ? List.of() : doubleBlocks);
+        return new ChunkScanResult(key, current, floating == null ? List.of() : floating,
+            doubleBlocks == null ? List.of() : doubleBlocks, forcedCleanup);
         } finally {
             TIMING_SCAN_CHUNK_ASYNC.record(System.nanoTime() - startNs);
         }
@@ -1427,7 +1684,7 @@ public class ChunkPostProcessor {
             return;
         }
 
-        LevelChunk chunk = level.getChunk(key.chunkX(), key.chunkZ());
+        LevelChunk chunk = level.getChunkSource().getChunkNow(key.chunkX(), key.chunkZ());
         if (chunk == null) {
             return;
         }
@@ -1468,6 +1725,7 @@ public class ChunkPostProcessor {
         if (result.next() == null) {
             markChunkComplete(chunk);
             CHUNK_SCAN_PROGRESS.remove(key);
+            FORCED_CLEANUP_SCANS.remove(key);
         } else {
             CHUNK_SCAN_PROGRESS.put(key, result.next());
         }
@@ -1602,7 +1860,11 @@ public class ChunkPostProcessor {
                     processedEntry = true;
                     break;
                 }
-                LevelChunk chunk = level.getChunk(chunkX, chunkZ);
+                LevelChunk chunk = level.getChunkSource().getChunkNow(chunkX, chunkZ);
+                if (chunk == null) {
+                    processedEntry = true;
+                    break;
+                }
                 // Use a generous deadline in batch mode, but still allow yielding.
                 long deadlineNs = System.nanoTime() + (long) (Math.max(2.0D, ADAPTIVE_WORK_BUDGET_MS * 4.0D) * 1_000_000.0);
                 boolean allowFloating = ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL
@@ -1878,17 +2140,19 @@ public class ChunkPostProcessor {
                 if (isDoublePlant && canReplace(level, lowerPos)) {
                     BlockPos support = lowerPos.below();
                     BlockState supportState = level.getBlockState(support);
-                    if (!supportState.isCollisionShapeFullBlock(level, support)) {
-                        level.setBlock(support, Blocks.DIRT.defaultBlockState(), SAFE_SET_FLAGS);
-                    }
                     BlockState newLower = copyHalf(state, halfProp, DoubleBlockHalf.LOWER);
+                    if (!supportState.isCollisionShapeFullBlock(level, support) || !newLower.canSurvive(level, lowerPos)) {
+                        return;
+                    }
                     level.setBlock(lowerPos, newLower, SAFE_SET_FLAGS);
                     level.setBlock(pos, copyHalf(state, halfProp, DoubleBlockHalf.UPPER), SAFE_SET_FLAGS);
                 } else if (canReplace(level, lowerPos) && state.canSurvive(level, lowerPos)) {
                     BlockState newLower = copyHalf(state, halfProp, DoubleBlockHalf.LOWER);
                     level.setBlock(lowerPos, newLower, SAFE_SET_FLAGS);
                 } else {
-                    level.setBlock(pos, Blocks.AIR.defaultBlockState(), SAFE_SET_FLAGS);
+                    if (!isDoublePlant) {
+                        level.setBlock(pos, Blocks.AIR.defaultBlockState(), SAFE_SET_FLAGS);
+                    }
                 }
             }
         }
@@ -1912,6 +2176,7 @@ public class ChunkPostProcessor {
     public static void forceRescanChunk(ServerLevel level, net.minecraft.world.level.ChunkPos pos) {
         ChunkScanKey key = chunkKey(level.dimension().location(), pos.x, pos.z);
         COMPLETED_CHUNKS.remove(key);
+        RECENT_SCAN_ENQUEUE_MS.remove(key);
         int backlog = CHUNK_SCAN_PROGRESS.size();
         if (backlog >= MAX_QUEUE) {
             if (LOGGED_QUEUE_HARD_LIMIT.compareAndSet(false, true)) {
@@ -1923,12 +2188,32 @@ public class ChunkPostProcessor {
             }
             return;
         }
-        if (!shouldEnqueueChunkScan(key)) {
-            return;
-        }
+        FORCED_CLEANUP_SCANS.add(key);
         int minY = level.getMinBuildHeight();
-        CHUNK_SCAN_PROGRESS.putIfAbsent(key, new ScanCursor(0, minY, 0));
+        CHUNK_SCAN_PROGRESS.put(key, new ScanCursor(0, minY, 0));
+        RESCAN_IN_PROGRESS = true;
+        RESCAN_START_TICK = level.getServer().getTickCount();
         LCLogger.info("ChunkPostProcessor: forced rescan queued for chunk ({}, {})", pos.x, pos.z);
+    }
+
+    public static int forceRescanArea(ServerLevel level, net.minecraft.world.level.ChunkPos center, int radius) {
+        if (level == null || center == null) {
+            return 0;
+        }
+        int boundedRadius = Math.max(0, Math.min(8, radius));
+        int queued = 0;
+        for (int dx = -boundedRadius; dx <= boundedRadius; dx++) {
+            for (int dz = -boundedRadius; dz <= boundedRadius; dz++) {
+                int cx = center.x + dx;
+                int cz = center.z + dz;
+                if (level.getChunkSource().getChunkNow(cx, cz) == null) {
+                    continue;
+                }
+                forceRescanChunk(level, new ChunkPos(cx, cz));
+                queued++;
+            }
+        }
+        return queued;
     }
 
     private static ChunkScanKey chunkKey(ResourceLocation dimension, int chunkX, int chunkZ) {
@@ -1962,6 +2247,11 @@ public class ChunkPostProcessor {
         PendingCheckQueue bucket = PENDING_FLOATING.computeIfAbsent(dimension, k -> new PendingCheckQueue());
         bucket.dimensionKey = dimension;
         bucket.level = level;
+        int currentPending = bucket.size.get();
+        if (currentPending >= MAX_PENDING_FLOATING_CHECKS / 4 && level.getServer() != null
+            && ServerTickLoad.shouldPauseNonCritical(level.getServer())) {
+            return;
+        }
         long packed = pos.asLong();
         if (bucket.dedupe.putIfAbsent(packed, Boolean.TRUE) != null) {
             return;
@@ -1996,6 +2286,16 @@ public class ChunkPostProcessor {
             return;
         }
         int remainingBudget = MAX_FLOATING_CHECKS_PER_TICK;
+        if (server != null) {
+            double avgTick = server.getAverageTickTime();
+            if (avgTick > TICK_TIME_BUDGET_MS * 1.5D) {
+                remainingBudget = Math.max(4, remainingBudget / 8);
+            } else if (avgTick > TICK_TIME_BUDGET_MS) {
+                remainingBudget = Math.max(8, remainingBudget / 4);
+            } else if (avgTick > TARGET_TICK_MS) {
+                remainingBudget = Math.max(8, remainingBudget / 2);
+            }
+        }
         int deferredTrees = DeferredTreeQueue.pendingCountAll() + DeferredTreeQueue.readyCountAll();
         if (deferredTrees >= 96) {
             remainingBudget = Math.max(8, remainingBudget / 4);
@@ -2061,6 +2361,16 @@ public class ChunkPostProcessor {
         }
 
         int remainingBudget = MAX_SHADOW_REMOVALS_PER_TICK;
+        if (server != null) {
+            double avgTick = server.getAverageTickTime();
+            if (avgTick > TICK_TIME_BUDGET_MS * 1.5D) {
+                remainingBudget = Math.max(8, remainingBudget / 8);
+            } else if (avgTick > TICK_TIME_BUDGET_MS) {
+                remainingBudget = Math.max(16, remainingBudget / 4);
+            } else if (avgTick > TARGET_TICK_MS) {
+                remainingBudget = Math.max(16, remainingBudget / 2);
+            }
+        }
         int deferredTrees = DeferredTreeQueue.pendingCountAll() + DeferredTreeQueue.readyCountAll();
         if (deferredTrees >= 96) {
             remainingBudget = Math.max(16, remainingBudget / 4);
@@ -2127,9 +2437,22 @@ public class ChunkPostProcessor {
         if (level == null || chunkPos == null || packedPositions == null || packedPositions.isEmpty()) {
             return;
         }
-        int[] packed = packedPositions.stream().mapToInt(Integer::intValue).toArray();
-        SHADOW_REMOVAL_QUEUE.add(new ShadowRemovalBatch(level, chunkPos, packed));
-        SHADOW_REMOVAL_DRAIN_REQUESTED.set(true);
+        ChunkShadowMutationPlan.Builder builder = ChunkShadowMutationPlan.builder(
+            level,
+            new mcjty.lostcities.varia.ChunkCoord(level.dimension(), chunkPos.x, chunkPos.z));
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        for (Integer packed : packedPositions) {
+            if (packed == null) {
+                continue;
+            }
+            unpackShadowRemoval(chunkPos, packed, cursor);
+            builder.add(cursor, AIR_STATE, SAFE_SET_FLAGS, false);
+        }
+        ChunkShadowMutationPlan plan = builder.build();
+        if (plan.size() > 0) {
+            ShadowBlockMutationApplier.enqueue(plan);
+        }
+        SHADOW_REMOVAL_DRAIN_REQUESTED.set(false);
     }
 
     private static int packShadowRemoval(BlockPos pos) {
