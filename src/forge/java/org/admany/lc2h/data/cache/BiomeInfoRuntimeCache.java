@@ -7,7 +7,6 @@ import mcjty.lostcities.worldgen.lost.BiomeInfo;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.world.level.biome.Biome;
-import org.admany.lc2h.mixin.accessor.lostcities.BiomeInfoAccessor;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -66,15 +65,23 @@ public final class BiomeInfoRuntimeCache {
     }
 
     private static BiomeInfo create(IDimensionInfo provider, ChunkCoord coord) {
-        BiomeInfo info = new BiomeInfo();
         ChunkHeightmap heightmap = provider.getHeightmap(coord);
         int y = heightmap != null ? heightmap.getHeight() : 64;
         Holder<Biome> biome = provider.getBiome(new BlockPos(
             (coord.chunkX() << 4) + 8,
             y,
             (coord.chunkZ() << 4) + 8));
-        ((BiomeInfoAccessor) (Object) info).lc2h$setMainBiome(biome);
-        return info;
+        return newBiomeInfo(biome);
+    }
+
+    private static BiomeInfo newBiomeInfo(Holder<Biome> biome) {
+        try {
+            java.lang.reflect.Constructor<BiomeInfo> constructor = BiomeInfo.class.getDeclaredConstructor(Holder.class);
+            constructor.setAccessible(true);
+            return constructor.newInstance(biome);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Could not construct Lost Cities BiomeInfo", e);
+        }
     }
 
     private static final class ScopeCache {

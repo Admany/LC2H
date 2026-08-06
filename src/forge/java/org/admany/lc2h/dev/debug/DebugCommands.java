@@ -1,5 +1,6 @@
 package org.admany.lc2h.dev.debug;
 
+import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
@@ -58,6 +59,41 @@ public class DebugCommands {
         ensureProfilesInitialized();
         return SharedSuggestionProvider.suggest(LostCityProfileOverrideManager.discoverProfileNames(profileSearchDirs()), builder);
     };
+
+    private static int blendMap(CommandContext<CommandSourceStack> context, int radiusChunks) {
+        net.minecraft.server.level.ServerPlayer player = context.getSource().getPlayer();
+        if (player == null) {
+            emitDiagnosticLine(context.getSource(), "blend map: must be run by a player");
+            return 0;
+        }
+        for (String line : org.admany.lc2h.worldgen.terrain.ShiftFieldDebug.renderMap(
+            player.serverLevel(), player.blockPosition(), radiusChunks)) {
+            emitDiagnosticLine(context.getSource(), line);
+        }
+        return 1;
+    }
+
+    private static int blendSlope(CommandContext<CommandSourceStack> context, int radiusChunks) {
+        net.minecraft.server.level.ServerPlayer player = context.getSource().getPlayer();
+        if (player == null) {
+            emitDiagnosticLine(context.getSource(), "blend slope: must be run by a player");
+            return 0;
+        }
+        for (String line : org.admany.lc2h.worldgen.terrain.ShiftFieldDebug.slopeReport(
+            player.serverLevel(), player.blockPosition(), radiusChunks)) {
+            emitDiagnosticLine(context.getSource(), line);
+        }
+        return 1;
+    }
+
+    private static int applyBlendSettings(CommandContext<CommandSourceStack> context,
+                                          org.admany.lc2h.worldgen.terrain.CityShiftField.ShiftSettings settings) {
+        ChatMessenger.success(context.getSource(), "Shift field: " + settings.describe());
+        emitDiagnosticLine(context.getSource(),
+            "Caches were dropped. Already-generated chunks keep their old shape - "
+                + "regenerate or fly to fresh terrain to see this setting.");
+        return 1;
+    }
 
     public static void appendTo(LiteralArgumentBuilder<CommandSourceStack> root) {
         root.then(Commands.literal("cache")
@@ -118,7 +154,8 @@ public class DebugCommands {
                     emitDiagnosticLine(context.getSource(), "TerrainCorrectionGPU: " + org.admany.lc2h.worldgen.gpu.TerrainCorrectionGpuPipeline.diagnostics());
                     emitDiagnosticLine(context.getSource(), "TerrainOwner: Minecraft NoiseChunk native-density coordinate transform (single shaper)");
                     emitDiagnosticLine(context.getSource(), "MountainCityBlend: " + org.admany.lc2h.worldgen.MountainCityBlendDiagnostics.diagnostics());
-                    emitDiagnosticLine(context.getSource(), "ConnectedMountain: " + org.admany.lc2h.worldgen.ConnectedMountainPlanner.diagnostics());
+                    emitDiagnosticLine(context.getSource(), "CityShiftField: " + org.admany.lc2h.worldgen.terrain.CityShiftField.diagnostics());
+                    emitDiagnosticLine(context.getSource(), "NaturalHeight: " + org.admany.lc2h.worldgen.terrain.NaturalHeightSampler.diagnostics());
                     emitDiagnosticLine(context.getSource(), "MountainCityReservation: " + org.admany.lc2h.worldgen.MountainCityReservationPlanner.diagnostics());
                     emitDiagnosticLine(context.getSource(), "CityTerrainPlanBridge: " + org.admany.lc2h.worldgen.CityTerrainPlanBridge.diagnostics());
                     emitDiagnosticLine(context.getSource(), "MultiChunkPlanCache: " + MultiChunkPlanningCache.diagnostics());
@@ -175,6 +212,59 @@ public class DebugCommands {
                     }
                     return 1;
                 }))
+            .then(Commands.literal("blend")
+                .requires(source -> source.hasPermission(2))
+                .executes(context -> {
+                    emitDiagnosticLine(context.getSource(), "shift field: "
+                        + org.admany.lc2h.worldgen.terrain.CityShiftField.ShiftSettings.current().describe());
+                    emitDiagnosticLine(context.getSource(),
+                        org.admany.lc2h.worldgen.terrain.CityShiftField.diagnostics());
+                    emitDiagnosticLine(context.getSource(),
+                        org.admany.lc2h.worldgen.terrain.NaturalHeightSampler.diagnostics());
+                    return 1;
+                })
+                .then(Commands.literal("map")
+                    .executes(ctx -> blendMap(ctx, 24))
+                    .then(Commands.argument("radiusChunks", IntegerArgumentType.integer(4, 96))
+                        .executes(ctx -> blendMap(ctx, IntegerArgumentType.getInteger(ctx, "radiusChunks")))))
+                .then(Commands.literal("slope")
+                    .executes(ctx -> blendSlope(ctx, 8))
+                    .then(Commands.argument("radiusChunks", IntegerArgumentType.integer(1, 32))
+                        .executes(ctx -> blendSlope(ctx, IntegerArgumentType.getInteger(ctx, "radiusChunks")))))
+                .then(Commands.literal("slopes")
+                    .then(Commands.argument("flat", DoubleArgumentType.doubleArg(0.10D, 1.0D))
+                        .then(Commands.argument("steep", DoubleArgumentType.doubleArg(0.15D, 2.0D))
+                            .executes(ctx -> applyBlendSettings(ctx,
+                                org.admany.lc2h.worldgen.terrain.CityShiftField.ShiftSettings.withSlopes(
+                                    DoubleArgumentType.getDouble(ctx, "flat"),
+                                    DoubleArgumentType.getDouble(ctx, "steep")))))))
+                .then(Commands.literal("relief")
+                    .then(Commands.argument("strength", DoubleArgumentType.doubleArg(0.0D, 1.0D))
+                        .executes(ctx -> applyBlendSettings(ctx,
+                            org.admany.lc2h.worldgen.terrain.CityShiftField.ShiftSettings.withReliefStrength(
+                                DoubleArgumentType.getDouble(ctx, "strength"))))))
+                .then(Commands.literal("maxshift")
+                    .then(Commands.argument("blocks", IntegerArgumentType.integer(16, 256))
+                        .executes(ctx -> applyBlendSettings(ctx,
+                            org.admany.lc2h.worldgen.terrain.CityShiftField.ShiftSettings.withMaxShift(
+                                IntegerArgumentType.getInteger(ctx, "blocks"))))))
+                .then(Commands.literal("on")
+                    .executes(ctx -> applyBlendSettings(ctx,
+                        org.admany.lc2h.worldgen.terrain.CityShiftField.ShiftSettings.withEnabled(true))))
+                .then(Commands.literal("off")
+                    .executes(ctx -> applyBlendSettings(ctx,
+                        org.admany.lc2h.worldgen.terrain.CityShiftField.ShiftSettings.withEnabled(false))))
+                .then(Commands.literal("reset")
+                    .executes(ctx -> applyBlendSettings(ctx,
+                        org.admany.lc2h.worldgen.terrain.CityShiftField.ShiftSettings.reset())))
+                .then(Commands.literal("clear")
+                    .executes(context -> {
+                        org.admany.lc2h.worldgen.terrain.CityShiftField.clear();
+                        org.admany.lc2h.worldgen.terrain.NaturalHeightSampler.clear();
+                        ChatMessenger.success(context.getSource(),
+                            "Cleared shift field and natural height caches. Newly generated chunks will rebuild them.");
+                        return 1;
+                    })))
             .then(Commands.literal("lifecycle")
                 .requires(source -> source.hasPermission(2))
                 .executes(context -> {

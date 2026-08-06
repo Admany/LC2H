@@ -17,7 +17,7 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.util.Mth;
 import org.admany.lc2h.mixin.accessor.minecraft.WorldGenRegionAccessor;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -28,12 +28,14 @@ import java.util.List;
 @Mixin(value = LostCityTerrainFeature.class, remap = false)
 public class MixinCityEdgeBlendSurfaceFix {
 
-    @Shadow
-    public ChunkDriver driver;
-
     @Inject(method = "generateBorder", at = @At("TAIL"), remap = false)
     private void lc2h$capBlendSurface(BuildingInfo info, boolean canDoParks, int x, int z, BuildingInfo adjacent, ChunkHeightmap heightmap, CallbackInfo ci) {
         if (!info.profile.isDefault() && !info.profile.isSpheres()) {
+            return;
+        }
+
+        ChunkDriver driver = lc2h$getDriver();
+        if (driver == null) {
             return;
         }
 
@@ -115,6 +117,15 @@ public class MixinCityEdgeBlendSurfaceFix {
 
         if (candidate.getSecond() != null && placeY - 1 > minY) {
             driver.current(x, placeY - 1, z).block(candidate.getSecond());
+        }
+    }
+
+    @Unique
+    private ChunkDriver lc2h$getDriver() {
+        try {
+            return ((LostCityTerrainFeature) (Object) this).getDriver();
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 

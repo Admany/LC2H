@@ -744,9 +744,14 @@ public class LC2H {
             LOGGER.debug("[LC2H] Could not clear chunk role probe at {}: {}", phase, t.getMessage());
         }
         try {
-            org.admany.lc2h.worldgen.ConnectedMountainPlanner.clear();
+            org.admany.lc2h.worldgen.terrain.CityShiftField.clear();
         } catch (Throwable t) {
-            LOGGER.debug("[LC2H] Could not clear connected mountain plans at {}: {}", phase, t.getMessage());
+            LOGGER.debug("[LC2H] Could not clear city shift field at {}: {}", phase, t.getMessage());
+        }
+        try {
+            org.admany.lc2h.worldgen.terrain.NaturalHeightSampler.clear();
+        } catch (Throwable t) {
+            LOGGER.debug("[LC2H] Could not clear natural height sampler at {}: {}", phase, t.getMessage());
         }
         try {
             org.admany.lc2h.worldgen.MountainCityBlendDiagnostics.clearLifecycleState();

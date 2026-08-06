@@ -121,7 +121,9 @@ public class MixinLostCityFeature {
                     target = "Lmcjty/lostcities/worldgen/IDimensionInfo;getFeature()Lmcjty/lostcities/worldgen/LostCityTerrainFeature;",
                     remap = false
             ),
-            remap = true
+            remap = true,
+            require = 0,
+            expect = 0
     )
     private LostCityTerrainFeature lc2h$markTerrainPathAtFeatureFetch(IDimensionInfo provider) {
         CriticalMixinHookValidator.markObserved(CriticalMixinHookValidator.LOST_CITY_FEATURE_TERRAIN_PATH);
@@ -136,7 +138,9 @@ public class MixinLostCityFeature {
                     target = "Lmcjty/lostcities/worldgen/LostCityTerrainFeature;generate(Lnet/minecraft/server/level/WorldGenRegion;Lnet/minecraft/world/level/chunk/ChunkAccess;)V",
                     remap = false
             ),
-            remap = true
+            remap = true,
+            require = 0,
+            expect = 0
     )
     private void lc2h$wrapGenerateWithStripeLock(LostCityTerrainFeature feature, WorldGenRegion region, ChunkAccess chunk) {
         CriticalMixinHookValidator.markObserved(CriticalMixinHookValidator.LOST_CITY_FEATURE_GENERATE_REDIRECT);
@@ -150,6 +154,45 @@ public class MixinLostCityFeature {
             () -> LostCityGenerationHotPath.run(() -> feature.generate(region, chunk)));
     }
 
+    @Redirect(
+            method = "lambda$place$0(Lnet/minecraft/server/level/WorldGenRegion;Lmcjty/lostcities/worldgen/IDimensionInfo;)Z",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lmcjty/lostcities/worldgen/IDimensionInfo;getFeature()Lmcjty/lostcities/worldgen/LostCityTerrainFeature;",
+                    remap = false
+            ),
+            remap = false,
+            require = 0,
+            expect = 0
+    )
+    private static LostCityTerrainFeature lc2h$markTerrainPathAtFeatureFetch75(IDimensionInfo provider) {
+        CriticalMixinHookValidator.markObserved(CriticalMixinHookValidator.LOST_CITY_FEATURE_TERRAIN_PATH);
+        LC2H_TERRAIN_PATH_REACHED.set(Boolean.TRUE);
+        return provider.getFeature();
+    }
+
+    @Redirect(
+            method = "lambda$place$0(Lnet/minecraft/server/level/WorldGenRegion;Lmcjty/lostcities/worldgen/IDimensionInfo;)Z",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lmcjty/lostcities/worldgen/LostCityTerrainFeature;generate(Lnet/minecraft/server/level/WorldGenRegion;Lnet/minecraft/world/level/chunk/ChunkAccess;)V",
+                    remap = false
+            ),
+            remap = false,
+            require = 0,
+            expect = 0
+    )
+    private static void lc2h$wrapGenerateWithStripeLock75(LostCityTerrainFeature feature, WorldGenRegion region, ChunkAccess chunk) {
+        CriticalMixinHookValidator.markObserved(CriticalMixinHookValidator.LOST_CITY_FEATURE_GENERATE_REDIRECT);
+        LC2H_GENERATE_REDIRECT_REACHED.set(Boolean.TRUE);
+        if (feature == null || region == null || chunk == null) return;
+        final ResourceKey<Level> dim = ((ServerLevelAccessor) region).getLevel().dimension();
+        final int cx = chunk.getPos().x;
+        final int cz = chunk.getPos().z;
+
+        LostCitiesGenerationLocks.withChunkStripeLock(dim, cx, cz,
+            () -> LostCityGenerationHotPath.run(() -> feature.generate(region, chunk)));
+    }
     @Inject(method = "place(Lnet/minecraft/world/level/levelgen/feature/FeaturePlaceContext;)Z",
             at = @At("RETURN"), remap = true)
     private void lc2h$markPlace(FeaturePlaceContext<?> context, CallbackInfoReturnable<Boolean> cir) {

@@ -325,13 +325,10 @@ public final class AsyncMultiChunkPlanner {
             }
         }
         if (!isInternalComputation()) {
-            CompletableFuture<MultiChunk> future = PLANNED.computeIfAbsent(plannerKey, key -> submitMultiChunkCompute(provider, areaSize, key));
+            CompletableFuture<MultiChunk> future = PLANNED.get(plannerKey);
             try {
-                if (!future.isCancelled() && !future.isCompletedExceptionally()) {
+                if (future != null && !future.isCancelled() && !future.isCompletedExceptionally()) {
                     MultiChunk prepared = future.getNow(null);
-                    if (prepared == null && !future.isDone()) {
-                        prepared = future.join();
-                    }
                     if (prepared != null) {
                         return integrateResult(provider, multiCoord, prepared);
                     }
@@ -1142,6 +1139,10 @@ public final class AsyncMultiChunkPlanner {
             }
             Lc2hTimingRegistry.record("multichunk.batch_submit_empty", System.nanoTime() - startNs);
             return;
+        }
+
+        if (PENDING_SIZE.get() > 0) {
+            schedulePendingFlush(15L);
         }
 
         List<PendingEntry> active = discardFinishedOrCachedEntries(drained);

@@ -11,6 +11,8 @@ import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import mcjty.lostcities.worldgen.lost.City;
 import mcjty.lostcities.worldgen.lost.cityassets.CityStyle;
+import mcjty.lostcities.worldgen.lost.cityassets.EffectiveCitySettings;
+import mcjty.lostcities.worldgen.street.PlannedRoadType;
 import mcjty.lostcities.worldgen.lost.cityassets.AssetRegistries;
 import mcjty.lostcities.worldgen.lost.cityassets.Building;
 import mcjty.lostcities.worldgen.lost.cityassets.ConditionContext;
@@ -183,15 +185,15 @@ public abstract class MixinBuildingInfo {
      * @reason Ensure building maxcellars is always respected over CityStyle min cellars.
      */
     @Overwrite
-    private int getMaxcellars(CityStyle cs) {
+    private int getMaxcellars(EffectiveCitySettings cs) {
         int maxcellars = profile.BUILDING_MAXCELLARS + cityLevel;
 
         if (buildingType == null) {
-            if (cs.getMaxCellarCount() != null) {
-                maxcellars = Math.min(maxcellars, cs.getMaxCellarCount());
+            if (cs.maxCellarConstraint() != null) {
+                maxcellars = Math.min(maxcellars, cs.maxCellarConstraint());
             }
-            if (cs.getMinCellarCount() != null) {
-                maxcellars = Math.max(maxcellars, cs.getMinCellarCount());
+            if (cs.minCellarConstraint() != null) {
+                maxcellars = Math.max(maxcellars, cs.minCellarConstraint());
             }
             return maxcellars;
         }
@@ -205,11 +207,11 @@ public abstract class MixinBuildingInfo {
         }
 
         // Apply CityStyle constraints first...
-        if (cs.getMaxCellarCount() != null) {
-            maxcellars = Math.min(maxcellars, cs.getMaxCellarCount());
+        if (cs.maxCellarConstraint() != null) {
+            maxcellars = Math.min(maxcellars, cs.maxCellarConstraint());
         }
-        if (cs.getMinCellarCount() != null) {
-            maxcellars = Math.max(maxcellars, cs.getMinCellarCount());
+        if (cs.minCellarConstraint() != null) {
+            maxcellars = Math.max(maxcellars, cs.minCellarConstraint());
         }
 
         // ...then clamp to building constraints last so buildings can't be forced into impossible cellars.
@@ -230,10 +232,10 @@ public abstract class MixinBuildingInfo {
      * @reason Respect building min floors regardless of overrideFloors to avoid mis-sized builds.
      */
     @Overwrite
-    private int getMinfloors(CityStyle cs) {
+    private int getMinfloors(EffectiveCitySettings cs) {
         int minfloors = profile.BUILDING_MINFLOORS + 1;
-        if (cs.getMinFloorCount() != null) {
-            minfloors = Math.max(minfloors, cs.getMinFloorCount());
+        if (cs.minFloorConstraint() != null) {
+            minfloors = Math.max(minfloors, cs.minFloorConstraint());
         }
 
         if (buildingType != null) {
@@ -257,10 +259,10 @@ public abstract class MixinBuildingInfo {
      * @reason Respect building max floors regardless of overrideFloors to avoid mis-sized builds.
      */
     @Overwrite
-    private int getMaxfloors(CityStyle cs) {
+    private int getMaxfloors(EffectiveCitySettings cs) {
         int maxfloors = profile.BUILDING_MAXFLOORS;
-        if (cs.getMaxFloorCount() != null) {
-            maxfloors = Math.min(maxfloors, cs.getMaxFloorCount());
+        if (cs.maxFloorConstraint() != null) {
+            maxfloors = Math.min(maxfloors, cs.maxFloorConstraint());
         }
 
         if (buildingType != null) {
@@ -363,7 +365,7 @@ public abstract class MixinBuildingInfo {
     @Shadow private static int getAverageCityLevel(LostChunkCharacteristics thisone, ChunkCoord coord, IDimensionInfo provider) { return 0; }
     @Shadow private static int getTopLeftCityLevel(LostChunkCharacteristics thisone, ChunkCoord coord, IDimensionInfo provider) { return 0; }
     @Shadow private static LostChunkCharacteristics getTopLeftCityInfo(LostChunkCharacteristics thisone, ChunkCoord coord, IDimensionInfo provider) { return null; }
-    @Shadow private static boolean checkBuildingPossibility(ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile, MultiPos multiPos, int cityLevel, Random rand) { return false; }
+    @Shadow private static boolean checkBuildingPossibility(ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile, MultiPos multiPos, int cityLevel, PlannedRoadType plannedRoadType, Random rand) { return false; }
     @Shadow public static LostCityProfile getProfile(ChunkCoord coord, IDimensionInfo provider) { return null; }
     @Shadow private static int getCityLevelSpace(ChunkCoord coord, IDimensionInfo provider) { return 0; }
     @Shadow private static int getCityLevelFloating(ChunkCoord coord, IDimensionInfo provider) { return 0; }
@@ -1022,7 +1024,7 @@ public abstract class MixinBuildingInfo {
 
         Random rand = getBuildingRandom(chunkX, chunkZ, provider.getSeed());
         characteristics.couldHaveBuilding = characteristics.isCity &&
-            checkBuildingPossibility(coord, provider, profile, characteristics.multiPos, characteristics.cityLevel, rand);
+            checkBuildingPossibility(coord, provider, profile, characteristics.multiPos, characteristics.cityLevel, characteristics.rawPlannedRoadType, rand);
         if (characteristics.isCity && MultiChunkBoundaryRegistry.shouldReserveBoundaryCorridor(provider, coord)) {
             characteristics.couldHaveBuilding = false;
         }

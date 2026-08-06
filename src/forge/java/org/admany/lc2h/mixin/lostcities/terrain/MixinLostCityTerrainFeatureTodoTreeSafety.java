@@ -16,7 +16,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class MixinLostCityTerrainFeatureTodoTreeSafety {
 
     @Inject(
-        method = "lambda$handleTodo$11",
+        method = "lambda$handleTodo$10",
         at = @At("HEAD"),
         cancellable = true,
         require = 0,

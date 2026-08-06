@@ -15,6 +15,7 @@ import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.util.RandomSource;
 import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.dev.debug.PreCaptureTargetTraceRegistry;
 import org.admany.lc2h.mixin.accessor.lostcities.BuildingInfoAccessor;
@@ -45,11 +46,18 @@ public class MixinLostCityTerrainFeature {
     private static final boolean LC2H_SKIP_INTERIOR_TERRAIN_CORRECTION =
         Boolean.parseBoolean(System.getProperty("lc2h.terrain.skipInteriorCorrection", "false"));
 
-	    @Shadow public ChunkDriver driver;
 	    @Shadow public IDimensionInfo provider;
 	    @Shadow public BlockState air;
 	    @Shadow public BlockState liquid;
 
+    @Unique
+    private ChunkDriver lc2h$getDriver() {
+        try {
+            return ((LostCityTerrainFeature) (Object) this).getDriver();
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
     @Unique
     private static final ThreadLocal<Long> LC2H_DAMAGE_SEED = new ThreadLocal<>();
 
@@ -95,7 +103,7 @@ public class MixinLostCityTerrainFeature {
 
     @Inject(method = "correctTerrainShape", at = @At("HEAD"), cancellable = true, remap = false)
     private void lc2h$skipInteriorTerrainCorrection(WorldGenLevel world, ChunkCoord coord, ChunkHeightmap heightmap, CallbackInfo ci) {
-        if (TerrainCorrectionGpuPipeline.tryCorrect(world, coord, heightmap, provider, driver, air)) {
+        if (TerrainCorrectionGpuPipeline.tryCorrect(world, coord, heightmap, provider, lc2h$getDriver(), air)) {
             ci.cancel();
             return;
         }
@@ -330,13 +338,14 @@ public class MixinLostCityTerrainFeature {
         method = "breakBlocksForDamageNew",
         at = @At(
             value = "INVOKE",
-            target = "Lmcjty/lostcities/worldgen/lost/DamageArea;damageBlock(Lnet/minecraft/world/level/block/state/BlockState;Lmcjty/lostcities/worldgen/IDimensionInfo;IFLmcjty/lostcities/worldgen/lost/cityassets/CompiledPalette;Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/state/BlockState;"
+            target = "Lmcjty/lostcities/worldgen/lost/DamageArea;damageBlock(Lnet/minecraft/world/level/block/state/BlockState;Lmcjty/lostcities/worldgen/IDimensionInfo;Lnet/minecraft/util/RandomSource;IFLmcjty/lostcities/worldgen/lost/cityassets/CompiledPalette;Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/state/BlockState;"
         ),
 	        remap = false
 	    )
     private BlockState lc2h$deterministicDamageBlock(DamageArea area,
                                                      BlockState state,
                                                      IDimensionInfo provider,
+                                                     RandomSource random,
                                                      int y,
                                                      float damage,
                                                      CompiledPalette palette,
@@ -345,7 +354,7 @@ public class MixinLostCityTerrainFeature {
             return state;
         }
         if (!ConfigManager.ENABLE_EXPLOSION_DEBRIS) {
-            return area.damageBlock(state, provider, y, damage, palette, liquidState);
+            return area.damageBlock(state, provider, random, y, damage, palette, liquidState);
         }
         Integer baseY = LC2H_DAMAGE_BASE_Y.get();
         if (baseY != null && baseY != Integer.MIN_VALUE && LC2H_DAMAGE_MIN_CITY_DEPTH > 0) {
@@ -364,10 +373,11 @@ public class MixinLostCityTerrainFeature {
 	        int x = 0;
 	        int z = 0;
 	        try {
-	            if (driver != null) {
-	                x = driver.getX();
-	                z = driver.getZ();
-	            }
+	            ChunkDriver currentDriver = lc2h$getDriver();
+                if (currentDriver != null) {
+                    x = currentDriver.getX();
+                    z = currentDriver.getZ();
+                }
 	        } catch (Throwable ignored) {
 	        }
 
