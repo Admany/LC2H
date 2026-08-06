@@ -1,9 +1,10 @@
 package org.admany.lc2h.worldgen;
 
 import mcjty.lostcities.config.LostCityProfile;
-import mcjty.lostcities.worldgen.LostCityTerrainFeature;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
+import org.admany.lc2h.worldgen.terrain.CityShiftField;
+import org.admany.lc2h.worldgen.terrain.NaturalHeightSampler;
 
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -57,22 +58,21 @@ public final class CityTerrainPlanBridge {
             NOT_CITY.incrementAndGet();
             return null;
         }
-        int cityGround = profile.GROUNDLEVEL
-            + role.cityLevel() * LostCityTerrainFeature.FLOORHEIGHT;
-        ConnectedMountainPlanner.MountainPlan plan = ConnectedMountainPlanner.plan(
-            info.provider,
-            info.coord.dimension(),
-            info.coord.chunkX(),
-            info.coord.chunkZ(),
-            cityGround);
+        NaturalHeightSampler.LevelSampler heights =
+            NaturalHeightSampler.forLevel(info.provider.getWorld());
+        CityShiftField.Context context = CityShiftField.context(info.provider, profile, heights);
+        if (context == null || !context.settings().enabled()) {
+            NOT_CITY.incrementAndGet();
+            return null;
+        }
         REINFORCED.incrementAndGet();
-        return plan.targetHeight();
+        return CityShiftField.plannedFloor(context, info.coord.chunkX(), info.coord.chunkZ());
     }
 
     public static String diagnostics() {
         return "calls=" + CALLS.get()
             + ", originalLostCitiesPath=" + NOT_CITY.get()
-            + ", reinforcedDensityPlan=" + REINFORCED.get()
+            + ", reinforcedShiftField=" + REINFORCED.get()
             + ", independentShaping=false";
     }
 }

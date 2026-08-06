@@ -65,7 +65,8 @@
     "mods.midgard.MixinTreeFromStructureNBTFeatureV2Midgard",
     "mods.dh.MixinDhApiTerrainDataPoint",
     "mods.dh.MixinDhLitWorldGenRegionChunkCache",
-    "mods.dh.DhBatchGenerationEnvironmentAccessor"
+    "mods.dh.DhBatchGenerationEnvironmentAccessor",
+    "mods.create.MixinRegistrateDevEnvironment"
   ],
   "client": [
     "minecraft.client.MixinHideExperimentalWarning",

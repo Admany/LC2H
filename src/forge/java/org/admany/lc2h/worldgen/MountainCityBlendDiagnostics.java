@@ -22,11 +22,8 @@ public final class MountainCityBlendDiagnostics {
     private static final AtomicLong NO_PROVIDER = new AtomicLong();
     private static final AtomicLong NO_PROFILE = new AtomicLong();
     private static final AtomicLong CENTER_IS_CITY = new AtomicLong();
-    private static final AtomicLong NO_NEARBY_CITY = new AtomicLong();
     private static final AtomicLong APPLIED = new AtomicLong();
     private static final AtomicLong BLEND_CALLS = new AtomicLong();
-    private static final AtomicLong BLEND_IN_RANGE = new AtomicLong();
-    private static final AtomicLong BLEND_OUT_OF_RANGE = new AtomicLong();
 
     /**
      * What actually happened for each chunk AT GENERATION TIME.
@@ -37,7 +34,7 @@ public final class MountainCityBlendDiagnostics {
      * should have been when inspected afterwards. Recording the decision as
      * it is made is the only way to tell those apart.</p>
      */
-    public record GenerationOutcome(String summary, ConnectedMountainPlanner.MountainPlan mountainPlan) {
+    public record GenerationOutcome(String summary, double centreShift) {
     }
 
     private static final ConcurrentHashMap<OutcomeKey, GenerationOutcome> CHUNK_OUTCOMES = new ConcurrentHashMap<>();
@@ -57,11 +54,11 @@ public final class MountainCityBlendDiagnostics {
                                int chunkX,
                                int chunkZ,
                                String outcome,
-                               ConnectedMountainPlanner.MountainPlan mountainPlan) {
+                               double centreShift) {
         if (CHUNK_OUTCOMES.size() > MAX_RECORDED_CHUNKS) {
             CHUNK_OUTCOMES.clear();
         }
-        CHUNK_OUTCOMES.put(key(dimension, chunkX, chunkZ), new GenerationOutcome(outcome, mountainPlan));
+        CHUNK_OUTCOMES.put(key(dimension, chunkX, chunkZ), new GenerationOutcome(outcome, centreShift));
     }
 
     /** Outcome recorded when this chunk was generated, or null if never seen. */
@@ -98,52 +95,27 @@ public final class MountainCityBlendDiagnostics {
         NO_PROFILE.incrementAndGet();
     }
 
-    public static void appliedCenterCity(ResourceKey<Level> dimension,
-                                         int chunkX,
-                                         int chunkZ,
-                                         int cityChunks,
-                                         ConnectedMountainPlanner.MountainPlan mountainPlan) {
-        CENTER_IS_CITY.incrementAndGet();
+    public static void applied(ResourceKey<Level> dimension, int chunkX, int chunkZ, double centreShift) {
         APPLIED.incrementAndGet();
+        if (centreShift > 0.0D) {
+            CENTER_IS_CITY.incrementAndGet();
+        }
         record(dimension, chunkX, chunkZ,
-            "APPLIED_CENTER_CITY (authoritative density plan installed; "
-                + cityChunks + " city/highway chunks seen; " + mountainPlan.concise() + ")",
-            mountainPlan);
-    }
-
-    public static void noNearbyCity(ResourceKey<Level> dimension, int chunkX, int chunkZ, int gridRadius) {
-        NO_NEARBY_CITY.incrementAndGet();
-        record(dimension, chunkX, chunkZ, "NO_NEARBY_CITY (probe found no city/highway within " + gridRadius
-            + " chunks AT GENERATION TIME -> chunk left as raw vanilla terrain)", null);
-    }
-
-    public static void applied(ResourceKey<Level> dimension, int chunkX, int chunkZ, int cityChunks) {
-        APPLIED.incrementAndGet();
-        record(dimension, chunkX, chunkZ, "APPLIED (density blender installed; " + cityChunks
-            + " city/highway chunks seen)", null);
+            "APPLIED (shift field installed; centre column lowered by "
+                + String.format(java.util.Locale.ROOT, "%.1f", centreShift) + " blocks)",
+            centreShift);
     }
 
     public static void blendCall() {
         BLEND_CALLS.incrementAndGet();
     }
 
-    public static void blendInRange() {
-        BLEND_IN_RANGE.incrementAndGet();
-    }
-
-    public static void blendOutOfRange() {
-        BLEND_OUT_OF_RANGE.incrementAndGet();
-    }
-
     public static String diagnostics() {
         return "seen=" + SEEN.get()
             + ", noProvider=" + NO_PROVIDER.get()
             + ", noProfile=" + NO_PROFILE.get()
-            + ", centerIsCity=" + CENTER_IS_CITY.get()
-            + ", noNearbyCity=" + NO_NEARBY_CITY.get()
+            + ", shiftedCentre=" + CENTER_IS_CITY.get()
             + ", applied=" + APPLIED.get()
-            + ", blendCalls=" + BLEND_CALLS.get()
-            + ", blendInRange=" + BLEND_IN_RANGE.get()
-            + ", blendOutOfRange=" + BLEND_OUT_OF_RANGE.get();
+            + ", blendCalls=" + BLEND_CALLS.get();
     }
 }

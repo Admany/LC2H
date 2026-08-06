@@ -26,9 +26,7 @@ import java.util.function.Supplier;
 @Mixin(value = LostCityTerrainFeature.class, remap = false)
 public abstract class MixinLostCityDebrisFix {
 
-    @Shadow public ChunkDriver driver;
     @Shadow public IDimensionInfo provider;
-    @Shadow public RandomSource rand;
 
     /**
      * @author Admany
@@ -59,6 +57,12 @@ public abstract class MixinLostCityDebrisFix {
         int destroyedBlocks = (int) (blocks * damage);
         destroyedBlocks /= info.profile.DEBRIS_TO_NEARBYCHUNK_FACTOR;
         if (destroyedBlocks <= 0) {
+            return;
+        }
+
+        ChunkDriver driver = lc2h$getDriver();
+        RandomSource rand = lc2h$getRandom();
+        if (driver == null || rand == null) {
             return;
         }
 
@@ -113,6 +117,24 @@ public abstract class MixinLostCityDebrisFix {
             if (b != null && !infoBarSet.contains(driver.getBlockDown())) {
                 driver.block(b);
             }
+        }
+    }
+
+    @Unique
+    private ChunkDriver lc2h$getDriver() {
+        try {
+            return ((LostCityTerrainFeature) (Object) this).getDriver();
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    @Unique
+    private RandomSource lc2h$getRandom() {
+        try {
+            return ((LostCityTerrainFeature) (Object) this).getRandom();
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 

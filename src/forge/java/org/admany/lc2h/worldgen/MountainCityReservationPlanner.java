@@ -9,6 +9,7 @@ import mcjty.lostcities.worldgen.lost.CitySphere;
 import mcjty.lostcities.worldgen.lost.Highway;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
+import org.admany.lc2h.worldgen.terrain.NaturalHeightSampler;
 
 import java.util.ArrayDeque;
 import java.util.Arrays;
@@ -39,7 +40,7 @@ public final class MountainCityReservationPlanner {
     private static final int REGION_SIDE = 32;
     private static final int HALO = 8;
     private static final int GRID_SIDE = REGION_SIDE + HALO * 2;
-    private static final int MIN_RISE = Math.max(8, Math.min(48,
+    public static final int MIN_RISE = Math.max(8, Math.min(48,
         Integer.getInteger("lc2h.terrain.reservation.minRise", 12)));
     private static final int MIN_COMPONENT_CELLS = Math.max(4, Math.min(32,
         Integer.getInteger("lc2h.terrain.reservation.minComponentCells", 6)));
@@ -742,13 +743,12 @@ public final class MountainCityReservationPlanner {
 
     private static int representativeHeight(IDimensionInfo provider, ChunkCoord coord, int fallback) {
         try {
-            var heightmap = provider.getHeightmap(coord);
-            int coarse = heightmap.getHeight();
-            int maximum = heightmap.getMaxHeight();
-            if (maximum <= 0 || maximum < coarse - 128 || maximum > coarse + 256) {
-                maximum = coarse;
+            NaturalHeightSampler.LevelSampler heights =
+                NaturalHeightSampler.forLevel(provider.getWorld());
+            if (heights == null) {
+                return fallback;
             }
-            return Math.max(coarse, maximum - 4);
+            return heights.chunkHeight(coord.chunkX(), coord.chunkZ());
         } catch (Throwable ignored) {
             return fallback;
         }

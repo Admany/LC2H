@@ -29,10 +29,16 @@ public abstract class MixinLostCityTerrainFeatureThreadSafeRandoms {
     @Unique private static final ThreadLocal<Random> LC2H_VEGETATION_RAND = ThreadLocal.withInitial(Random::new);
     @Unique private static final ThreadLocal<PaletteSequence> LC2H_PALETTE_SEQUENCE = ThreadLocal.withInitial(PaletteSequence::new);
 
-    @Shadow public ChunkDriver driver;
+    @Unique
+    private ChunkDriver lc2h$getDriver() {
+        try {
+            return ((LostCityTerrainFeature) (Object) this).getDriver();
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
     @Shadow public IDimensionInfo provider;
     @Shadow public BlockState air;
-    @Shadow private static int gSeed;
     @Shadow private BlockState[] randomLeafs;
     @Shadow private BlockState[] randomDirt;
     @Shadow private Set<BlockState> randomDirtSet;
@@ -83,9 +89,9 @@ public abstract class MixinLostCityTerrainFeatureThreadSafeRandoms {
                 randomLeafs[idx++] = oak;
             }
         }
-        int seedBefore = gSeed;
+        int seedBefore = 0;
         int paletteIndex = lc2h$nextPaletteIndex(info, 0x1EAF);
-        int seedAfter = gSeed;
+        int seedAfter = 0;
         BlockState chosen = randomLeafs[paletteIndex];
         lc2h$recordPaletteChoice("leaf.random", paletteIndex, seedBefore, seedAfter, chosen, null);
         return chosen;
@@ -119,9 +125,9 @@ public abstract class MixinLostCityTerrainFeatureThreadSafeRandoms {
                 randomDirt[idx++] = mossBlock;
             }
         }
-        int seedBefore = gSeed;
+        int seedBefore = 0;
         int paletteIndex = lc2h$nextPaletteIndex(info, 0xD17A);
-        int seedAfter = gSeed;
+        int seedAfter = 0;
         BlockState chosen = randomDirt[paletteIndex];
         lc2h$recordPaletteChoice("dirt.random", paletteIndex, seedBefore, seedAfter, chosen, null);
         return chosen;
@@ -129,6 +135,10 @@ public abstract class MixinLostCityTerrainFeatureThreadSafeRandoms {
 
     @Overwrite
     private void generateRandomVegetation(BuildingInfo info, int height) {
+        ChunkDriver driver = lc2h$getDriver();
+        if (driver == null) {
+            return;
+        }
         Random vegetationRand = LC2H_VEGETATION_RAND.get();
         vegetationRand.setSeed(provider.getSeed() * 377 + info.coord.chunkZ() * 341873128712L + info.coord.chunkX() * 132897987541L);
 
@@ -206,7 +216,7 @@ public abstract class MixinLostCityTerrainFeatureThreadSafeRandoms {
     @Unique
     private int lc2h$nextPaletteIndex(BuildingInfo info, int salt) {
         if (Lc2hRuntimeModes.worldParityAuto()) {
-            return Lc2hParityRandoms.withLostCitiesSeedLock(LostCityTerrainFeature::fastrand128);
+            return Lc2hParityRandoms.withLostCitiesSeedLock(() -> LC2H_PALETTE_SEQUENCE.get().nextIndex());
         }
         PaletteSequence sequence = LC2H_PALETTE_SEQUENCE.get();
         sequence.ensureSeed(provider.getSeed(), info.coord.chunkX(), info.coord.chunkZ());
@@ -257,6 +267,7 @@ public abstract class MixinLostCityTerrainFeatureThreadSafeRandoms {
                                           BlockState chosenState,
                                           String detail) {
         try {
+            ChunkDriver driver = lc2h$getDriver();
             if (driver == null) {
                 return;
             }
