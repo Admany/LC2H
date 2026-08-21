@@ -1,4 +1,4 @@
-package org.admany.lc2h.worldgen;
+package org.admany.lc2h.worldgen.terrain;
 
 import net.minecraft.util.Mth;
 

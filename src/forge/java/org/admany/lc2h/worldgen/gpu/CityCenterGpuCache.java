@@ -40,7 +40,7 @@ public final class CityCenterGpuCache {
     /**
      * Neighbouring multichunk plans overlap almost their entire city-center
      * search window.  Keep the pure numeric facts in fixed tiles so normal
-     * CPU planning can reuse that overlap too; this is deliberately separate
+     * CPU planning can reuse that overlap too. It stays separate
      * from the optional Vulkan plan cache below.
      */
     private static final int CPU_TILE_SIDE = Math.max(16,
@@ -50,7 +50,7 @@ public final class CityCenterGpuCache {
     /**
      * This is an exact, independently-audited numeric kernel.  It remains
      * opt-in until an authoritative producer can provide a sufficiently large
-     * batch; direct Lost Cities startup groups are too small to amortize an
+     * batch. Direct Lost Cities startup groups are too small to amortize an
      * isolated Vulkan dispatch on real hardware.
      */
     private static final boolean ENABLED = Boolean.parseBoolean(
@@ -255,7 +255,7 @@ public final class CityCenterGpuCache {
      * Covers direct/native startup planning, where Lost Cities can invoke the
      * fast planner before the async multichunk queue has accumulated a batch.
      * A four-by-four aligned plan group is submitted once and shared by every
-     * worldgen thread. Callers wait only for a small bounded interval; missing
+     * worldgen thread. Callers wait only for a small bounded interval. Missing
      * results transparently use the exact scalar path while the GPU finishes.
      */
     public static void prepareDirectNeighborhood(IDimensionInfo provider,

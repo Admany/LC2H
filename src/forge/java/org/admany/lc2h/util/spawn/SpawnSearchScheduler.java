@@ -1057,7 +1057,7 @@ public final class SpawnSearchScheduler {
             // thread triggers LostCityFeature.generate() → withChunkStripeLock, but
             // ForkJoin's work-stealing can leave a gen worker holding the stripe lock while
             // parked in awaitWork, preventing any other worker from acquiring it → deadlock.
-            // Use forceChunkLoad=false; if the chunk is already resident, validate normally.
+            // Do not force-load here. A resident chunk still gets the normal validation.
             BlockPos found = tryValidateSpawnCandidate(world, candidate, isValidStandingPosition, false);
             if (found != null) {
                 deferredCandidates.clear();
@@ -1841,7 +1841,7 @@ public final class SpawnSearchScheduler {
                 autoResolved.add(candidate);
                 remapped.put(value, candidate);
             } else {
-                // No remapping found; keep original
+                // No remap. Keep the original.
                 autoResolved.add(value);
             }
         }

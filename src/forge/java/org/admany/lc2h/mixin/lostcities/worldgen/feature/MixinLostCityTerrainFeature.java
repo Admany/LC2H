@@ -25,6 +25,7 @@ import org.admany.lc2h.worldgen.gpu.TerrainCorrectionGpuPipeline;
 import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 import org.admany.lc2h.worldgen.lostcities.LostCitiesGenerationLocks;
 import org.admany.lc2h.worldgen.lostcities.LostCityTerrainFeatureGuards;
+import org.admany.lc2h.worldgen.terrain.NaturalHeightSampler;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -131,6 +132,28 @@ public class MixinLostCityTerrainFeature {
     private void lc2h$warmupGeneration(WorldGenRegion region, ChunkAccess chunk, CallbackInfo ci) {
 	        LostCityTerrainFeature self = (LostCityTerrainFeature) (Object) this;
         if (self.provider.getWorld() == null) return;
+
+        NaturalHeightSampler.LevelSampler naturalHeights = NaturalHeightSampler.forLevel(region);
+        if (naturalHeights != null) {
+            naturalHeights.publishResidentChunk(chunk);
+            /*
+             * heightSampleSize groups nearby LC chunks around one sampler.
+             * That sampler is normally already resident in this WorldGenRegion,
+             * so publish it now and avoid rebuilding Minecraft's density graph.
+             */
+            int size = Math.max(1, (Integer) mcjty.lostcities.setup.Config.HEIGHT_SAMPLE_SIZE.get());
+            if (size > 2) {
+                int top = chunk.getPos().x / size * size;
+                int left = chunk.getPos().z / size * size;
+                int directionX = chunk.getPos().x < 0 ? -1 : 1;
+                int directionZ = chunk.getPos().z < 0 ? -1 : 1;
+                int sampleX = top + (size / 2) * directionX;
+                int sampleZ = left + (size / 2) * directionZ;
+                if (region.hasChunk(sampleX, sampleZ)) {
+                    naturalHeights.publishResidentChunk(region.getChunk(sampleX, sampleZ));
+                }
+            }
+        }
         ChunkCoord coord = new ChunkCoord(self.provider.getType(), chunk.getPos().x, chunk.getPos().z);
 
 	        long now = System.currentTimeMillis();
@@ -186,7 +209,7 @@ public class MixinLostCityTerrainFeature {
     /**
      * This call is after Lost Cities has installed the current chunk primer,
      * and before doNormalChunk reaches correctTerrainShape. Capture only an
-     * immutable snapshot here; no GPU result is awaited on the generation
+     * immutable snapshot here. Generation never waits for a GPU result
      * thread and the original heightmap result is returned unchanged.
      */
     @Redirect(

@@ -210,11 +210,11 @@ public class Lc2hConfigScreen extends Screen {
         this.unsavedSaveLabel = tr("lc2h.config.modal.unsaved.save");
         this.unsavedDiscardLabel = tr("lc2h.config.modal.unsaved.discard");
 
-        for (int i = 0; i < 25; i++) {
+        for (int i = 0; i < 14; i++) {
             particles.add(new Particle(0, 0, 0x33AAAAAA));
         }
 
-        for (int i = 0; i < 150; i++) {
+        for (int i = 0; i < 72; i++) {
             stars.add(new Star(0, 0));
         }
     }
@@ -442,11 +442,6 @@ private Component unsavedDiscardLabel = Component.empty();
 
         addSectionHeader(layout, tr("lc2h.config.section.general"));
         addToggle(layout,
-                tr("lc2h.config.option.async_double_block_batcher.title"),
-                working.enableAsyncDoubleBlockBatcher,
-                tr("lc2h.config.option.async_double_block_batcher.desc"),
-                false, val -> working.enableAsyncDoubleBlockBatcher = val);
-        addToggle(layout,
                 tr("lc2h.config.option.floating_vegetation_removal.title"),
                 working.enableFloatingVegetationRemoval,
                 tr("lc2h.config.option.floating_vegetation_removal.desc"),
@@ -457,73 +452,12 @@ private Component unsavedDiscardLabel = Component.empty();
                 tr("lc2h.config.option.explosion_debris.desc"),
                 false,
                 val -> working.enableExplosionDebris = val);
-        addToggle(layout,
-                tr("lc2h.config.option.lostcities_gen_lock.title"),
-                working.enableLostCitiesGenerationLock,
-                tr("lc2h.config.option.lostcities_gen_lock.desc"),
-                false,
-                val -> working.enableLostCitiesGenerationLock = val);
-        addToggle(layout,
-                tr("lc2h.config.option.lostcities_part_safety.title"),
-                working.enableLostCitiesPartSliceCompat,
-                tr("lc2h.config.option.lostcities_part_safety.desc"),
-                false,
-                val -> working.enableLostCitiesPartSliceCompat = val);
         addSectionHeader(layout, tr("lc2h.config.section.caching"));
-        addToggle(layout,
-                tr("lc2h.config.option.cache_enforce_combined.title"),
-                working.cacheEnforceCombinedMax,
-                tr("lc2h.config.option.cache_enforce_combined.desc"),
-                false,
-                val -> working.cacheEnforceCombinedMax = val);
-        addToggle(layout,
-                tr("lc2h.config.option.cache_split_equal.title"),
-                working.cacheSplitEqual,
-                tr("lc2h.config.option.cache_split_equal.desc"),
-                false,
-                val -> working.cacheSplitEqual = val);
         this.cacheCapBox = addNumberField(layout,
                 tr("lc2h.config.option.cache_combined_max_mb.title"),
                 tr("lc2h.config.option.cache_combined_max_mb.desc"),
                 String.valueOf(working.cacheCombinedMaxMB), false);
         this.cacheCapBox.setFilter(this::isNumericInput);
-        this.lc2hCacheBox = addNumberField(layout,
-                tr("lc2h.config.option.cache_lc2h_max_mb.title"),
-                tr("lc2h.config.option.cache_lc2h_max_mb.desc"),
-                String.valueOf(working.cacheMaxMB), false);
-        this.lc2hCacheBox.setFilter(this::isNumericInput);
-        this.lostCitiesCacheBox = addNumberField(layout,
-                tr("lc2h.config.option.cache_lostcities_max_mb.title"),
-                tr("lc2h.config.option.cache_lostcities_max_mb.desc"),
-                String.valueOf(working.cacheLostCitiesMaxMB), false);
-        this.lostCitiesCacheBox.setFilter(this::isNumericInput);
-        this.lostCitiesTtlBox = addNumberField(layout,
-                tr("lc2h.config.option.cache_lostcities_ttl_minutes.title"),
-                tr("lc2h.config.option.cache_lostcities_ttl_minutes.desc"),
-                String.valueOf(working.cacheLostCitiesTtlMinutes), false);
-        this.lostCitiesTtlBox.setFilter(this::isNumericInput);
-        this.lostCitiesDiskTtlBox = addNumberField(layout,
-                tr("lc2h.config.option.cache_lostcities_disk_ttl_hours.title"),
-                tr("lc2h.config.option.cache_lostcities_disk_ttl_hours.desc"),
-                String.valueOf(working.cacheLostCitiesDiskTtlHours), false);
-        this.lostCitiesDiskTtlBox.setFilter(this::isNumericInput);
-
-        addSectionHeader(layout, tr("lc2h.config.section.statistics"));
-        addToggle(layout,
-                tr("lc2h.config.option.cache_stats_logging.title"),
-                working.enableCacheStatsLogging,
-                tr("lc2h.config.option.cache_stats_logging.desc"),
-                false, val -> working.enableCacheStatsLogging = val);
-        addToggle(layout,
-                tr("lc2h.config.option.hide_experimental_warning.title"),
-                working.hideExperimentalWarning,
-                tr("lc2h.config.option.hide_experimental_warning.desc"),
-                false, val -> working.hideExperimentalWarning = val);
-        addToggle(layout,
-                tr("lc2h.config.option.debug_logging.title"),
-                working.enableDebugLogging,
-                tr("lc2h.config.option.debug_logging.desc"),
-                false, val -> working.enableDebugLogging = val);
         addSectionHeader(layout, tr("lc2h.config.section.interface"));
         String accentValue = working.uiAccentColor == null ? "3A86FF" : working.uiAccentColor;
         this.accentColorBox = addTextField(layout,
@@ -538,43 +472,6 @@ private Component unsavedDiscardLabel = Component.empty();
                 working.cityBlendEnabled,
                 tr("lc2h.config.option.city_blend_enabled.desc"),
                 Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendEnabled = val);
-        addToggle(layout,
-                tr("lc2h.config.option.seam_ownership_enabled.title"),
-                working.seamOwnershipEnabled,
-                tr("lc2h.config.option.seam_ownership_enabled.desc"),
-                Lc2hConfigController.RESTART_CITY_EDGE, val -> working.seamOwnershipEnabled = val);
-        this.blendWidthBox = addNumberField(layout,
-                tr("lc2h.config.option.city_blend_width.title"),
-                tr("lc2h.config.option.city_blend_width.desc"),
-                String.valueOf(working.cityBlendWidth), Lc2hConfigController.RESTART_CITY_EDGE);
-        this.blendSoftnessBox = addNumberField(layout,
-                tr("lc2h.config.option.city_blend_softness.title"),
-                tr("lc2h.config.option.city_blend_softness.desc"),
-                String.valueOf(working.cityBlendSoftness), Lc2hConfigController.RESTART_CITY_EDGE);
-        this.blendTreeSeamBufferBox = addNumberField(layout,
-                tr("lc2h.config.option.city_blend_tree_seam_buffer.title"),
-                tr("lc2h.config.option.city_blend_tree_seam_buffer.desc"),
-                String.valueOf(working.cityBlendTreeSeamBuffer), Lc2hConfigController.RESTART_CITY_EDGE);
-        this.blendTreeSeamBufferBox.setFilter(this::isNumericInput);
-        this.treeSeamRadiusMultiplierBox = addNumberField(layout,
-                tr("lc2h.config.option.tree_seam_radius_multiplier.title"),
-                tr("lc2h.config.option.tree_seam_radius_multiplier.desc"),
-                String.valueOf(working.treeSeamRadiusMultiplier), Lc2hConfigController.RESTART_CITY_EDGE);
-        this.seamOwnershipMaxIntentsBox = addNumberField(layout,
-                tr("lc2h.config.option.seam_ownership_max_intents.title"),
-                tr("lc2h.config.option.seam_ownership_max_intents.desc"),
-                String.valueOf(working.seamOwnershipMaxIntentsPerChunk), Lc2hConfigController.RESTART_CITY_EDGE);
-        this.seamOwnershipMaxIntentsBox.setFilter(this::isNumericInput);
-        this.seamOwnershipIntentTtlMsBox = addNumberField(layout,
-                tr("lc2h.config.option.seam_ownership_intent_ttl_ms.title"),
-                tr("lc2h.config.option.seam_ownership_intent_ttl_ms.desc"),
-                String.valueOf(working.seamOwnershipIntentTtlMs), Lc2hConfigController.RESTART_CITY_EDGE);
-        this.seamOwnershipIntentTtlMsBox.setFilter(this::isNumericInput);
-        this.highwaySupportMaxDepthBox = addNumberField(layout,
-                tr("lc2h.config.option.highway_support_max_depth.title"),
-                tr("lc2h.config.option.highway_support_max_depth.desc"),
-                String.valueOf(working.highwaySupportMaxDepth), Lc2hConfigController.RESTART_CITY_EDGE);
-        this.highwaySupportMaxDepthBox.setFilter(this::isNumericInput);
 
         addSectionHeader(layout, tr("lc2h.config.section.benchmark"));
         addActionButton(layout,
@@ -909,21 +806,15 @@ private Component unsavedDiscardLabel = Component.empty();
             star.update(time);
         }
 
-        for (Map.Entry<Button, Float> entry : new ArrayList<>(buttonScale.entrySet())) {
+        for (Map.Entry<Button, Float> entry : buttonScale.entrySet()) {
             float v = entry.getValue() == null ? 0f : entry.getValue();
             if (v <= 0f) continue;
             v = Math.max(0f, v - 0.04f);
-            buttonScale.put(entry.getKey(), v);
+            entry.setValue(v);
         }
 
-        for (Map.Entry<Button, Float> entry : buttonPulse.entrySet()) {
-            float pulse = entry.getValue() + 0.05f;
-            if (pulse > Math.PI * 2) pulse -= Math.PI * 2;
-            buttonPulse.put(entry.getKey(), pulse);
-        }
-
-        scrollOffset += (targetScrollOffset - scrollOffset) * 0.15f;
-        if (Math.abs(scrollOffset - targetScrollOffset) < 0.5f) {
+        scrollOffset += (targetScrollOffset - scrollOffset) * 0.34f;
+        if (Math.abs(scrollOffset - targetScrollOffset) < 0.25f) {
             scrollOffset = targetScrollOffset;
         }
         fadeIn = Math.min(1f, fadeIn + 0.02f);
@@ -984,10 +875,10 @@ private Component unsavedDiscardLabel = Component.empty();
 
         renderStars(graphics, screenW, screenH);
 
-        for (int i = 0; i < screenW; i += 6) {
+        for (int i = 0; i < screenW; i += 14) {
             float wave = (float) Math.sin(i * 0.015 + time * 0.08) * 1.5f;
             int alpha = (int) (4 + wave * 3);
-            graphics.fill(i, 0, i + 2, screenH, (alpha << 24) | waveColor);
+            graphics.fill(i, 0, i + 1, screenH, (alpha << 24) | waveColor);
         }
 
         for (Particle p : particles) {
@@ -997,12 +888,9 @@ private Component unsavedDiscardLabel = Component.empty();
             graphics.fill((int)p.x, (int)p.y, (int)p.x + size, (int)p.y + size, (alpha << 24) | (p.color & 0xFFFFFF));
         }
 
-        for (int i = 0; i < 2; i++) {
-            float x = (float) (Math.sin(time * 0.015 + i) * 80 + screenW/2);
-            float y = (float) (Math.cos(time * 0.012 + i) * 60 + screenH/3);
-            int nebulaColor = tint(0x333A5E, accent, 0.25f);
-            renderNebula(graphics, x, y, nebulaColor, 60 + i * 15);
-        }
+        float nebulaX = (float) (Math.sin(time * 0.015) * 80 + screenW / 2.0);
+        float nebulaY = (float) (Math.cos(time * 0.012) * 60 + screenH / 3.0);
+        renderNebula(graphics, nebulaX, nebulaY, tint(0x333A5E, accent, 0.25f), 68);
     }
 
     private void renderStars(GuiGraphics graphics, int screenW, int screenH) {
@@ -1023,7 +911,7 @@ private Component unsavedDiscardLabel = Component.empty();
     private void renderConstellations(GuiGraphics graphics, int screenW, int screenH) {
         float time = this.time;
 
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 4; i++) {
             float x1 = (float) (Math.sin(time * 0.01 + i) * 100 + screenW/2 + i * 40);
             float y1 = (float) (Math.cos(time * 0.008 + i) * 80 + screenH/4 + i * 30);
             float x2 = (float) (Math.sin(time * 0.01 + i + 1) * 120 + screenW/2 + (i + 1) * 40);
@@ -1037,7 +925,7 @@ private Component unsavedDiscardLabel = Component.empty();
         float dx = x2 - x1;
         float dy = y2 - y1;
         float distance = (float) Math.sqrt(dx * dx + dy * dy);
-        int steps = (int) (distance / 2);
+        int steps = Math.max(1, (int) (distance / 8));
 
         for (int i = 0; i < steps; i++) {
             float progress = (float) i / steps;
@@ -1091,22 +979,19 @@ private Component unsavedDiscardLabel = Component.empty();
     }
 
     private void renderCenteredTextWithGlow(GuiGraphics graphics, net.minecraft.client.gui.Font font, Component text, int x, int y, int color, int glowColor) {
-        for (int offsetX = -1; offsetX <= 1; offsetX++) {
-            for (int offsetY = -1; offsetY <= 1; offsetY++) {
-                if (offsetX == 0 && offsetY == 0) continue;
-                graphics.drawString(font, text, x - font.width(text) / 2 + offsetX, y + offsetY, glowColor, false);
-            }
-        }
+        int left = x - font.width(text) / 2;
+        graphics.drawString(font, text, left - 1, y, glowColor, false);
+        graphics.drawString(font, text, left + 1, y, glowColor, false);
+        graphics.drawString(font, text, left, y - 1, glowColor, false);
+        graphics.drawString(font, text, left, y + 1, glowColor, false);
         graphics.drawString(font, text, x - font.width(text) / 2, y, color, false);
     }
 
     private void renderStringWithGlow(GuiGraphics graphics, net.minecraft.client.gui.Font font, String text, int x, int y, int color, int glowColor) {
-        for (int offsetX = -1; offsetX <= 1; offsetX++) {
-            for (int offsetY = -1; offsetY <= 1; offsetY++) {
-                if (offsetX == 0 && offsetY == 0) continue;
-                graphics.drawString(font, text, x + offsetX, y + offsetY, glowColor, false);
-            }
-        }
+        graphics.drawString(font, text, x - 1, y, glowColor, false);
+        graphics.drawString(font, text, x + 1, y, glowColor, false);
+        graphics.drawString(font, text, x, y - 1, glowColor, false);
+        graphics.drawString(font, text, x, y + 1, glowColor, false);
         graphics.drawString(font, text, x, y, color, false);
     }
 
@@ -1210,7 +1095,7 @@ private Component unsavedDiscardLabel = Component.empty();
 
     private void renderButtonBackground(GuiGraphics graphics, int x, int y, int width, int height, float alpha, float hover, Button button) {
         int bgAlpha = Math.max(0, Math.min(255, Math.round(alpha * 255)));
-        float pulse = (float) Math.sin(buttonPulse.getOrDefault(button, 0f)) * 0.1f + 0.9f;
+        float pulse = (float) Math.sin(buttonPulse.getOrDefault(button, 0f) + time * 0.05f) * 0.1f + 0.9f;
 
         int accent = getAccentColor();
         int baseColor = tint(0x1A1A2E, accent, 0.08f);
@@ -1323,7 +1208,7 @@ private Component unsavedDiscardLabel = Component.empty();
             if (r == null) continue;
             int bx = r[0], by = r[1], bw = r[2], bh = r[3];
 
-            float pulse = (float) Math.sin(buttonPulse.getOrDefault(entry.getKey(), 0f)) * 0.05f + 0.95f;
+            float pulse = (float) Math.sin(buttonPulse.getOrDefault(entry.getKey(), 0f) + time * 0.05f) * 0.05f + 0.95f;
             boolean over = mouseX >= bx && mouseX < bx + bw && mouseY >= by && mouseY < by + bh;
             float targetHover = over ? 1f : 0f;
             float currentHover = fixedButtonHover.getOrDefault(entry.getKey(), 0f);
@@ -1450,9 +1335,8 @@ private Component unsavedDiscardLabel = Component.empty();
             graphics.fill(barX, thumbY, barX + barWidth, thumbY + thumbHeight,
                     (0xFF << 24) | tint(0x1A1A2E, accent, 0.12f));
 
-            float pulse = (float) Math.sin(time * 0.1) * 0.2f + 0.8f;
-            int pulseColor = adjustColorBrightness(accent, pulse);
-            graphics.fill(barX + 1, thumbY + 1, barX + barWidth - 1, thumbY + thumbHeight - 1, pulseColor);
+            graphics.fill(barX + 1, thumbY + 1, barX + barWidth - 1, thumbY + thumbHeight - 1,
+                (0xFF << 24) | (accent & 0xFFFFFF));
         }
     }
 
@@ -1658,8 +1542,9 @@ private Component unsavedDiscardLabel = Component.empty();
 
         if (mouseX >= this.contentLeft - 18 && mouseX <= this.contentRight + 18 && mouseY >= bodyTop && mouseY <= bodyBottomClipped) {
             if (this.maxScrollOffset > 0) {
-                float speed = 40f;
-                targetScrollOffset = clamp(0f, (float) this.maxScrollOffset, targetScrollOffset - (float) delta * speed);
+                float speed = Math.abs(delta) < 1.0D ? 26f : 32f;
+                targetScrollOffset = clamp(0f, (float) this.maxScrollOffset,
+                    targetScrollOffset - (float) delta * speed);
                 return true;
             }
             return false;
@@ -1733,8 +1618,8 @@ private Component unsavedDiscardLabel = Component.empty();
 
     private Lc2hConfigController.FormValues buildFormValues() {
         return new Lc2hConfigController.FormValues(
-                blendWidthBox.getValue(),
-                blendSoftnessBox.getValue(),
+                blendWidthBox == null ? null : blendWidthBox.getValue(),
+                blendSoftnessBox == null ? null : blendSoftnessBox.getValue(),
                 blendTreeSeamBufferBox == null ? null : blendTreeSeamBufferBox.getValue(),
                 treeSeamRadiusMultiplierBox == null ? null : treeSeamRadiusMultiplierBox.getValue(),
                 seamOwnershipMaxIntentsBox == null ? null : seamOwnershipMaxIntentsBox.getValue(),

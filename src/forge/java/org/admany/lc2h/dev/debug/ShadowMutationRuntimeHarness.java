@@ -30,6 +30,7 @@ import org.admany.lc2h.worldgen.lostcities.DeferredTreeQueue;
 import org.admany.lc2h.worldgen.lostcities.MidgardTreeCaptureHooks;
 import org.admany.lc2h.worldgen.lostcities.TreeCapturePolicy;
 import org.admany.lc2h.worldgen.lostcities.TreeCompatTracker;
+import org.admany.lc2h.util.ResourceLocations;
 import net.minecraftforge.registries.ForgeRegistries;
 
 import java.util.ArrayList;
@@ -371,7 +372,7 @@ public final class ShadowMutationRuntimeHarness {
             return new ScenarioResult("midgard", false, 0, details);
         }
 
-        ResourceLocation featureId = new ResourceLocation("midgard", "aspen/huge_aspen_tree_1");
+            ResourceLocation featureId = ResourceLocations.of("midgard", "aspen/huge_aspen_tree_1");
         ConfiguredFeature<?, ?> feature;
         try {
             Registry<ConfiguredFeature<?, ?>> configuredFeatures = level.registryAccess().registryOrThrow(Registries.CONFIGURED_FEATURE);
@@ -403,10 +404,8 @@ public final class ShadowMutationRuntimeHarness {
             boolean placed = feature.place(level, level.getChunkSource().getGenerator(), RandomSource.create(level.getSeed() ^ origin.asLong()), origin);
             DeferredTreeQueue.promoteReadyLoaded(level, 64);
             int replayCycles = DeferredTreeEventHandler.forceReplayReadyForDebug(level.getServer(), 64, 1_000_000);
-            // Captured-tree replay intentionally hands writes to the normal
-            // shadow transaction applier. Drain that second stage before
-            // validating physical blocks; replay-count alone is not apply
-            // completion.
+            // Tree replay goes through the normal shadow applier. Drain it before
+            // checking blocks because a replay count alone is not completion.
             int applyCycles = ShadowBlockMutationApplier.forceDrainForDebug(64);
             int cycles = replayCycles + applyCycles;
             long captures = TreeCompatTracker.captureCount(DeferredTreeCaptureContext.CaptureSource.MIDGARD_STRUCTURE) - capturesBefore;

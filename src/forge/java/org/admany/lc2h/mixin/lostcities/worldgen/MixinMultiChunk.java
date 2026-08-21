@@ -13,6 +13,7 @@ import net.minecraft.world.level.CommonLevelAccessor;
 import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
 import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
 import org.admany.lc2h.worldgen.lostcities.FastMultiChunkPlanner;
+import org.admany.lc2h.worldgen.lostcities.MultiBuildingFootprintRegistry;
 import org.admany.lc2h.worldgen.lostcities.MultiChunkPlanningCache;
 import org.admany.lc2h.util.lostcities.MultiChunkCacheAccess;
 import org.spongepowered.asm.mixin.Mixin;
@@ -24,6 +25,16 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(value = MultiChunk.class, remap = false)
 public class MixinMultiChunk {
+
+    /*
+     * The asynchronous multichunk planner feeds the replacement
+     * BuildingInfo path. It cannot safely run while Lost Cities owns the
+     * native BuildingInfo monitor because native characteristic construction
+     * calls MultiChunk.getOrCreate recursively. Keep both paths paired.
+     */
+    @Unique
+    private static final boolean LC2H_CONCURRENT_BUILDING_INFO =
+        Boolean.parseBoolean(System.getProperty("lc2h.concurrentBuildingInfo", "true"));
 
     @Unique
     private static final int LC2H_MULTICHUNK_MIN_RETAIN = Math.max(64,
@@ -123,6 +134,9 @@ public class MixinMultiChunk {
 
     @Inject(method = "getOrCreate", at = @At("HEAD"), cancellable = true)
     private static void lc2h$asyncGetOrCreate(IDimensionInfo provider, ChunkCoord coord, CallbackInfoReturnable<MultiChunk> cir) {
+        if (!LC2H_CONCURRENT_BUILDING_INFO) {
+            return;
+        }
         if (AsyncMultiChunkPlanner.isInternalComputation()) {
             return;
         }
@@ -159,11 +173,15 @@ public class MixinMultiChunk {
 
     @Inject(method = "getOrCreate", at = @At("RETURN"))
     private static void lc2h$afterGetOrCreate(IDimensionInfo provider, ChunkCoord coord, CallbackInfoReturnable<MultiChunk> cir) {
+        if (!LC2H_CONCURRENT_BUILDING_INFO) {
+            return;
+        }
         AsyncMultiChunkPlanner.onSynchronousResult(provider, coord, cir.getReturnValue());
     }
 
     @Inject(method = "cleanCache", at = @At("HEAD"))
     private static void lc2h$clearMultiChunkBudget(org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
         LostCitiesCacheBudgetManager.clear(LC2H_MULTICHUNK_BUDGET);
+        MultiBuildingFootprintRegistry.clearAll();
     }
 }

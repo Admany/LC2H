@@ -38,12 +38,14 @@ public final class Lc2hMixinConfigPlugin implements IMixinConfigPlugin {
             || "org.admany.lc2h.mixin.minecraft.worldgen.MixinPlacedFeaturePreCaptureTrace".equals(mixinClassName)) {
             return Boolean.parseBoolean(System.getProperty("lc2h.precaptureTrace.enabled", "false"));
         }
-        // BuildingInfo is the dominant Lost Cities generation choke point.
-        // Its caches are provider-scoped and the remaining construction lock is
-        // per chunk, so normal generation no longer shares the upstream global
-        // monitor. Keep an explicit startup opt-out for fault isolation.
+        // This is the maintained LC2H decision path. It keeps the fast
+        // provider-scoped caches and multibuilding guards active by default.
+        // Set the property to false only for a deliberate parity comparison.
         if ("org.admany.lc2h.mixin.lostcities.building.MixinBuildingInfo".equals(mixinClassName)) {
             return Boolean.parseBoolean(System.getProperty("lc2h.concurrentBuildingInfo", "true"));
+        }
+        if ("org.admany.lc2h.mixin.lostcities.building.MixinNativeBuildingInfoCharacteristicsCache".equals(mixinClassName)) {
+            return !Boolean.parseBoolean(System.getProperty("lc2h.concurrentBuildingInfo", "true"));
         }
         if (!Lc2hRuntimeModes.baselineMode()) {
             return true;

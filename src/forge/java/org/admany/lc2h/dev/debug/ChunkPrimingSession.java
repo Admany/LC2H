@@ -44,6 +44,9 @@ final class ChunkPrimingSession implements AutoCloseable {
     private static final int OBSERVED_APPEND_PER_TICK = Math.max(1, Integer.getInteger("lc2h.worldparity.primeObservedAppendPerTick", 128));
     private static final int OBSERVED_TOTAL_LIMIT = Math.max(OBSERVED_APPEND_PER_TICK, Integer.getInteger("lc2h.worldparity.primeObservedChunkLimit", 4096));
     private static final int OBSERVED_MARGIN_CHUNKS = Math.max(0, Integer.getInteger("lc2h.worldparity.primeObservedMarginChunks", 0));
+    private static final boolean EXPLICIT_PARITY_TICKETS = Boolean.parseBoolean(
+        System.getProperty("lc2h.worldparity.explicitTickets", "false")
+    );
 
     private final ServerLevel level;
     private final String label;
@@ -66,7 +69,7 @@ final class ChunkPrimingSession implements AutoCloseable {
     private int timedOut;
     private int observedExtensions;
     private boolean started;
-    private boolean closed;
+    private volatile boolean closed;
     private boolean primeRuntimeReleased;
     private CompletionStatus completionStatus = CompletionStatus.RUNNING;
     private final int observedMinChunkX;
@@ -274,14 +277,48 @@ final class ChunkPrimingSession implements AutoCloseable {
     private void queueFutureRequest(PendingChunk pendingChunk) {
         try {
             ChunkPos pos = pendingChunk.pos();
-            if (!pendingChunk.ticketAdded()) {
-                level.getChunkSource().addRegionTicket(LC2H_PARITY_TICKET, pos, 2, pos, true);
-                pendingChunk.markTicketAdded();
+            ServerChunkCacheInvoker cache = (ServerChunkCacheInvoker) (Object) level.getChunkSource();
+            if (EXPLICIT_PARITY_TICKETS && pendingChunk.queueTicketAdd()) {
+                // DistanceManager is owned by the server thread.  Queue the
+                // optional diagnostic ticket there rather than mutating it
+                // from the request worker.
+                level.getServer().execute(() -> {
+                    if (!closed && !pendingChunk.ticketAdded()) {
+                        try {
+                            level.getChunkSource().addRegionTicket(LC2H_PARITY_TICKET, pos, 2, pos, true);
+                            pendingChunk.markTicketAdded();
+                        } catch (Throwable t) {
+                            pendingChunk.markTicketAcquireFailed();
+                        }
+                    }
+                });
             }
-            CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>> future =
-                ((ServerChunkCacheInvoker) (Object) level.getChunkSource())
-                    .lc2h$getChunkFutureMainThread(pos.x, pos.z, ChunkStatus.FULL, true);
+
+            // Queue the private vanilla graph mutation on the server thread,
+            // but never wait for it there.  Calling this method directly from
+            // a worker corrupts DistanceManager, while the public wrapper can
+            // enter Minecraft's managed blocking path on the server thread.
+            CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>> future = new CompletableFuture<>();
             pendingChunk.markRequestQueued(future);
+            level.getServer().execute(() -> {
+                if (closed) {
+                    future.cancel(false);
+                    return;
+                }
+                try {
+                    CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>> vanillaFuture =
+                        cache.lc2h$getChunkFutureMainThread(pos.x, pos.z, ChunkStatus.FULL, true);
+                    vanillaFuture.whenComplete((result, failure) -> {
+                        if (failure != null) {
+                            future.completeExceptionally(failure);
+                        } else {
+                            future.complete(result);
+                        }
+                    });
+                } catch (Throwable t) {
+                    future.completeExceptionally(t);
+                }
+            });
         } catch (Throwable t) {
             pendingChunk.markFailed("request_error:" + t.getClass().getSimpleName() + ":" + t.getMessage());
         }
@@ -509,9 +546,9 @@ final class ChunkPrimingSession implements AutoCloseable {
         WorldParityObservedChunkTracker.deactivate(level.dimension());
         for (ChunkPos pos : submitted) {
             try {
-                level.getChunkSource().removeRegionTicket(LC2H_PARITY_TICKET, pos, 2, pos, true);
                 PendingChunk pendingChunk = allChunks.get(pos.toLong());
-                if (pendingChunk != null) {
+                if (pendingChunk != null && pendingChunk.ticketAdded()) {
+                    level.getChunkSource().removeRegionTicket(LC2H_PARITY_TICKET, pos, 2, pos, true);
                     pendingChunk.markTicketReleased();
                 }
             } catch (Throwable ignored) {
@@ -557,6 +594,7 @@ final class ChunkPrimingSession implements AutoCloseable {
         private volatile long ticketAddedAtMs;
         private volatile long ticketReleasedAtMs;
         private volatile boolean ticketAcquireFailed;
+        private volatile boolean ticketAddQueued;
         private volatile long firstVisibleAtMs;
         private volatile long readyObservedAtMs;
         private volatile String loadedStatus = "missing";
@@ -694,6 +732,14 @@ final class ChunkPrimingSession implements AutoCloseable {
             ticketAddedAtMs = System.currentTimeMillis();
         }
 
+        private boolean queueTicketAdd() {
+            if (ticketAddedAtMs > 0L || ticketAddQueued) {
+                return false;
+            }
+            ticketAddQueued = true;
+            return true;
+        }
+
         private void markTicketReleased() {
             ticketReleasedAtMs = System.currentTimeMillis();
         }
@@ -708,6 +754,10 @@ final class ChunkPrimingSession implements AutoCloseable {
 
         private boolean ticketAcquireFailed() {
             return ticketAcquireFailed;
+        }
+
+        private void markTicketAcquireFailed() {
+            ticketAcquireFailed = true;
         }
 
         private String ticketState() {

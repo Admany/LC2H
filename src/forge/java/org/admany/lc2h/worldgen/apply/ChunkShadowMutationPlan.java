@@ -108,7 +108,7 @@ public final class ChunkShadowMutationPlan {
 
     /**
      * Return a bounded immutable slice while retaining the original plan
-     * metadata.  This is used only at safe replay boundaries; normal Lost
+     * metadata. This is used only at safe replay boundaries. Normal Lost
      * Cities mutation transactions remain intact.
      */
     public ChunkShadowMutationPlan slice(int offset, int maximumEntries) {

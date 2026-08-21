@@ -22,7 +22,7 @@ public class ConfigManager {
 
     public static boolean ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER = true;
     public static boolean ENABLE_AUTOMATIC_CHUNK_SCANS = false;
-    public static boolean REJECT_STRUCTURES_IN_CITY_CHUNKS = true;
+    public static boolean REJECT_STRUCTURES_IN_CITY_CHUNKS = false;
     public static int CITY_STRUCTURE_REJECTION_BUFFER_CHUNKS = 0;
     public static boolean CITY_VERTICAL_TERRAIN_CLEARANCE = false;
     public static boolean ENABLE_LOSTCITIES_GENERATION_LOCK = true;
@@ -47,8 +47,7 @@ public class ConfigManager {
     public static int LOSTCITIES_CACHE_TTL_MINUTES = 10;
     public static int LOSTCITIES_CACHE_DISK_TTL_HOURS = 2;
 
-    // City edge tree handling. These protections are mandatory: a tree that
-    // crosses a Lost Cities boundary is captured and replayed safely.
+    // Trees crossing an LC edge are captured and replayed safely. This stays on.
     public static boolean CITY_BLEND_CLEAR_TREES = true;
     public static boolean CITY_BLEND_TREE_SEAM_FIX = true;
     public static int CITY_BLEND_TREE_SEAM_BUFFER = 3;
@@ -73,10 +72,9 @@ public class ConfigManager {
     public static class Config {
         public boolean enableAsyncDoubleBlockBatcher = true;
         public boolean enableAutomaticChunkScans = false;
-        public boolean rejectStructuresInCityChunks = true;
+        public boolean rejectStructuresInCityChunks = false;
         public int cityStructureRejectionBufferChunks = 0;
-        // Retained only so older config files migrate cleanly. It is ignored:
-        // native Lost Cities terrain correction owns hill shaping.
+    // Kept so old config files still migrate. Native LC terrain correction owns hills now.
         public boolean cityVerticalTerrainClearance = false;
         public boolean enableLostCitiesGenerationLock = true;
         public boolean enableLostCitiesPartSliceCompat = true;
@@ -153,10 +151,8 @@ public class ConfigManager {
             Config merged = new Config();
             try {
                 for (java.lang.reflect.Field field : Config.class.getFields()) {
-                    // Gson initializes absent primitive fields to false/zero. Copying by
-                    // value therefore silently disabled every newly-added default-true
-                    // option in an existing config. Presence-based merging preserves
-                    // explicit user values while allowing new defaults to migrate.
+            // Gson fills missing primitives with false or zero. Merge only fields that
+            // are present so new true-by-default options survive config migration.
                     if (userFields.has(field.getName())) {
                         field.set(merged, field.get(userConfig));
                     }
@@ -165,9 +161,8 @@ public class ConfigManager {
                 LCLogger.error("[LC2H] [Config] ❌ Failed to merge config fields: " + e.getMessage());
             }
 
-            // Migrate obsolete opt-outs before writing the normalized config.
-            // The old vertical clear was a blanket terrain deletion pass; the
-            // tree flags could silently turn cross-boundary trees into rejects.
+            // Drop obsolete opt-outs before writing the normalized config. The old
+            // vertical clear deleted terrain blindly and the tree flags caused rejects.
             merged.cityVerticalTerrainClearance = false;
             merged.cityBlendClearTrees = true;
             merged.cityBlendTreeSeamFix = true;
@@ -191,8 +186,8 @@ public class ConfigManager {
         java.util.Map<String, String> comments = new java.util.LinkedHashMap<>();
         // General Settings
         comments.put("enableAsyncDoubleBlockBatcher", "Enable async batching for double blocks");
-        comments.put("enableAutomaticChunkScans", "Scan every loaded chunk for legacy floating/double-block cleanup. Expensive in large modpacks and disabled by default; use /lc2h rescanChunk for targeted repair.");
-        comments.put("rejectStructuresInCityChunks", "Prevent vanilla and modded StructureStart structures from starting in or intersecting Lost Cities chunks.");
+        comments.put("enableAutomaticChunkScans", "Scan every loaded chunk for legacy floating/double-block cleanup. Expensive in large modpacks and disabled by default; use /lc2h cleanup chunk for targeted repair.");
+        comments.put("rejectStructuresInCityChunks", "Legacy broad structure toggle. LC2H always keeps the complete-start collision guard active so vanilla and modded structures cannot be cut by city boundaries.");
         comments.put("cityStructureRejectionBufferChunks", "Extra non-city chunk ring kept clear around cities when rejecting structures (0-4).");
         comments.put("cityVerticalTerrainClearance", "Retired compatibility field. LC2H always preserves native Lost Cities terrain shaping.");
         comments.put("enableLostCitiesGenerationLock", "Recommended: serialize nearby Lost Cities chunk-gen to avoid bugged/duplicated chunks (may reduce max throughput)");
@@ -359,9 +354,8 @@ public class ConfigManager {
         ENABLE_AUTOMATIC_CHUNK_SCANS = CONFIG.enableAutomaticChunkScans;
         REJECT_STRUCTURES_IN_CITY_CHUNKS = CONFIG.rejectStructuresInCityChunks;
         CITY_STRUCTURE_REJECTION_BUFFER_CHUNKS = Math.max(0, Math.min(4, CONFIG.cityStructureRejectionBufferChunks));
-        // Do not clear terrain above city ground. Lost Cities' own terrain
-        // correction is height-aware and is the authoritative hill/highway
-        // shaping path. Retain the JSON field only for migration.
+        // Do not clear terrain above the city floor. Lost Cities owns the height-aware
+        // hill and highway pass. Keep this field only for migration.
         CITY_VERTICAL_TERRAIN_CLEARANCE = false;
         ENABLE_LOSTCITIES_GENERATION_LOCK = CONFIG.enableLostCitiesGenerationLock;
         ENABLE_LOSTCITIES_PART_SLICE_COMPAT = CONFIG.enableLostCitiesPartSliceCompat;

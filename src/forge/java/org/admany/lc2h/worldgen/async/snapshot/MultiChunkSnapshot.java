@@ -9,6 +9,7 @@ import net.minecraft.world.level.Level;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.lc2h.mixin.accessor.lostcities.MultiChunkAccessor;
+import org.admany.lc2h.util.ResourceLocations;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -86,7 +87,7 @@ public final class MultiChunkSnapshot {
                 return null;
             }
             String dimensionId = data.readUTF();
-            ResourceLocation dimensionLocation = ResourceLocation.tryParse(dimensionId);
+            ResourceLocation dimensionLocation = ResourceLocations.tryParse(dimensionId);
             ResourceKey<Level> dimension = dimensionLocation == null
                 ? Level.OVERWORLD
                 : ResourceKey.create(Registries.DIMENSION, dimensionLocation);

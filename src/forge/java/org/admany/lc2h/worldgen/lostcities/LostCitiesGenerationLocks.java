@@ -6,6 +6,8 @@ import net.minecraft.world.level.Level;
 
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 
 public final class LostCitiesGenerationLocks {
@@ -18,6 +20,8 @@ public final class LostCitiesGenerationLocks {
     private static final LongAdder CONTENTIONS = new LongAdder();
     private static final LongAdder WAIT_NS = new LongAdder();
     private static final LongAdder HOLD_NS = new LongAdder();
+    private static final AtomicInteger ACTIVE_HOLDERS = new AtomicInteger();
+    private static final AtomicLong LAST_ACTIVITY_NANOS = new AtomicLong(System.nanoTime());
     private static final Lc2hTimingRegistry.TimingHandle WAIT_TIMING = Lc2hTimingRegistry.bucket("lostcities.generation_lock_wait");
     private static final Lc2hTimingRegistry.TimingHandle HOLD_TIMING = Lc2hTimingRegistry.bucket("lostcities.generation_lock_hold");
 
@@ -41,7 +45,12 @@ public final class LostCitiesGenerationLocks {
                 try {
                     recordHold(System.nanoTime() - holdStartNs);
                 } finally {
-                    lock.unlock();
+                    try {
+                        lock.unlock();
+                    } finally {
+                        ACTIVE_HOLDERS.decrementAndGet();
+                        LAST_ACTIVITY_NANOS.set(System.nanoTime());
+                    }
                 }
             }
         }
@@ -68,13 +77,20 @@ public final class LostCitiesGenerationLocks {
         ReentrantLock lock = LOCKS[h & (STRIPES - 1)];
 
         long holdStartNs = acquire(lock);
+        ACTIVE_HOLDERS.incrementAndGet();
+        LAST_ACTIVITY_NANOS.set(System.nanoTime());
         try {
             action.run();
         } finally {
             try {
                 recordHold(System.nanoTime() - holdStartNs);
             } finally {
-                lock.unlock();
+                try {
+                    lock.unlock();
+                } finally {
+                    ACTIVE_HOLDERS.decrementAndGet();
+                    LAST_ACTIVITY_NANOS.set(System.nanoTime());
+                }
             }
         }
     }
@@ -90,7 +106,17 @@ public final class LostCitiesGenerationLocks {
         int h = mix(dimHash ^ (gx * 73471) ^ (gz * 91283));
         ReentrantLock lock = LOCKS[h & (STRIPES - 1)];
         acquire(lock);
+        ACTIVE_HOLDERS.incrementAndGet();
+        LAST_ACTIVITY_NANOS.set(System.nanoTime());
         return new LockToken(lock, true);
+    }
+
+    public static int activeHolders() {
+        return ACTIVE_HOLDERS.get();
+    }
+
+    public static long nanosSinceActivity() {
+        return Math.max(0L, System.nanoTime() - LAST_ACTIVITY_NANOS.get());
     }
 
     private static long acquire(ReentrantLock lock) {
@@ -120,6 +146,7 @@ public final class LostCitiesGenerationLocks {
             + " stripes=" + STRIPES
             + " shift=" + SHIFT
             + " acquisitions=" + acquisitions
+            + " active=" + ACTIVE_HOLDERS.get()
             + " contended=" + CONTENTIONS.sum()
             + " avgWaitUs=" + formatMicros(WAIT_NS.sum(), acquisitions)
             + " avgHoldMs=" + formatMillis(HOLD_NS.sum(), acquisitions);

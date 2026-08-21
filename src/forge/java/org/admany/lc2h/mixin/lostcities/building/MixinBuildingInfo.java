@@ -26,10 +26,12 @@ import net.minecraft.world.level.WorldGenLevel;
 import org.admany.lc2h.data.cache.LostCitiesCacheBridge;
 import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
 import org.admany.lc2h.data.cache.BuildingInfoCacheScope;
+import org.admany.lc2h.data.cache.BuildingInfoCacheRegistry;
 import org.admany.lc2h.dev.diagnostics.BuildingInfoDiagnostics;
 import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
-import org.admany.lc2h.worldgen.MountainCityReservationPlanner;
+import org.admany.lc2h.worldgen.terrain.MountainCityReservationPlanner;
 import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
+import org.admany.lc2h.worldgen.lostcities.MultiBuildingFootprintRegistry;
 import org.admany.lc2h.worldgen.lostcities.MultiChunkBoundaryRegistry;
 import org.admany.lc2h.worldgen.lostcities.PlannerHotPath;
 import org.objectweb.asm.Opcodes;
@@ -43,21 +45,21 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
 
 import java.util.Random;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CompletableFuture;
 
 @Mixin(value = BuildingInfo.class, remap = false)
 public abstract class MixinBuildingInfo {
 
     private static final ConcurrentMap<String, Integer> LC2H_CITY_REGION_LEVEL_CACHE = new ConcurrentHashMap<>();
     private static final ThreadLocal<Boolean> LC2H_CITY_RAW_COMPUTE_FLAG = ThreadLocal.withInitial(() -> Boolean.FALSE);
-    // Every world/provider gets an isolated cache. ChunkCoord contains a dimension,
-    // but not a seed, datapack epoch, or server lifecycle identity, so a single
-    // global map can leak data between worlds that reuse the same coordinates.
-    private static final ConcurrentMap<IDimensionInfo, BuildingInfoCacheScope> LC2H_SCOPES = new ConcurrentHashMap<>();
-    private static final BuildingInfoCacheScope LC2H_FALLBACK_SCOPE = new BuildingInfoCacheScope();
+    private static final ThreadLocal<Set<ChunkCoord>> LC2H_CHARACTERISTIC_OWNERS =
+        ThreadLocal.withInitial(HashSet::new);
     @Unique
     private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_CITY_INFO_BUDGET =
         LostCitiesCacheBudgetManager.register("lc_city_info", 256, 256, MixinBuildingInfo::lc2h$evictCityInfo);
@@ -96,7 +98,7 @@ public abstract class MixinBuildingInfo {
 
     @Unique
     private static BuildingInfoCacheScope lc2h$scope(IDimensionInfo provider) {
-        return provider == null ? LC2H_FALLBACK_SCOPE : LC2H_SCOPES.computeIfAbsent(provider, ignored -> new BuildingInfoCacheScope());
+        return BuildingInfoCacheRegistry.scope(provider);
     }
 
     @Unique
@@ -104,8 +106,7 @@ public abstract class MixinBuildingInfo {
         if (!(key instanceof ChunkCoord coord)) {
             return false;
         }
-        boolean evicted = LC2H_FALLBACK_SCOPE.cityInfo.remove(coord) != null;
-        return LC2H_SCOPES.values().stream().map(scope -> scope.cityInfo.remove(coord)).anyMatch(Objects::nonNull) || evicted;
+        return BuildingInfoCacheRegistry.evictCityInfo(coord);
     }
 
     @Unique
@@ -113,8 +114,7 @@ public abstract class MixinBuildingInfo {
         if (!(key instanceof ChunkCoord coord)) {
             return false;
         }
-        boolean evicted = LC2H_FALLBACK_SCOPE.buildingInfo.remove(coord) != null;
-        return LC2H_SCOPES.values().stream().map(scope -> scope.buildingInfo.remove(coord)).anyMatch(Objects::nonNull) || evicted;
+        return BuildingInfoCacheRegistry.evictBuildingInfo(coord);
     }
 
     @Unique
@@ -122,8 +122,7 @@ public abstract class MixinBuildingInfo {
         if (!(key instanceof ChunkCoord coord)) {
             return false;
         }
-        boolean evicted = LC2H_FALLBACK_SCOPE.cityLevel.remove(coord) != null;
-        return LC2H_SCOPES.values().stream().map(scope -> scope.cityLevel.remove(coord)).anyMatch(Objects::nonNull) || evicted;
+        return BuildingInfoCacheRegistry.evictCityLevel(coord);
     }
 
     @Unique
@@ -131,8 +130,7 @@ public abstract class MixinBuildingInfo {
         if (!(key instanceof ChunkCoord coord)) {
             return false;
         }
-        boolean evicted = LC2H_FALLBACK_SCOPE.cityRaw.remove(coord) != null;
-        return LC2H_SCOPES.values().stream().map(scope -> scope.cityRaw.remove(coord)).anyMatch(Objects::nonNull) || evicted;
+        return BuildingInfoCacheRegistry.evictCityRaw(coord);
     }
 
     @Unique
@@ -140,8 +138,7 @@ public abstract class MixinBuildingInfo {
         if (!(key instanceof ChunkCoord coord)) {
             return false;
         }
-        boolean evicted = LC2H_FALLBACK_SCOPE.highway.remove(coord) != null;
-        return LC2H_SCOPES.values().stream().map(scope -> scope.highway.remove(coord)).anyMatch(Objects::nonNull) || evicted;
+        return BuildingInfoCacheRegistry.evictHighway(coord);
     }
 
     @Unique
@@ -149,8 +146,7 @@ public abstract class MixinBuildingInfo {
         if (!(key instanceof ChunkCoord coord)) {
             return false;
         }
-        boolean evicted = LC2H_FALLBACK_SCOPE.multiHeightStats.remove(coord) != null;
-        return LC2H_SCOPES.values().stream().map(scope -> scope.multiHeightStats.remove(coord)).anyMatch(Objects::nonNull) || evicted;
+        return BuildingInfoCacheRegistry.evictMultiHeightStats(coord);
     }
 
     @Unique
@@ -158,8 +154,7 @@ public abstract class MixinBuildingInfo {
         if (!(key instanceof Map.Entry<?, ?> entry)) {
             return false;
         }
-        boolean evicted = LC2H_FALLBACK_SCOPE.multiBoundary.remove(entry) != null;
-        return LC2H_SCOPES.values().stream().map(scope -> scope.multiBoundary.remove(entry)).anyMatch(Objects::nonNull) || evicted;
+        return BuildingInfoCacheRegistry.evictMultiBoundary(entry);
     }
 
     @Unique
@@ -178,12 +173,7 @@ public abstract class MixinBuildingInfo {
     @Shadow public int cellars;
     @Shadow public int cityLevel;
 
-    /**
-     * This is a Lost Cities bugfix. Some CityStyles specify a minimum cellar count, and vanilla Lost Cities can apply that after clamping to a building's maxcellars, effectively overriding the building constraint. This causes buildings with maxcellars=0 to still generate cellars, leading to crashes when selecting cellar parts since none exist. We ensure building maxcellars is always respected over CityStyle minimum cellars.
-     *
-     * @author Admany
-     * @reason Ensure building maxcellars is always respected over CityStyle min cellars.
-     */
+/** Keeps a building's cellar cap ahead of the CityStyle minimum. */
     @Overwrite
     private int getMaxcellars(EffectiveCitySettings cs) {
         int maxcellars = profile.BUILDING_MAXCELLARS + cityLevel;
@@ -206,7 +196,7 @@ public abstract class MixinBuildingInfo {
             return buildingType.getMinCellars();
         }
 
-        // Apply CityStyle constraints first...
+        // Apply CityStyle constraints first.
         if (cs.maxCellarConstraint() != null) {
             maxcellars = Math.min(maxcellars, cs.maxCellarConstraint());
         }
@@ -214,7 +204,7 @@ public abstract class MixinBuildingInfo {
             maxcellars = Math.max(maxcellars, cs.minCellarConstraint());
         }
 
-        // ...then clamp to building constraints last so buildings can't be forced into impossible cellars.
+        // Clamp to building constraints last so cellars stay valid.
         if (buildingType.getMaxCellars() != -1) {
             maxcellars = Math.min(maxcellars, buildingType.getMaxCellars());
         }
@@ -225,12 +215,7 @@ public abstract class MixinBuildingInfo {
         return maxcellars;
     }
 
-    /**
-     * This is a Lost Cities bugfix. We ensure building floor constraints are always respected, even when the pack does not set overrideFloors=true. This prevents short buildings and their parts2 decorations from being forced up to the profile minimum floors.
-     *
-     * @author Admany
-     * @reason Respect building min floors regardless of overrideFloors to avoid mis-sized builds.
-     */
+/** Keeps the building minimum floor count even when overrideFloors is false. */
     @Overwrite
     private int getMinfloors(EffectiveCitySettings cs) {
         int minfloors = profile.BUILDING_MINFLOORS + 1;
@@ -252,12 +237,7 @@ public abstract class MixinBuildingInfo {
         return minfloors;
     }
 
-    /**
-     * This is a Lost Cities bugfix. We ensure building floor constraints are always respected, even when overrideFloors is false.
-     *
-     * @author Admany
-     * @reason Respect building max floors regardless of overrideFloors to avoid mis-sized builds.
-     */
+/** Keeps the building maximum floor count even when overrideFloors is false. */
     @Overwrite
     private int getMaxfloors(EffectiveCitySettings cs) {
         int maxfloors = profile.BUILDING_MAXFLOORS;
@@ -912,12 +892,7 @@ public abstract class MixinBuildingInfo {
         return cacheName + '|' + dimension + '|' + profileName + '|' + seed + '|' + coord;
     }
 
-    /**
-     * This removes global sync and uses a concurrent cache for GUI characteristics.
-     *
-     * @author Admany
-     * @reason Make cache concurrent and non blocking
-     */
+    /** Uses the concurrent GUI characteristics cache without a global lock. */
     @Overwrite
     public static LostChunkCharacteristics getChunkCharacteristicsGui(ChunkCoord key, IDimensionInfo provider) {
         BuildingInfoCacheScope scope = lc2h$scope(provider);
@@ -959,25 +934,72 @@ public abstract class MixinBuildingInfo {
         return lc2h$rememberCharacteristics(key, characteristics);
     }
 
-    /**
-     * This removes global sync and uses a concurrent cache for characteristics.
-     *
-     * @author Admany
-     * @reason Make cache concurrent and non blocking
-     */
+    /** Publishes one cold characteristic computation to every racing caller. */
     @Overwrite
     public static LostChunkCharacteristics getChunkCharacteristics(ChunkCoord coord, IDimensionInfo provider) {
+        if (coord == null || provider == null) {
+            return lc2h$computeChunkCharacteristics(coord, provider);
+        }
+        BuildingInfoCacheScope scope = lc2h$scope(provider);
+        LostChunkCharacteristics cached = scope.cityInfo.get(coord);
+        if (cached != null && MultiBuildingFootprintRegistry.matches(provider, coord, cached)) {
+            BuildingInfoDiagnostics.recordCharacteristicsMemoryHit();
+            LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_INFO_BUDGET, coord);
+            return lc2h$rememberCharacteristics(coord, cached);
+        }
+
+        Set<ChunkCoord> owners = LC2H_CHARACTERISTIC_OWNERS.get();
+        if (owners.contains(coord)) {
+            return lc2h$computeChunkCharacteristics(coord, provider);
+        }
+        CompletableFuture<LostChunkCharacteristics> created = new CompletableFuture<>();
+        CompletableFuture<LostChunkCharacteristics> existing = scope.characteristicFlights.putIfAbsent(coord, created);
+        if (existing != null) {
+            try {
+                return existing.join();
+            } catch (java.util.concurrent.CompletionException failure) {
+                Throwable cause = failure.getCause();
+                if (cause instanceof RuntimeException runtime) {
+                    throw runtime;
+                }
+                if (cause instanceof Error error) {
+                    throw error;
+                }
+                throw failure;
+            }
+        }
+
+        owners.add(coord);
+        try {
+            LostChunkCharacteristics result = lc2h$computeChunkCharacteristics(coord, provider);
+            created.complete(result);
+            return result;
+        } catch (Throwable failure) {
+            created.completeExceptionally(failure);
+            throw failure;
+        } finally {
+            owners.remove(coord);
+            scope.characteristicFlights.remove(coord, created);
+        }
+    }
+
+    private static LostChunkCharacteristics lc2h$computeChunkCharacteristics(ChunkCoord coord, IDimensionInfo provider) {
         AsyncMultiChunkPlanner.ensureIntegrated(provider, coord);
         BuildingInfoCacheScope scope = lc2h$scope(provider);
 
         LostChunkCharacteristics cached = scope.cityInfo.get(coord);
         if (cached != null) {
-            BuildingInfoDiagnostics.recordCharacteristicsMemoryHit();
-            LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_INFO_BUDGET, coord);
-            return lc2h$rememberCharacteristics(coord, cached);
+            if (MultiBuildingFootprintRegistry.matches(provider, coord, cached)) {
+                BuildingInfoDiagnostics.recordCharacteristicsMemoryHit();
+                LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_INFO_BUDGET, coord);
+                return lc2h$rememberCharacteristics(coord, cached);
+            }
+            scope.cityInfo.remove(coord, cached);
+            scope.buildingInfo.remove(coord);
+            ChunkRoleProbe.invalidate(coord);
         }
         LostChunkCharacteristics snapshot = ChunkRoleProbe.peekCharacteristics(coord);
-        if (snapshot != null) {
+        if (snapshot != null && MultiBuildingFootprintRegistry.matches(provider, coord, snapshot)) {
             BuildingInfoDiagnostics.recordCharacteristicsSnapshotHit();
             LostChunkCharacteristics prev = scope.cityInfo.putIfAbsent(coord, snapshot);
             LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, coord, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
@@ -989,7 +1011,7 @@ public abstract class MixinBuildingInfo {
         String cityInfoDiskKey = scopedCacheKey(LC2H_CITY_INFO_DISK_NAMESPACE, coord, provider, profile);
         if (!PlannerHotPath.isActive()) {
             LostChunkCharacteristics disk = LostCitiesCacheBridge.getDisk(LC2H_CITY_INFO_DISK_NAMESPACE, cityInfoDiskKey, LostChunkCharacteristics.class);
-            if (disk != null) {
+            if (disk != null && MultiBuildingFootprintRegistry.matches(provider, coord, disk)) {
                 BuildingInfoDiagnostics.recordCharacteristicsDiskHit();
                 LostChunkCharacteristics prev = scope.cityInfo.putIfAbsent(coord, disk);
                 LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, coord, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
@@ -1013,6 +1035,7 @@ public abstract class MixinBuildingInfo {
                 characteristics.multiBuildingId = null;
             }
         }
+        MultiBuildingFootprintRegistry.enforce(provider, coord, characteristics);
 
         if (characteristics.multiPos.isSingle()) {
             characteristics.cityLevel = getCityLevel(coord, provider);
@@ -1070,13 +1093,13 @@ public abstract class MixinBuildingInfo {
             PredefinedBuilding predefinedBuilding = City.getPredefinedBuildingAtTopLeft(world, coord);
             if (characteristics.multiPos.isTopLeft()) {
                 if (characteristics.multiBuilding != null) {
-                    // Respect the multichunk plan; don't re-roll a different multi building.
+                    // Respect the multichunk plan. Do not roll a different building.
                     String b = characteristics.multiBuilding.getBuilding(0, 0);
                     characteristics.buildingType = resolveBuildingWithFallback(world, b);
                 } else if (predefinedBuilding != null && predefinedBuilding.multi()) {
                     characteristics.multiBuilding = AssetRegistries.MULTI_BUILDINGS.getOrWarn(world, predefinedBuilding.building());
                     if (characteristics.multiBuilding == null) {
-                        // Multi-building definition is missing; fall back to single-building selection.
+                        // No multibuilding definition. Use a single building.
                         String fallbackName = City.getCityStyle(coord, provider, profile).getRandomBuilding(rand, coord);
                         characteristics.buildingType = fallbackName != null ? resolveBuildingWithFallback(world, fallbackName) : null;
                         LostChunkCharacteristics prev = scope.cityInfo.putIfAbsent(coord, characteristics);
@@ -1103,7 +1126,7 @@ public abstract class MixinBuildingInfo {
                     } else {
                         characteristics.multiBuilding = AssetRegistries.MULTI_BUILDINGS.getOrWarn(world, name);
                         if (characteristics.multiBuilding == null) {
-                            // Multi-building definition is missing; treat this as a single-building chunk.
+                            // No multibuilding definition. Treat this as a single chunk.
                             String buildingName = cityStyle.getRandomBuilding(rand, coord);
                             characteristics.buildingType = buildingName != null ? resolveBuildingWithFallback(world, buildingName) : null;
                             LostChunkCharacteristics prev = scope.cityInfo.putIfAbsent(coord, characteristics);
@@ -1143,11 +1166,16 @@ public abstract class MixinBuildingInfo {
         }
 
         LostChunkCharacteristics prev = scope.cityInfo.putIfAbsent(coord, characteristics);
+        if (prev != null && !MultiBuildingFootprintRegistry.matches(provider, coord, prev)) {
+            scope.cityInfo.replace(coord, prev, characteristics);
+            scope.buildingInfo.remove(coord);
+            prev = characteristics;
+        }
         LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_INFO_BUDGET, coord, LC2H_CITY_INFO_BUDGET.defaultEntryBytes(), prev == null);
         if (!PlannerHotPath.isActive()) {
             LostCitiesCacheBridge.putDisk(LC2H_CITY_INFO_DISK_NAMESPACE, cityInfoDiskKey, characteristics);
         }
-        return lc2h$rememberCharacteristics(coord, characteristics);
+        return lc2h$rememberCharacteristics(coord, prev != null ? prev : characteristics);
     }
 
     private static Building resolveBuildingWithFallback(CommonLevelAccessor world, String name) {
@@ -1223,12 +1251,7 @@ public abstract class MixinBuildingInfo {
         return result;
     }
 
-    /**
-     * This removes global sync and uses a concurrent cache for building info.
-     *
-     * @author Admany
-     * @reason Make cache concurrent and non blocking
-     */
+    /** Uses the concurrent building cache without a global lock. */
     @Overwrite
     public static BuildingInfo getBuildingInfo(ChunkCoord key, IDimensionInfo provider) {
         AsyncMultiChunkPlanner.ensureIntegrated(provider, key);
@@ -1241,8 +1264,8 @@ public abstract class MixinBuildingInfo {
             return cached;
         }
 
-        // BuildingInfo construction touches shared registries/caches; serialize by chunk key
-        // to avoid global contention and fork-join managedBlock explosions.
+        // BuildingInfo touches shared registries and caches. Serialize by chunk key
+        // instead of blocking the whole fork join pool.
         Object lock = scope.buildingLocks.computeIfAbsent(key, k -> new Object());
         long lockWaitStartNs = System.nanoTime();
         synchronized (lock) {
@@ -1283,12 +1306,7 @@ public abstract class MixinBuildingInfo {
         }
     }
 
-    /**
-     * This removes global sync and uses a concurrent cache for city level.
-     *
-     * @author Admany
-     * @reason Make cache concurrent and non blocking
-     */
+    /** Uses the concurrent city-level cache without a global lock. */
     @Overwrite
     public static int getCityLevel(ChunkCoord key, IDimensionInfo provider) {
         BuildingInfoCacheScope scope = lc2h$scope(provider);
@@ -1327,17 +1345,10 @@ public abstract class MixinBuildingInfo {
         return prev != null ? prev : result;
     }
 
-    /**
-     * This clears the concurrent caches.
-     *
-     * @author Admany
-     * @reason Make cache concurrent and non blocking
-     */
+    /** Clears the concurrent caches at the lifecycle boundary. */
     @Overwrite
     public static void cleanCache() {
-        LC2H_FALLBACK_SCOPE.clear();
-        LC2H_SCOPES.values().forEach(BuildingInfoCacheScope::clear);
-        LC2H_SCOPES.clear();
+        BuildingInfoCacheRegistry.clear();
         LC2H_CITY_REGION_LEVEL_CACHE.clear();
         ChunkRoleProbe.clear();
         MountainCityReservationPlanner.clear();
@@ -1366,8 +1377,15 @@ public abstract class MixinBuildingInfo {
             LC2H_CITY_RAW_COMPUTE_FLAG.set(Boolean.FALSE);
             BuildingInfoDiagnostics.recordCityRawMemoryHit();
             LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_RAW_BUDGET, coord);
+            // isCityRaw is called by Minecraft's structure placement hot path.
+            // Never build or join a cold mountain reservation region here: the
+            // planner samples vanilla density and joining it can park every
+            // worldgen worker behind one expensive height scan.  A published
+            // reservation is enough to apply the exact override; otherwise
+            // retain Lost Cities' cached city fact and let the normal terrain
+            // pipeline publish the reservation asynchronously.
             cir.setReturnValue(cached
-                && !MountainCityReservationPlanner.removesBuildingCell(provider, coord, profile));
+                && !MountainCityReservationPlanner.peekRemovesBuildingCell(provider, coord, profile));
             return;
         }
         if (!PlannerHotPath.isActive()) {
@@ -1377,7 +1395,7 @@ public abstract class MixinBuildingInfo {
                 LC2H_CITY_RAW_COMPUTE_FLAG.set(Boolean.FALSE);
                 BuildingInfoDiagnostics.recordCityRawDiskHit();
                 boolean effectiveCity = disk
-                    && !MountainCityReservationPlanner.removesBuildingCell(provider, coord, profile);
+                    && !MountainCityReservationPlanner.peekRemovesBuildingCell(provider, coord, profile);
                 Boolean prev = scope.cityRaw.putIfAbsent(coord, effectiveCity);
                 LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_RAW_BUDGET, coord, LC2H_CITY_RAW_BUDGET.defaultEntryBytes(), prev == null);
                 cir.setReturnValue(prev != null ? prev : effectiveCity);
@@ -1407,7 +1425,7 @@ public abstract class MixinBuildingInfo {
         }
         LC2H_CITY_RAW_COMPUTE_FLAG.set(Boolean.FALSE);
         boolean effectiveCity = cir.getReturnValue();
-        if (effectiveCity && MountainCityReservationPlanner.removesBuildingCell(provider, coord, profile)) {
+        if (effectiveCity && MountainCityReservationPlanner.peekRemovesBuildingCell(provider, coord, profile)) {
             effectiveCity = false;
             cir.setReturnValue(false);
         }

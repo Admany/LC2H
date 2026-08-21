@@ -29,6 +29,15 @@ final class ShadowMutationFinalizer {
 
     private static final int MAX_PLAN_RETRIES = Math.max(1, Integer.getInteger("lc2h.shadowApply.max_plan_retries", 6));
     private static final long MAX_PLAN_AGE_MS = Math.max(5_000L, Long.getLong("lc2h.shadowApply.max_plan_age_ms", 120_000L));
+    /* Neighbor propagation can resolve adjacent chunks through ServerLevel.
+     * Keep the replay path local by default.  Set this property only when a
+     * pack explicitly needs vanilla neighbor notifications during replay. */
+    private static final boolean ENABLE_NEIGHBOR_UPDATES = Boolean.parseBoolean(
+        System.getProperty("lc2h.shadowApply.neighborUpdates", "false"));
+
+    static boolean neighborUpdatesEnabled() {
+        return ENABLE_NEIGHBOR_UPDATES;
+    }
 
     private ShadowMutationFinalizer() {
     }
@@ -277,7 +286,12 @@ final class ShadowMutationFinalizer {
             clearExistingBlockEntity(level, chunk, pos);
             boolean changed = level.setBlock(pos, entry.state(), flags);
             if (!entry.state().hasBlockEntity()) {
-                level.removeBlockEntity(pos);
+                // We already have the destination chunk pinned above.  Calling
+                // ServerLevel.removeBlockEntity here re-enters Level's neighbour
+                // update path, which can call getBlockState on an adjacent chunk
+                // and make the server thread wait for worldgen.  Remove the
+                // pending entity directly from the loaded chunk instead.
+                chunk.removeBlockEntity(pos);
             }
             BlockState actualState = getLoadedChunk(level, pos) == null ? null : getLoadedChunk(level, pos).getBlockState(pos);
             if (actualState == null) {
@@ -296,7 +310,7 @@ final class ShadowMutationFinalizer {
             if (!entry.state().equals(actualState)) {
                 return ApplyOutcome.rejected("post_apply_mismatch", actualState);
             }
-            if (entry.state().hasBlockEntity() && level.getBlockEntity(pos) == null && entry.state().getBlock() instanceof EntityBlock entityBlock) {
+            if (entry.state().hasBlockEntity() && chunk.getBlockEntity(pos) == null && entry.state().getBlock() instanceof EntityBlock entityBlock) {
                 BlockEntity created = entityBlock.newBlockEntity(pos, entry.state());
                 if (created != null) {
                     chunk.setBlockEntity(created);
@@ -317,7 +331,9 @@ final class ShadowMutationFinalizer {
             return;
         }
         try {
-            level.removeBlockEntity(pos);
+            // The chunk is known to be loaded.  Keep this cleanup local and
+            // non-blocking rather than asking ServerLevel to resolve neighbours.
+            chunk.removeBlockEntity(pos);
         } catch (Throwable ignored) {
         }
     }
@@ -350,7 +366,13 @@ final class ShadowMutationFinalizer {
     }
 
     private static int normalizeAttachmentFlags(int flags) {
-        return (flags | Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE) & ~Block.UPDATE_INVISIBLE;
+        // Attachments are replayed only after their destination chunk is
+        // loaded.  Neighbour propagation is not required for the placement
+        // itself and can synchronously resolve an adjacent chunk through
+        // ServerLevel, which is exactly the server-thread stall this queue is
+        // meant to avoid.
+        return (flags | Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE)
+            & ~(Block.UPDATE_NEIGHBORS | Block.UPDATE_INVISIBLE);
     }
 
     private static int normalizeApplyFlags(int flags, BlockState state, boolean capturedTreePlacement) {
@@ -360,12 +382,17 @@ final class ShadowMutationFinalizer {
             // BOP tree synchronously walk Minecraft's neighbour updater, which
             // can request chunks and stall the integrated server for seconds.
             // Support-sensitive decorations are validated above and get the
-            // known-shape flag; logs/leaves need neither a redstone cascade nor
+            // known-shape flag. Logs and leaves need neither a redstone cascade nor
             // a cross-chunk update while being restored.
             return (flags | Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE)
                 & ~(Block.UPDATE_NEIGHBORS | Block.UPDATE_INVISIBLE);
         }
-        int normalized = flags | Block.UPDATE_CLIENTS | Block.UPDATE_NEIGHBORS;
+        int normalized = flags | Block.UPDATE_CLIENTS;
+        if (ENABLE_NEIGHBOR_UPDATES) {
+            normalized |= Block.UPDATE_NEIGHBORS;
+        } else {
+            normalized &= ~Block.UPDATE_NEIGHBORS;
+        }
         if (state != null && (state.getBlock() instanceof LiquidBlock || !state.getFluidState().isEmpty())) {
             normalized |= Block.UPDATE_KNOWN_SHAPE;
         }

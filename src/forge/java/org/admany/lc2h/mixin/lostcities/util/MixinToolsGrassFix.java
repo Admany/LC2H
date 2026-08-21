@@ -9,6 +9,8 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraftforge.registries.ForgeRegistries;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraftforge.server.ServerLifecycleHooks;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -17,6 +19,14 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(Tools.class)
 public class MixinToolsGrassFix {
+
+    private static BlockState lc2h$grassState() {
+        net.minecraft.world.level.block.Block block = ForgeRegistries.BLOCKS.getValue(new ResourceLocation("minecraft", "grass"));
+        if (block == null || block == Blocks.AIR) {
+            block = ForgeRegistries.BLOCKS.getValue(new ResourceLocation("minecraft", "short_grass"));
+        }
+        return (block == null ? Blocks.TALL_GRASS : block).defaultBlockState();
+    }
 
     private static final java.util.concurrent.atomic.AtomicReference<java.lang.reflect.Field> BUILTIN_BLOCK_REGISTRY_FIELD =
         new java.util.concurrent.atomic.AtomicReference<>();
@@ -42,7 +52,7 @@ public class MixinToolsGrassFix {
         }
 
         if ("grass".equals(s) || "minecraft:grass".equals(s)) {
-            cir.setReturnValue(Blocks.GRASS.defaultBlockState());
+            cir.setReturnValue(lc2h$grassState());
         }
 
         if (!s.contains("[")) {

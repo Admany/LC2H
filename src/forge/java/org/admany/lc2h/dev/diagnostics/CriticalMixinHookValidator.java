@@ -22,6 +22,9 @@ public final class CriticalMixinHookValidator {
     public static final String LOST_CITY_FEATURE_GENERATE_REDIRECT = "lostcity_feature.terrain_generate.redirect";
     public static final String LOST_CITY_FEATURE_PLACE_RETURN = "lostcity_feature.place.return";
     public static final String LOST_CITY_SPHERE_PLACE_HEAD = "lostcity_sphere_feature.place.head";
+    public static final String CHUNK_GENERATOR_STRUCTURE_GUARD = "minecraft.chunk_generator.structure_guard";
+    public static final String STRUCTURE_START_CITY_GUARD = "minecraft.structure_start.city_guard";
+    public static final String DAMAGE_AREA_DISABLE = "lostcities.damage_area.disable";
 
     private static final long WARN_DELAY_MS = Math.max(10_000L,
         Long.getLong("lc2h.criticalHooks.warnDelayMs", 45_000L));
@@ -51,6 +54,15 @@ public final class CriticalMixinHookValidator {
         register(LOST_CITY_SPHERE_PLACE_HEAD,
             "MixinLostCitySphereFeature#lc2h$warmupSphere",
             "mcjty.lostcities.worldgen.LostCitySphereFeature#place(FeaturePlaceContext) HEAD");
+        register(CHUNK_GENERATOR_STRUCTURE_GUARD,
+            "MixinChunkGeneratorSkipStructures#lc2h$skipStructuresInCityChunks",
+            "net.minecraft.world.level.chunk.ChunkGenerator#createStructures(...) HEAD");
+        register(STRUCTURE_START_CITY_GUARD,
+            "MixinStructureStartCityUndergroundGuard#lc2h$skipStructuresNearCityGround",
+            "net.minecraft.world.level.levelgen.structure.StructureStart#placeInChunk(...) HEAD");
+        register(DAMAGE_AREA_DISABLE,
+            "MixinDamageAreaDisable",
+            "mcjty.lostcities.worldgen.lost.DamageArea damage query HEAD");
         verifyKnownTargets();
     }
 
@@ -133,7 +145,46 @@ public final class CriticalMixinHookValidator {
         verifyMethod(LOST_CITY_FEATURE_TERRAIN_PATH, "mcjty.lostcities.worldgen.LostCityFeature");
         verifyMethod(LOST_CITY_FEATURE_PLACE_RETURN, "mcjty.lostcities.worldgen.LostCityFeature");
         verifyMethod(LOST_CITY_SPHERE_PLACE_HEAD, "mcjty.lostcities.worldgen.LostCitySphereFeature");
+        verifyNamedMethod(CHUNK_GENERATOR_STRUCTURE_GUARD,
+            "net.minecraft.world.level.chunk.ChunkGenerator", "createStructures", 5);
+        verifyNamedMethod(STRUCTURE_START_CITY_GUARD,
+            "net.minecraft.world.level.levelgen.structure.StructureStart", "placeInChunk", 6);
+        verifyNamedMethod(DAMAGE_AREA_DISABLE,
+            "mcjty.lostcities.worldgen.lost.DamageArea", "hasExplosions", 0);
         verifyGenerateRedirectTarget();
+    }
+
+    private static void verifyNamedMethod(String id, String className, String methodName, int parameterCount) {
+        HookRecord record = HOOKS.get(id);
+        if (record == null) {
+            return;
+        }
+        try {
+            Class<?> target = Class.forName(className, false, CriticalMixinHookValidator.class.getClassLoader());
+            Method match = null;
+            for (Method method : target.getDeclaredMethods()) {
+                if (isNamedTarget(method, methodName) && method.getParameterCount() == parameterCount) {
+                    match = method;
+                    break;
+                }
+            }
+            if (match == null) {
+                record.markFailed("target method lookup returned null");
+            } else {
+                record.markVerified("resolved " + target.getName() + "#" + match.getName());
+            }
+        } catch (Throwable t) {
+            record.markFailed(t.getClass().getSimpleName() + ": " + t.getMessage());
+        }
+    }
+
+    /** Accept mapped and runtime names in hook diagnostics. */
+    private static boolean isNamedTarget(Method method, String mappedName) {
+        if (method.getName().equals(mappedName)) {
+            return true;
+        }
+        return ("createStructures".equals(mappedName) && "m_255037_".equals(method.getName()))
+            || ("placeInChunk".equals(mappedName) && "m_226850_".equals(method.getName()));
     }
 
     private static void verifyMethod(String id, String className) {

@@ -5,7 +5,7 @@ import net.minecraft.world.level.biome.Climate;
 import net.minecraft.world.level.levelgen.NoiseChunk;
 import net.minecraft.world.level.levelgen.NoiseRouter;
 import net.minecraft.world.level.levelgen.blending.Blender;
-import org.admany.lc2h.worldgen.CityDensityTransform;
+import org.admany.lc2h.worldgen.terrain.CityDensityTransform;
 import org.admany.lc2h.worldgen.terrain.ShiftedDensityFunction;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;

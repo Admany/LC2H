@@ -735,6 +735,7 @@ public final class ShadowBlockMutationApplier {
             + ", gravityOps=" + GRAVITY_OPERATIONS.get()
             + ", fluidOps=" + FLUID_OPERATIONS.get()
             + ", attachmentOps=" + ATTACHMENT_OPERATIONS.get()
+            + ", neighborUpdates=" + ShadowMutationFinalizer.neighborUpdatesEnabled()
             + ", tickets[acquired=" + TICKET_ACQUIRED.get()
             + ", released=" + TICKET_RELEASED.get()
             + ", acquireFail=" + TICKET_ACQUIRE_FAILURES.get()

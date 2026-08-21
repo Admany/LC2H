@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.io.Serializable;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class WorldGenScope {
     public static final int CACHE_SCHEMA_VERSION = 2;
@@ -19,6 +20,10 @@ public final class WorldGenScope {
     private static final AtomicLong NEXT_LIFECYCLE_ID = new AtomicLong();
     private static volatile long activeLifecycleId = NEXT_LIFECYCLE_ID.incrementAndGet();
     private static volatile String activeDiskScope = "inactive";
+    private static final ConcurrentHashMap<IDimensionInfo, CachedProviderScope> PROVIDER_SCOPES =
+        new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<CacheScope, String> SCOPE_TEXT =
+        new ConcurrentHashMap<>();
 
     private WorldGenScope() {
     }
@@ -27,6 +32,8 @@ public final class WorldGenScope {
         long id = NEXT_LIFECYCLE_ID.incrementAndGet();
         activeLifecycleId = id;
         activeDiskScope = computeServerDiskScope(server, id);
+        PROVIDER_SCOPES.clear();
+        SCOPE_TEXT.clear();
         return id;
     }
 
@@ -38,6 +45,8 @@ public final class WorldGenScope {
     public static void endServer() {
         activeLifecycleId = NEXT_LIFECYCLE_ID.incrementAndGet();
         activeDiskScope = "inactive-" + activeLifecycleId;
+        PROVIDER_SCOPES.clear();
+        SCOPE_TEXT.clear();
     }
 
     public static long activeLifecycleId() {
@@ -65,6 +74,13 @@ public final class WorldGenScope {
     }
 
     public static CacheScope cache(IDimensionInfo provider) {
+        long lifecycle = activeLifecycleId();
+        if (provider != null) {
+            CachedProviderScope cached = PROVIDER_SCOPES.get(provider);
+            if (cached != null && cached.lifecycleId == lifecycle) {
+                return cached.scope;
+            }
+        }
         ResourceKey<Level> dimension = null;
         long seed = 0L;
         LostCityProfile profile = null;
@@ -94,8 +110,8 @@ public final class WorldGenScope {
             } catch (Throwable ignored) {
             }
         }
-        return new CacheScope(
-            activeLifecycleId(),
+        CacheScope scope = new CacheScope(
+            lifecycle,
             seed,
             dimensionId(dimension),
             profileSignature(profile),
@@ -104,6 +120,18 @@ public final class WorldGenScope {
             "registryEpoch=runtime",
             CACHE_SCHEMA_VERSION
         );
+        if (provider != null) {
+            CachedProviderScope previous = PROVIDER_SCOPES.putIfAbsent(provider,
+                new CachedProviderScope(lifecycle, scope));
+            if (previous != null && previous.lifecycleId == lifecycle) {
+                return previous.scope;
+            }
+            if (previous != null) {
+                PROVIDER_SCOPES.replace(provider, previous,
+                    new CachedProviderScope(lifecycle, scope));
+            }
+        }
+        return scope;
     }
 
     public static String bridgeDiskKey(Object rawKey) {
@@ -230,14 +258,17 @@ public final class WorldGenScope {
                              String registryEpoch,
                              int schemaVersion) implements Serializable {
         public String stableText() {
-            return "schema=" + schemaVersion
-                + "|life=" + lifecycleId
-                + "|seed=" + seed
-                + "|dim=" + dimension
-                + "|profile=" + profile
-                + "|outside=" + outsideProfile
-                + "|style=" + worldStyle
-                + "|" + registryEpoch;
+            return SCOPE_TEXT.computeIfAbsent(this, scope -> "schema=" + scope.schemaVersion
+                + "|life=" + scope.lifecycleId
+                + "|seed=" + scope.seed
+                + "|dim=" + scope.dimension
+                + "|profile=" + scope.profile
+                + "|outside=" + scope.outsideProfile
+                + "|style=" + scope.worldStyle
+                + "|" + scope.registryEpoch);
         }
+    }
+
+    private record CachedProviderScope(long lifecycleId, CacheScope scope) {
     }
 }

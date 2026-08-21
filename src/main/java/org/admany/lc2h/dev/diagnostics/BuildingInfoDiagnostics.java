@@ -12,6 +12,9 @@ public final class BuildingInfoDiagnostics {
     private static final LongAdder CHARACTERISTICS_SNAPSHOT_HITS = new LongAdder();
     private static final LongAdder CHARACTERISTICS_DISK_HITS = new LongAdder();
     private static final LongAdder CHARACTERISTICS_COMPUTES = new LongAdder();
+    private static final LongAdder NATIVE_CHARACTERISTICS_HITS = new LongAdder();
+    private static final LongAdder NATIVE_CHARACTERISTICS_PUBLISHES = new LongAdder();
+    private static final LongAdder NATIVE_CHARACTERISTICS_MISSES = new LongAdder();
 
     private static final LongAdder BUILDING_INFO_MEMORY_HITS = new LongAdder();
     private static final LongAdder BUILDING_INFO_CREATES = new LongAdder();
@@ -53,6 +56,20 @@ public final class BuildingInfoDiagnostics {
 
     public static void recordCharacteristicsCompute() {
         CHARACTERISTICS_COMPUTES.increment();
+    }
+
+    public static void recordNativeCharacteristicsHit() {
+        NATIVE_CHARACTERISTICS_HITS.increment();
+    }
+
+    public static void recordNativeCharacteristicsPublish(boolean published) {
+        if (published) {
+            NATIVE_CHARACTERISTICS_PUBLISHES.increment();
+        }
+    }
+
+    public static void recordNativeCharacteristicsMiss() {
+        NATIVE_CHARACTERISTICS_MISSES.increment();
     }
 
     public static void recordBuildingInfoMemoryHit() {
@@ -147,6 +164,11 @@ public final class BuildingInfoDiagnostics {
             BUILDING_INFO_MEMORY_HITS.sum(),
             BUILDING_INFO_CREATES.sum(),
             BUILDING_INFO_FAILURES.sum()));
+        lines.add(String.format(Locale.ROOT,
+            "BuildingInfo native characteristics: hit=%d miss=%d published=%d",
+            NATIVE_CHARACTERISTICS_HITS.sum(),
+            NATIVE_CHARACTERISTICS_MISSES.sum(),
+            NATIVE_CHARACTERISTICS_PUBLISHES.sum()));
         lines.add(String.format(Locale.ROOT,
             "BuildingInfo city: level[mem=%d disk=%d build=%d] region[mem=%d disk=%d build=%d] raw[mem=%d disk=%d build=%d]",
             CITY_LEVEL_MEMORY_HITS.sum(),

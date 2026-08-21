@@ -25,6 +25,7 @@ import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.levelgen.feature.FeaturePlaceContext;
 import net.minecraft.world.level.levelgen.feature.configurations.MultifaceGrowthConfiguration;
 import org.admany.lc2h.runtime.Lc2hRuntimeModes;
+import org.admany.lc2h.util.ResourceLocations;
 import org.admany.lc2h.worldgen.scope.WorldGenScope;
 
 import java.io.IOException;
@@ -49,7 +50,7 @@ public final class PreCaptureTargetTraceRegistry {
     private static final boolean TRACE_WRITES = Boolean.parseBoolean(System.getProperty("lc2h.precaptureTrace.captureWrites", "true"));
     private static final boolean TRACE_CALLER = Boolean.parseBoolean(System.getProperty("lc2h.precaptureTrace.captureCaller", "false"));
     private static final int TRACE_CALLER_DEPTH = Math.max(1, Integer.getInteger("lc2h.precaptureTrace.captureCallerDepth", 4));
-    private static final ResourceLocation TARGET_DIMENSION = ResourceLocation.tryParse(
+    private static final ResourceLocation TARGET_DIMENSION = ResourceLocations.tryParse(
         System.getProperty("lc2h.precaptureTrace.dimension", "minecraft:overworld").trim());
     private static final BlockPos TARGET_POS = parseBlockPos(System.getProperty("lc2h.precaptureTrace.pos", "-39,4,-31"));
     private static final int TARGET_CHUNK_X = TARGET_POS == null ? 0 : TARGET_POS.getX() >> 4;

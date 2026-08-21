@@ -1,6 +1,7 @@
 package org.admany.lc2h.worldgen.lostcities;
 
 import mcjty.lostcities.api.RailChunkType;
+import mcjty.lostcities.config.HighwayGenerationMode;
 import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.varia.Counter;
@@ -34,7 +35,8 @@ import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.lc2h.mixin.accessor.lostcities.MultiChunkAccessor;
 import org.admany.lc2h.mixin.accessor.lostcities.MultiChunkInvoker;
 import org.admany.lc2h.mixin.accessor.lostcities.WorldStyleAccessor;
-import org.admany.lc2h.worldgen.MountainCityReservationPlanner;
+import org.admany.lc2h.worldgen.terrain.MountainCityReservationPlanner;
+import org.admany.lc2h.worldgen.terrain.IntercityHighwayIndex;
 import org.admany.lc2h.worldgen.gpu.CityCenterGpuCache;
 import org.apache.commons.lang3.tuple.Pair;
 
@@ -55,8 +57,16 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 public final class FastMultiChunkPlanner {
-    private static final boolean ENABLED = Boolean.parseBoolean(System.getProperty("lc2h.fast_multichunk.enabled", "true"));
+    /*
+     * This replaces Lost Cities' placement algorithm. It is useful for
+     * profiling, but it is not the authoritative path until every material
+     * and multi building decision is parity proven. Keeping it opt in means a
+     * normal LC2H install keeps the exact Lost Cities city layout instead of
+     * trading structures for a faster approximation.
+     */
+    private static final boolean ENABLED = Boolean.parseBoolean(System.getProperty("lc2h.fast_multichunk.enabled", "false"));
     private static final ThreadLocal<Integer> BYPASS_DEPTH = ThreadLocal.withInitial(() -> 0);
+    private static final ThreadLocal<FastCityFacts> ACTIVE_RAIL_CITY_FACTS = new ThreadLocal<>();
     private static final Set<ChunkCoord> AUDIT_DISABLED = ConcurrentHashMap.newKeySet();
 
     private static final byte UNKNOWN = 0;
@@ -122,6 +132,33 @@ public final class FastMultiChunkPlanner {
                 BYPASS_DEPTH.remove();
             } else {
                 BYPASS_DEPTH.set(next);
+            }
+        }
+    }
+
+    /**
+     * Supplies Railway's internal city tests from the exact facts already owned
+     * by the active fast multichunk plan. Outside that narrow scope the normal
+     * Lost Cities compatible cache remains authoritative.
+     */
+    public static boolean resolveRailCityRaw(ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile) {
+        FastCityFacts facts = ACTIVE_RAIL_CITY_FACTS.get();
+        if (facts != null && facts.supports(provider, profile) && coord != null) {
+            return facts.isRailCityRaw(coord.chunkX(), coord.chunkZ());
+        }
+        return MultiChunkPlanningCache.isCityRaw(coord, provider, profile);
+    }
+
+    private static <T> T withRailCityFacts(FastCityFacts facts, Supplier<T> supplier) {
+        FastCityFacts previous = ACTIVE_RAIL_CITY_FACTS.get();
+        ACTIVE_RAIL_CITY_FACTS.set(facts);
+        try {
+            return supplier.get();
+        } finally {
+            if (previous == null) {
+                ACTIVE_RAIL_CITY_FACTS.remove();
+            } else {
+                ACTIVE_RAIL_CITY_FACTS.set(previous);
             }
         }
     }
@@ -1187,6 +1224,7 @@ public final class FastMultiChunkPlanner {
         private final Map<Long, String> cityStyleNames = new HashMap<>();
         private final Map<Long, CityStyle> cityStyles = new HashMap<>();
         private final Map<Long, Float> cityFactors = new HashMap<>();
+        private final Map<Long, Boolean> railCityRaw = new HashMap<>();
         private final List<Pair<Predicate<Holder<Biome>>, Pair<Float, String>>> styleSelectors;
         private final IdentityHashMap<Holder<Biome>, SelectorChoices> selectorChoices = new IdentityHashMap<>();
         private float[] choiceWeights;
@@ -1213,6 +1251,10 @@ public final class FastMultiChunkPlanner {
             this.styleCentersByCell = indexStyleCenters();
             this.choiceWeights = new float[Math.max(1, centers.length)];
             this.choiceNames = new String[Math.max(1, centers.length)];
+        }
+
+        private boolean supports(IDimensionInfo provider, LostCityProfile profile) {
+            return this.provider == provider && this.profile == profile;
         }
 
         @SuppressWarnings("unchecked")
@@ -1484,8 +1526,36 @@ public final class FastMultiChunkPlanner {
             if (cityFactor(chunkX, chunkZ) <= profile.CITY_THRESHOLD) {
                 return false;
             }
-            return !MountainCityReservationPlanner.removesBuildingCell(
+            // This predicate runs while Lost Cities walks a multichunk.  Do
+            // not synchronously build a cold reservation region here: the
+            // reservation planner samples vanilla density and joining that
+            // flight can stall every parallel worldgen worker.  A published
+            // reservation still applies the exact rejection; before it is
+            // published, keep Lost Cities' city-factor result.
+            return !MountainCityReservationPlanner.peekRemovesBuildingCell(
                 provider, coord(chunkX, chunkZ), profile);
+        }
+
+        private boolean isRailCityRaw(int chunkX, int chunkZ) {
+            // Railway topology is derived from Lost Cities' base city field.
+            // MountainCityReservationPlanner only reserves building cells. It
+            // must not recursively expand terrain-component plans while the
+            // railway graph walks far outside this multichunk window. Apart
+            // from being extremely expensive, applying that building-only
+            // reservation here can sever otherwise valid rail routes.
+            long key = packedChunk(chunkX, chunkZ);
+            Boolean cached = railCityRaw.get(key);
+            if (cached != null) {
+                return cached;
+            }
+            boolean value;
+            if (profile.isSpace() || profile.isSpheres()) {
+                value = BuildingInfo.isCityRaw(coord(chunkX, chunkZ), provider, profile);
+            } else {
+                value = cityFactor(chunkX, chunkZ) > profile.CITY_THRESHOLD;
+            }
+            railCityRaw.put(key, value);
+            return value;
         }
 
         private float cityFactor(int chunkX, int chunkZ) {
@@ -1501,69 +1571,20 @@ public final class FastMultiChunkPlanner {
         }
 
         private float cityFactorUncached(ChunkCoord coord, int chunkX, int chunkZ) {
-            PredefinedBuilding building = City.getPredefinedBuildingAtTopLeft(world, coord);
-            if (building != null) {
-                return 1.0F;
-            }
-            PredefinedStreet street = City.getPredefinedStreet(world, coord);
-            if (street != null) {
-                return 1.0F;
-            }
-            if (isWestMultiBuilding(chunkX, chunkZ) || isNorthWestMultiBuilding(chunkX, chunkZ) || isNorthMultiBuilding(chunkX, chunkZ)) {
-                return 1.0F;
-            }
-
-            float factor = 0.0F;
-            if (profile.CITY_CHANCE < 0.0D) {
-                factor = cityRarityMap == null ? 0.0F : cityRarityMap.getCityFactor(chunkX, chunkZ);
-            } else {
-                int blockX = chunkX << 4;
-                int blockZ = chunkZ << 4;
-                for (CenterInfo center : centers) {
-                    if (center.profile(this) != profile) {
-                        continue;
-                    }
-                    float dx = center.blockX - blockX;
-                    float dz = center.blockZ - blockZ;
-                    float distanceSq = (dx * dx) + (dz * dz);
-                    if (distanceSq >= center.radiusSq) {
-                        continue;
-                    }
-                    float distance = (float) Math.sqrt(distanceSq);
-                    factor += (center.radius - distance) / center.radius;
-                }
-            }
-
-            if (factor > 0.0001D && world != null) {
-                ChunkHeightmap heightmap = provider.getHeightmap(coord);
-                if (heightmap == null) {
-                    return 0.0F;
-                }
-                int height = heightmap.getHeight();
-                if (height < profile.CITY_MINHEIGHT || height > profile.CITY_MAXHEIGHT) {
-                    return 0.0F;
-                }
-            }
-            if (factor > 0.0001D && world != null) {
-                WorldStyle profileWorldStyle = (WorldStyle) AssetRegistries.WORLDSTYLES.get(world, profile.getWorldStyle());
-                if (profileWorldStyle != null) {
-                    factor *= profileWorldStyle.getCityChanceMultiplier(provider, coord);
-                }
-            }
-            if (profile.CITY_SPAWN_DISTANCE2 > 0) {
-                float distance = (float) Math.sqrt(((chunkX << 4) * (chunkX << 4)) + ((chunkZ << 4) * (chunkZ << 4)));
-                double multiplier;
-                if (distance <= profile.CITY_SPAWN_DISTANCE1) {
-                    multiplier = profile.CITY_SPAWN_MULTIPLIER1;
-                } else if (distance >= profile.CITY_SPAWN_DISTANCE2) {
-                    multiplier = profile.CITY_SPAWN_MULTIPLIER2;
-                } else {
-                    float pct = (distance - profile.CITY_SPAWN_DISTANCE1) / (float) (profile.CITY_SPAWN_DISTANCE2 - profile.CITY_SPAWN_DISTANCE1);
-                    multiplier = profile.CITY_SPAWN_MULTIPLIER1 + (pct * (profile.CITY_SPAWN_MULTIPLIER2 - profile.CITY_SPAWN_MULTIPLIER1));
-                }
-                factor *= (float) multiplier;
-            }
-            return Math.min(1.0F, Math.max(0.0F, factor));
+            /*
+             * City.getCityFactor is the single authoritative normal-profile
+             * resolver.  LC2H's City mixin gives it a provider/profile scoped
+             * cache and a predefined-city index, while this planner used to
+             * rebuild the centre walk for every new multichunk plan.  Calling
+             * the authority here keeps the exact Lost Cities decision and
+             * lets adjacent plans reuse the immutable factor instead of
+             * paying the radius scan again.
+             *
+             * Space and sphere profiles never reach this method from the
+             * normal fast path.  Their extra profile-per-coordinate rules
+             * remain delegated through isCityRaw above.
+             */
+            return City.getCityFactor(coord, provider, profile);
         }
 
         private boolean isWestMultiBuilding(int chunkX, int chunkZ) {
@@ -1878,7 +1899,9 @@ public final class FastMultiChunkPlanner {
             }
             long start = System.nanoTime();
             try {
-                Railway.RailChunkInfo value = Railway.getRailChunkType(coord(index), provider, profile);
+                Railway.RailChunkInfo value = withRailCityFacts(
+                    facts,
+                    () -> Railway.getRailChunkType(coord(index), provider, profile));
                 rails[index] = value == null ? Railway.RailChunkInfo.NOTHING : value;
                 return rails[index];
             } finally {
@@ -1913,7 +1936,22 @@ public final class FastMultiChunkPlanner {
             }
             long start = System.nanoTime();
             try {
-                boolean value = BuildingInfo.hasHighway(coord(index), provider, profile);
+                ChunkCoord coord = coord(index);
+                boolean value;
+                if (provider.getHighwayGenerationMode() == HighwayGenerationMode.INTERCITY_NETWORK_V1) {
+                    // A cold route window is warmed off-thread. Treat it as
+                    // highway until the immutable snapshot is published so a
+                    // multi-building can never consume a route while the
+                    // planner is still learning that window.
+                    if (!IntercityHighwayIndex.isWarm(provider, profile, coord)) {
+                        IntercityHighwayIndex.level(provider, profile, coord);
+                        value = true;
+                    } else {
+                        value = IntercityHighwayIndex.peekLevel(provider, profile, coord, null) >= 0;
+                    }
+                } else {
+                    value = BuildingInfo.hasHighway(coord, provider, profile);
+                }
                 highway[index] = value ? TRUE : FALSE;
                 return value;
             } finally {

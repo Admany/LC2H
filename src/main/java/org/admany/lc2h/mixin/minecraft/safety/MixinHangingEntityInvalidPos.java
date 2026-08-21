@@ -39,8 +39,7 @@ public abstract class MixinHangingEntityInvalidPos extends Entity {
             return;
         }
         if (level != null && !level.isClientSide && !survives) {
-            // Vanilla would log an error and then discard; we keep the discard
-            // to clean up bad entities but suppress the error log.
+            // Keep vanilla's discard, just skip the noisy error.
             this.discard();
             ci.cancel();
         }

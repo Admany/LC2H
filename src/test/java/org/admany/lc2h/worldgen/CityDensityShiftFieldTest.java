@@ -1,5 +1,7 @@
 package org.admany.lc2h.worldgen;
 
+import org.admany.lc2h.worldgen.terrain.CityDensityShiftField;
+
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;

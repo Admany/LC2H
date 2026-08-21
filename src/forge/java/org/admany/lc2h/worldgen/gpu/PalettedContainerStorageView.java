@@ -12,7 +12,7 @@ import java.util.List;
  * Cached, read-only access to Minecraft's packed section storage.
  *
  * <p>Forge production names private fields differently from the mapped dev
- * workspace. Resolving the three fields once keeps that version detail here;
+ * workspace. Resolving the three fields once keeps that version detail here.
  * all hot calls are direct cached {@link Field#get(Object)} reads while the
  * container's own threading detector is held.</p>
  */

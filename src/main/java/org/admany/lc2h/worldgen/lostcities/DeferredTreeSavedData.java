@@ -16,6 +16,7 @@ import net.minecraft.world.level.levelgen.feature.Feature;
 import net.minecraft.world.level.levelgen.feature.TreeFeature;
 import net.minecraft.world.level.levelgen.feature.configurations.TreeConfiguration;
 import net.minecraft.world.level.saveddata.SavedData;
+import org.admany.lc2h.util.ResourceLocations;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -84,7 +85,7 @@ public final class DeferredTreeSavedData extends SavedData {
             if (!entry.contains(TAG_FEATURE, Tag.TAG_STRING) || !entry.contains(TAG_CONFIG)) {
                 continue;
             }
-            ResourceLocation featureId = ResourceLocation.tryParse(entry.getString(TAG_FEATURE));
+            ResourceLocation featureId = ResourceLocations.tryParse(entry.getString(TAG_FEATURE));
             if (featureId == null) {
                 continue;
             }

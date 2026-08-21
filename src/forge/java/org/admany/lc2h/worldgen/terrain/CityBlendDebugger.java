@@ -1,4 +1,4 @@
-package org.admany.lc2h.worldgen;
+package org.admany.lc2h.worldgen.terrain;
 
 import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.worldgen.IDimensionInfo;
@@ -17,17 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-/**
- * Explains, for one specific position, why the terrain blender did or did not
- * shape that column.
- *
- * <p>Aggregate counters can only say "N columns were rejected"; they cannot
- * say which test rejected the column you are standing on. This walks the same
- * decision sequence {@code MixinBlenderCityEdge} uses and reports every
- * intermediate value, so a bad input (most importantly a terrain height that
- * is not yet meaningful at the noise stage) is visible directly instead of
- * being inferred from ratios.</p>
- */
+/** Explains one terrain decision using the same order as the density hook. */
 public final class CityBlendDebugger {
 
     private CityBlendDebugger() {
@@ -45,8 +35,8 @@ public final class CityBlendDebugger {
         int chunkZ = blockZ >> 4;
         out.add("pos=" + blockX + "," + pos.getY() + "," + blockZ + " chunk=" + chunkX + "," + chunkZ);
 
-        // What actually happened when this chunk generated. Everything below
-        // is a re-evaluation with today's (warm) caches and can disagree.
+        // The recorded result is what happened during generation. The values below
+        // are a fresh lookup and can differ once caches are warm.
         String recorded = MountainCityBlendDiagnostics.recordedOutcome(level.dimension(), chunkX, chunkZ);
         out.add("=== AT GENERATION TIME: " + (recorded == null
             ? "NOT RECORDED (generated before this build, or the blender never saw this chunk)"
@@ -135,7 +125,7 @@ public final class CityBlendDebugger {
             + " (" + fmt(Math.toDegrees(Math.atan(fieldGradient))) + " deg)");
         if (fieldGradient > localCap * 1.5D) {
             out.add("  note: above the local slope limit. Relief compression deliberately adds"
-                + " gradient to the shift field in order to REMOVE it from the surface,"
+                + " gradient to the shift field so it is removed from the surface,"
                 + " so this on its own is not a fault - check the surface slope instead.");
         }
         if (role.isCity() && !reservation.removesBuildingCell()) {

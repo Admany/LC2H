@@ -11,6 +11,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
@@ -60,7 +61,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class ChunkPostProcessor {
 
     private static final Set<Block> TRACKED_BLOCKS = Set.copyOf(Arrays.asList(
-            Blocks.GRASS,
+            resolveGrassBlock(),
             Blocks.FERN,
             Blocks.TALL_GRASS,
             Blocks.DANDELION,
@@ -88,6 +89,19 @@ public class ChunkPostProcessor {
             Blocks.KELP,
             Blocks.KELP_PLANT
     ));
+
+    /**
+     * The short grass field was renamed between the Forge mapping sets that
+     * can load the 1.20.1 omni jar. Resolve it through the registry so class
+     * linking never depends on either field name being present at runtime.
+     */
+    private static Block resolveGrassBlock() {
+        Block block = ForgeRegistries.BLOCKS.getValue(new ResourceLocation("minecraft", "grass"));
+        if (block == null || block == Blocks.AIR) {
+            block = ForgeRegistries.BLOCKS.getValue(new ResourceLocation("minecraft", "short_grass"));
+        }
+        return block == null ? Blocks.TALL_GRASS : block;
+    }
     private static final String HORROR_ELEMENT_NAMESPACE = "horror_element_mod";
     private static final ConcurrentHashMap<Block, Boolean> TRACKED_BLOCK_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<Block, Boolean> TREE_PROTECTED_BLOCK_CACHE = new ConcurrentHashMap<>();
@@ -238,16 +252,19 @@ public class ChunkPostProcessor {
         if (block == null) {
             return false;
         }
+        // The common worldgen candidates are all in this immutable set. Keep
+        // them off the shared cache path because setBlock calls this for every
+        // placed tree, plant and decoration block.
+        if (TRACKED_BLOCKS.contains(block)) {
+            return true;
+        }
         Boolean cached = TRACKED_BLOCK_CACHE.get(block);
         if (cached != null) {
             return cached;
         }
 
-        boolean tracked = TRACKED_BLOCKS.contains(block);
-        if (!tracked) {
-            ResourceLocation key = ForgeRegistries.BLOCKS.getKey(block);
-            tracked = key != null && HORROR_ELEMENT_NAMESPACE.equals(key.getNamespace());
-        }
+        ResourceLocation key = ForgeRegistries.BLOCKS.getKey(block);
+        boolean tracked = key != null && HORROR_ELEMENT_NAMESPACE.equals(key.getNamespace());
         TRACKED_BLOCK_CACHE.put(block, tracked);
         return tracked;
     }
@@ -266,6 +283,13 @@ public class ChunkPostProcessor {
 
     private static boolean isPotentialFloatingSourceFluid(BlockState state) {
         if (state == null) {
+            return false;
+        }
+        // Kelp, seagrass and waterlogged decorations expose a source
+        // FluidState too. They are not standalone fluid blocks and running a
+        // cluster flood fill for every one of them made ocean decoration one
+        // of LC2H's hottest paths.
+        if (!(state.getBlock() instanceof LiquidBlock)) {
             return false;
         }
         net.minecraft.world.level.material.FluidState fluidState = state.getFluidState();
@@ -1027,9 +1051,15 @@ public class ChunkPostProcessor {
         PROTECTED_TREE_BLOCKS = new java.util.concurrent.ConcurrentHashMap<>();
 
     public static void markForRemovalIfFloating(net.minecraft.server.level.WorldGenRegion region, BlockPos pos) {
-        if (!ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL) return;
+        if (region == null || pos == null) return;
+        markForRemovalIfFloating(region, pos, region.getBlockState(pos));
+    }
 
-        BlockState state = region.getBlockState(pos);
+    public static void markForRemovalIfFloating(net.minecraft.server.level.WorldGenRegion region,
+                                                BlockPos pos,
+                                                BlockState state) {
+        if (!ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL) return;
+        if (region == null || pos == null || state == null) return;
         if (!shouldWatchFloatingCandidate(state)) return;
         if (hasDoubleHalf(state)) return;
 
@@ -1215,7 +1245,7 @@ public class ChunkPostProcessor {
         // normal worldgen stage. Running it automatically duplicates work done
         // by Lost Cities and explodes under DH, which can load thousands of
         // chunks without a nearby player. Targeted block events and explicit
-        // /lc2h rescanChunk repairs remain active when this is disabled.
+        // /lc2h cleanup chunk repairs remain active when this is disabled.
         if (!ConfigManager.ENABLE_AUTOMATIC_CHUNK_SCANS) return;
         boolean floatingScanEnabled = ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL && ENABLE_FLOATING_SCAN;
         boolean doubleBlockEnabled = ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER;
@@ -1385,7 +1415,7 @@ public class ChunkPostProcessor {
                 submitBatch(level);
             }
             if (BATCH_IN_FLIGHT.get()) {
-                return; // batch will handle draining; skip incremental work
+                return; // The batch drains this work, so skip the incremental pass.
             }
         }
 
@@ -1479,7 +1509,7 @@ public class ChunkPostProcessor {
         try {
         while (samples < budget) {
             if (System.nanoTime() > deadlineNs) {
-                // Yield to the next tick; keep the cursor so we can resume.
+        // Yield to the next tick and keep the cursor for the next pass.
                 return current;
             }
             if (current.y < minY) {
@@ -1753,7 +1783,7 @@ public class ChunkPostProcessor {
     }
 
     private static int computeMaxChunksThisTick(double workBudgetMs) {
-        // Conservative cap; actual time budget is the primary limiter.
+        // Keep a conservative cap. The time budget is still the main limiter.
         // ~0.75ms per chunk is a rough upper bound for typical scans.
         int byBudget = (int) Math.ceil(workBudgetMs / 0.75D);
         int value = Math.max(1, Math.min(8, Math.max(MAX_CHUNKS_PER_TICK, byBudget)));
@@ -1798,7 +1828,7 @@ public class ChunkPostProcessor {
         double target = Math.min(TARGET_TICK_MS, TICK_TIME_BUDGET_MS);
         double slack = target - avgTickMs;
 
-        // If we have lots of slack, ramp up; if we're close to target, ramp down.
+        // Ramp up with spare budget and ramp down near the target.
         double next = ADAPTIVE_WORK_BUDGET_MS + (slack * 0.05D);
 
         // If we are already trending slow, cut harder to avoid spirals.
