@@ -1,218 +1,890 @@
-BlackRift Studios Software License Agreement (BRSSLA)
-Version 1.5
+# BlackRift Studios Software License Agreement (BRSSLA)
 
-© BlackRift Studios - All rights reserved
-Founder: Admany
+**Version 2.0.0**
 
+Copyright © 2026 BlackRift Studios. All rights reserved.
 
-==================================================
-OVERVIEW
-==================================================
+**Founder and Legal Head:** Admany
+**Legal Contact:** legal@blackriftstudios.com
+**Effective Date:** Upon publication
 
-This Software License Agreement (“Agreement”) governs the use,
-distribution, and modification of any software, mod, plugin,
-library, API, binary, source code, or related material provided
-by BlackRift Studios (“the Software”).
+## QUICK SUMMARY
 
-This Agreement distinguishes between:
+This summary is provided for convenience only. If it conflicts with the complete Agreement, the complete Agreement controls.
 
-1) End Users (players and individuals)
-2) Distributors (modpacks, large-scale bundles, or hosted platforms)
+### Players
 
-The intent of this license is to protect intellectual property
-and regulate large-scale commercial distributions. It is NOT
-intended to restrict normal users or standard gameplay.
+Normal personal gameplay is permitted. Ordinary players are not the target of commercial or distribution enforcement.
 
+BlackRift Studios software is intended to remain usable during ordinary internet outages. An outage must not be used merely to degrade performance or disable normal local gameplay features.
 
-==================================================
-PART I - END USER LICENSE
-==================================================
+### Modpacks and Distributions
 
-1. Acceptance
+Non-commercial modpacks may use and distribute covered BlackRift Studios software without a download-count threshold.
 
-By downloading, installing, or using the Software, you agree
-to be bound by this Agreement.
+A modpack does not require a Commercial Licence merely because it becomes popular, successful, or exceeds a particular number of downloads.
 
-If you do not agree, you must not use the Software.
+BlackRift Studios may contact a distribution owner where there are reasonable grounds to believe that commercial exploitation, misrepresentation, material non-compliance, or another breach of this Agreement may be occurring.
 
+Paid modpacks and commercial ecosystems tied to a modpack or required server may require prior written permission under this Agreement.
 
-2. Permitted Use
+### Developers and Dependencies
+
+Where BlackRift Studios software is intentionally provided as a dependency, framework, engine, library, processing layer, performance layer, rendering layer, or similar component with a Public API, software that depends on it may be licensed and commercially used independently.
+
+Your code remains yours. BlackRift Studios retains ownership of its own dependency and protected material.
+
+### Research and Competition
+
+Benchmarking, criticism, independent research, compatibility work, and fair competition are permitted.
+
+BlackRift Studios encourages fair competition because it gives users alternatives and gives BlackRift Studios a reason to continue improving.
+
+### Source-Available Software
+
+Publicly viewable source code is not automatically open source.
+
+Source-available BlackRift Studios software may be studied, reviewed, researched, tested, and contributed to. It may not be copied into an unauthorised replacement, continuation, rebrand, or competing distribution contrary to this Agreement.
+
+### AI Training
+
+BlackRift Studios does not grant permission for its protected code, documentation, assets, preparatory design material, or other protected material to be used for AI training, model development, dataset creation, or commercial product-development research except where BlackRift Studios gives written permission or applicable law provides a right that cannot be excluded.
+
+### LTS and EOL
+
+BRSSLA LTS and BRSSLA EOL are lifecycle subversions of the main BRSSLA.
+
+LTS means major development has ended and the project has entered maintenance.
+
+EOL means official development and ordinary support have ended. EOL projects may still be freely used for research, preservation, benchmarking, and independent external addons or fixes as described in this Agreement.
+
+---
+
+# PART I. DEFINITIONS AND GENERAL SCOPE
+
+## 1. Scope
+
+This BlackRift Studios Software License Agreement governs the use, distribution, modification, integration, research, and commercial exploitation of software and related protected material made available by BlackRift Studios under BRSSLA.
+
+Covered material may include software, mods, plugins, libraries, APIs, frameworks, engines, binaries, source code, documentation, assets, specifications, preparatory design material, and related copyrightable material.
+
+This Agreement applies only to material for which BlackRift Studios has identified BRSSLA as the applicable licence.
+
+## 2. Definitions
+
+For this Agreement:
+
+**Agreement** means BRSSLA Version 2.0.0 together with an applicable BRSSLA lifecycle subversion or written project-specific terms.
+
+**BlackRift Studios** or **BRS** means BlackRift Studios and any legal entity that lawfully succeeds to the relevant rights.
+
+**Software** means the BlackRift Studios software and protected material covered by this Agreement.
+
+**End User** means a person using the Software for ordinary personal or gameplay purposes.
+
+**Distribution** means a modpack, bundle, platform package, launcher package, hosted collection, server distribution, or other arrangement through which the Software is made available to third parties.
+
+**Distributor** means the person or organisation responsible for a Distribution.
+
+**Commercial Use** means use primarily connected to direct or indirect financial gain as further defined in Section 7.
+
+**Dependency** means Software intentionally designed to support or provide functionality to another project through a Public API or other documented integration method.
+
+**Public API** means an interface intentionally made available by BlackRift Studios for third-party integration.
+
+**Official Source** means a source controlled or expressly authorised by BlackRift Studios for the relevant Software.
+
+**Source-Available Software** means Software whose source code is publicly viewable or open for contribution but which has not been expressly released under an open-source licence.
+
+**Fork** means a modified, continued, or redistributed project substantially derived from protected BlackRift Studios source code.
+
+**Hosted Infrastructure** means APIs, databases, dashboards, authentication services, telemetry systems, processing systems, web services, or similar infrastructure operated by or for BlackRift Studios.
+
+**Material Breach** means a breach serious enough to materially affect BlackRift Studios' rights, infrastructure, users, or ability to enforce this Agreement.
+
+**Evasion** means a deliberate attempt to bypass an active restriction, suspension, termination, or other enforcement action under this Agreement.
+
+**LTS** means Long-Term Support.
+
+**EOL** means End of Life.
+
+## 3. Mandatory Law
+
+This Agreement applies globally to the maximum extent permitted by applicable law.
+
+Nothing in this Agreement is intended to remove or restrict a right that applicable law does not permit BlackRift Studios to exclude by contract.
+
+Where a provision conflicts with a mandatory legal right, that right controls only to the extent required by law. The remaining provisions continue in effect.
+
+## 3A. Reasonableness and Proportionality
+
+Where this Agreement refers to conduct, information, notice, action, grounds, time, or enforcement as reasonable or proportionate, the assessment will be made in good faith and in light of the circumstances known at the time.
+
+Relevant factors may include:
+
+1. The available evidence.
+2. The seriousness and duration of the conduct.
+3. Intent or knowledge where relevant.
+4. Actual or reasonably foreseeable harm.
+5. Previous related violations.
+6. Whether the issue can be corrected.
+7. The effect of enforcement on End Users and third parties.
+8. The urgency of the matter.
+9. The proportionality of the proposed action to the issue being addressed.
+
+No single factor is automatically decisive.
+
+---
+
+# PART II. END USER RIGHTS
+
+## 4. Acceptance
+
+By downloading, installing, distributing, integrating, modifying, or using the Software, you accept this Agreement where acceptance is legally required for the relevant activity.
+
+If you do not accept this Agreement, you must not exercise rights that depend upon permission granted by it.
+
+## 5. Permitted End User Use
 
 End Users may:
 
-• Use the Software for personal gameplay
-• Use the Software in private or public servers
-• Include the Software in modpacks below the commercial threshold
-• Share the unmodified official version without payment
-• Analyze publicly released source code for educational purposes
+1. Use the Software for personal gameplay.
+2. Use the Software on private or public servers.
+3. Use the Software offline.
+4. Make reasonable local backup copies.
+5. Perform ordinary configuration and local troubleshooting.
+6. Benchmark, profile, review, criticise, and research the Software as permitted by this Agreement.
+7. Exercise rights that applicable law grants independently of this Agreement.
 
+BlackRift Studios does not charge individual players merely for ordinary use of the Software.
 
-3. No Impact on Normal Users
+## 6. Offline and Normal Gameplay Protection
 
-This license does NOT:
+A temporary or permanent failure to reach BlackRift Studios Hosted Infrastructure must not by itself be treated as a licence breach.
 
-• Charge individual players
-• Restrict normal gameplay
-• Disable features for ordinary users
-• Interfere with small non-commercial modpacks
+Where technically possible, local Software should fail safely during ordinary network outages.
 
-Enforcement mechanisms apply only to non-compliant
-large-scale commercial distributions.
+BlackRift Studios will not intentionally use an ordinary internet outage merely to reduce hardware utilisation, degrade local performance, corrupt data, or disable unrelated local gameplay features.
 
+Features that genuinely depend on a remote service may become unavailable while that service is unavailable.
 
-==================================================
-PART II - DISTRIBUTOR LICENSE
-==================================================
+---
 
-4. Standard Distribution
+# PART III. MODPACKS, DISTRIBUTION, AND COMMERCIAL USE
 
-A bundled distribution modpack or platform bundle
-is permitted only when distributed through
-Modrinth or CurseForge.
+## 7. Standard Non-Commercial Distribution
 
-Distribution on platforms other than Modrinth
-or CurseForge requires explicit written permission
-from BlackRift Studios.
+Non-commercial modpacks and similar Distributions may include or reference unmodified official BlackRift Studios Software without a download-count threshold where the relevant Software is obtained from an Official Source or distributed through an arrangement authorised by BlackRift Studios.
 
-Such distribution is considered NON COMMERCIAL
-unless it involves direct monetization, paid access,
-revenue sharing, corporate backing, or enterprise deployment.
+Popularity alone does not create a Commercial Licence requirement.
 
+BlackRift Studios will not require a Commercial Licence solely because a Distribution reaches a particular number of downloads, users, installations, followers, or other popularity metric.
 
-5. Large Scale Distribution Review
+Credits, legal notices, licence notices, and authorship information included with the Software must not be removed or falsified.
 
-If a bundled distribution exceeds 100,000 total downloads
-across all platforms, BlackRift Studios may initiate
-a review process to ensure compliance with this Agreement.
+## 8. Commercial Classification
 
-Exceeding this threshold does NOT automatically
-classify the distribution as commercial.
+A Distribution may be treated as Commercial Use where the Software, Distribution, or a required environment is materially connected to direct or indirect financial gain.
 
-Commercial licensing requirements apply only if
-the distribution involves monetization, significant
-revenue generation, corporate backing, or paid access models.
+For this Section, an activity is materially connected where the Distribution, Software, or required environment is a meaningful reason for obtaining or retaining a payment, purchase, subscription, donation, entitlement, advertising benefit, or other financial advantage.
 
+Incidental presence alone is not enough.
 
-6. Commercial License Requirement
+A commercial connection may still exist where the Distribution itself is technically free but paid access, benefits, progression, priority, cosmetics, ranks, passes, virtual items, or comparable commercial incentives form a meaningful part of the expected experience.
 
-If a distribution is determined to be commercial
-under Section 5, the distributor must request
-a Commercial License within three calendar days
-of receiving written notice from BlackRift Studios.
+Commercial Use includes:
 
-Failure to comply constitutes a material breach.
+1. Selling access to the modpack or Distribution.
+2. Requiring a paid subscription, membership, purchase, or entitlement to obtain or continue using the Distribution.
+3. Requiring access to a server or service whose commercial model is materially connected to use of the Distribution.
+4. Selling cosmetics, passes, ranks, loot crates, virtual items, gameplay benefits, or comparable entitlements where those sales are materially connected to the Distribution or a required environment.
+5. Revenue-sharing arrangements that commercially exploit the Software.
+6. Selling a hosted or managed version of the Distribution.
+7. Using the Distribution as a material component of a paid product or service.
 
-==================================================
-PART III - INTELLECTUAL PROPERTY PROTECTION
-==================================================
+The following do not by themselves make a Distribution Commercial:
 
-8. Ownership
+1. A content creator monetising videos or streams that show gameplay using the Software.
+2. A freely available Distribution being discussed or linked on a monetised website or channel where the monetisation is incidental.
+3. Donations genuinely limited to reasonable operational costs where access is not sold, gated, or materially improved through payment.
+4. Ordinary sponsorship or publicity that does not sell access to or rights in the Software or Distribution.
 
-The Software remains the sole intellectual property
-of BlackRift Studios.
+BlackRift Studios may consider the actual substance of an arrangement rather than the label used by the Distributor.
 
-No ownership rights are transferred under this Agreement.
+## 9. Commercial Permission
 
+Commercial Use described in Section 8 requires prior written permission from BlackRift Studios unless another section of this Agreement expressly grants commercial rights.
 
-9. Redistribution Restrictions
+Commercial permission may be issued by the Founder and Legal Head, by the person formally appointed to succeed that office, or by another representative expressly authorised in writing by BlackRift Studios.
 
-Without explicit written permission, you may NOT:
+If the Founder and Legal Head is unavailable, has left the role, or cannot reasonably act, BlackRift Studios may designate another authorised representative to exercise commercial licensing authority.
 
-• Re-upload the Software to unauthorized platforms
-• Rebrand the Software under a different name
-• Remove or alter author credits
-• Present modified versions as original work
-• Claim the Software or its systems as your own
+Commercial permission issued under this Section must identify the granting authority and the date of grant in writing.
 
+BlackRift Studios will maintain an internal record of active commercial licensing authority and permissions issued under this Section.
 
-10. Anti-Modification & Anti-Reverse Engineering
+A recipient may request confirmation of the authenticity of a commercial permission through the Legal Contact identified in this Agreement. BlackRift Studios will provide reasonable confirmation sufficient to verify whether the permission was validly issued.
 
-Except where prohibited by law, you may NOT:
+A change in the person holding licensing authority does not invalidate permission lawfully granted while that authority existed.
 
-• Reverse engineer the Software
-• Decompile or disassemble binaries
-• Circumvent obfuscation or protection systems
-• Bypass licensing or enforcement mechanisms
-• Modify the Software to remove attribution
-• Create derivative works intended to replicate
-  or replace the Software’s protected systems
+Commercial permission may contain project-specific conditions.
 
-Any attempt to bypass enforcement systems constitutes
-a severe breach of this Agreement.
+A Commercial Licence is not required where this Agreement separately grants commercial rights, including qualifying Dependency use under Part IV.
 
+## 10. Compliance Review
 
-11. Copyright Enforcement & DMCA
+Where BlackRift Studios has reasonable grounds to believe that a Distribution may be commercially exploiting the Software, misrepresenting its status, evading enforcement, or materially breaching this Agreement, BlackRift Studios may issue a written compliance request.
 
-Unauthorized redistribution, rebranding, code theft,
-or misrepresentation constitutes copyright infringement.
+The Distributor must provide reasonable information sufficient to clarify the relevant issue.
 
-BlackRift Studios reserves the full right to:
+BlackRift Studios will normally provide at least fourteen calendar days to respond unless the matter involves serious security risk, deliberate Evasion, fraud, malicious redistribution, theft of protected material, or another circumstance requiring faster action.
 
-• Issue DMCA takedown notices
-• Contact hosting providers
-• Request removal from platforms
-• Pursue civil legal action where applicable
+Information supplied privately for a compliance review will be handled in accordance with applicable law and BlackRift Studios' Privacy and Data Policy.
 
+Failure to respond may be considered together with the available evidence. Failure to respond does not automatically prove a violation.
 
-==================================================
-PART IV - ENFORCEMENT
-==================================================
+## 11. Platform and Legal Compliance
 
-12. Blacklisting & Functional Limitation
+Commercial Use of the Software must comply with applicable law and with applicable platform rules governing the environment in which the Software is used.
 
-If a distributor exceeds the commercial threshold
-and fails to obtain a required license within
-the compliance window, BlackRift Studios may:
+Where a commercial arrangement materially violates applicable Minecraft, Mojang, Microsoft, platform, consumer-protection, privacy, or data-protection requirements, BlackRift Studios may suspend or terminate commercial permission associated with that arrangement.
 
-• Blacklist the distribution
-• Limit or disable the Software’s own features
+BlackRift Studios may report suspected violations to the relevant platform, service provider, regulator, or authority where reasonably appropriate.
 
-Enforcement measures will:
+Copyright takedown procedures will be used only where BlackRift Studios has a lawful copyright or related rights basis for doing so.
 
-• NOT crash the game
-• NOT corrupt saves or worlds
-• NOT interfere with unrelated gameplay
-• Only affect the Software’s own functionality
+---
 
-The goal of enforcement is compliance — not disruption.
+# PART IV. DEPENDENCIES, PUBLIC APIS, AND THIRD-PARTY DEVELOPMENT
 
+## 12. Dependency Commercial Safe Harbour
 
-13. Anti-Circumvention
+Where the Software is intentionally designed to function as a Dependency and exposes a Public API, a separate project using that Dependency is granted commercial rights for its independently written code without requiring a separate BlackRift Studios Commercial Licence.
 
-Any attempt to disable, modify, interfere with,
-or bypass enforcement systems is strictly prohibited.
+The dependent project may use any lawful licence chosen by its owner.
 
+Using a BlackRift Studios Dependency does not cause the dependent project to inherit BRSSLA.
 
-==================================================
-PART V - GENERAL PROVISIONS
-==================================================
+This permission applies where the BlackRift Studios Dependency remains separately identifiable and is not unlawfully relicensed, rebranded, or presented as original code belonging to the dependent project.
 
-14. Disclaimer
+Where the Dependency is not packaged inside the dependent project's own binary or archive, the dependent project may be distributed commercially without requiring permission merely because it depends on BlackRift Studios Software.
 
-THE SOFTWARE IS PROVIDED “AS IS” WITHOUT WARRANTY
-OF ANY KIND, EXPRESS OR IMPLIED.
+Where bundling is technically necessary, the relevant BlackRift Studios project terms or Official Source rules control whether bundling is permitted.
 
+## 13. Independent Ownership
 
-15. Limitation of Liability
+Using BlackRift Studios Software as a Dependency does not transfer ownership of independently written code to BlackRift Studios.
 
-BLACKRIFT STUDIOS SHALL NOT BE LIABLE FOR ANY DAMAGES
-ARISING FROM THE USE OR INABILITY TO USE THE SOFTWARE.
+BlackRift Studios retains ownership of the protected Dependency and its own protected material.
 
+The third-party developer retains ownership of code independently written around, against, or on top of the Dependency.
 
-16. Termination
+An independently written addon, integration, bridge, compatibility layer, or plugin does not become BlackRift Studios property merely because it interacts with BlackRift Studios Software.
 
-This Agreement automatically terminates upon violation.
-All rights to use the Software cease immediately.
+## 14. Addons, Integrations, and Compatibility
 
+Third parties may create independent addons, plugins, integrations, bridges, compatibility layers, rendering integrations, processing integrations, performance integrations, and similar projects that interact with a supported Public API or another lawful interface.
 
-17. Amendments
+Such projects may truthfully state that they are compatible with, built for, integrate with, or require the relevant BlackRift Studios Software.
 
-BlackRift Studios reserves the right to modify
-this Agreement at any time.
+They may not falsely claim to be official, endorsed, partnered, published, maintained, or owned by BlackRift Studios.
 
-Continued use of the Software constitutes acceptance
-of the updated terms.
+## 15. Branding and Attribution
 
+Factual compatibility references are permitted.
 
-For licensing inquiries, contact BlackRift Studios
-through official communication channels.
+BlackRift Studios names, logos, trademarks, project identity, and branding may not be used in a manner reasonably likely to cause confusion about source, ownership, endorsement, partnership, or official status.
+
+Required copyright notices, authorship notices, and licence notices attached to the Software must remain accurate.
+
+---
+
+# PART V. SOURCE AVAILABILITY, CONTRIBUTIONS, AND INTELLECTUAL PROPERTY
+
+## 16. Ownership
+
+The Software and other protected BlackRift Studios material remain the intellectual property of BlackRift Studios or the relevant identified rightsholder.
+
+No ownership right is transferred merely because source code can be viewed, downloaded, studied, contributed to, or used as a Dependency.
+
+No patent, trademark, copyright, or other intellectual property right is granted except to the extent expressly stated in this Agreement or required by law.
+
+## 17. Source-Available Software
+
+Making source code publicly viewable or open for contributions does not automatically make the Software open source.
+
+Source-Available Software may be:
+
+1. Viewed.
+2. Studied.
+3. Researched.
+4. Benchmarked.
+5. Profiled.
+6. Tested.
+7. Reviewed.
+8. Contributed to.
+9. Used for lawful compatibility and interoperability work.
+
+Unless BlackRift Studios gives written permission or applicable law independently permits the conduct, protected BlackRift Studios code may not be used to create, distribute, or maintain:
+
+1. An unauthorised fork intended to replace the official Software.
+2. An unofficial continuation substantially derived from protected BlackRift Studios code.
+3. A rebranded copy of the Software.
+4. A competing Distribution built by copying protected BlackRift Studios implementation.
+5. A modified binary represented as an official BlackRift Studios release.
+
+An independently implemented competing project is not prohibited merely because it performs similar functions or makes the Software unnecessary.
+
+## 18. Code Reuse and Derivative Material
+
+No fixed line-count percentage determines whether copying is permitted.
+
+The legal significance of copied material may depend on both quantity and qualitative importance.
+
+Without written permission, a third party may not take a substantial or qualitatively significant portion of protected BlackRift Studios code and distribute it as their own project.
+
+Copying core protected implementation, original code structure, copyrightable technical material, or other substantial protected expression may be restricted even where the copied material represents a small percentage of a larger codebase.
+
+General ideas, principles, independently developed methods, and other material that applicable law does not protect as copyright remain subject to applicable law.
+
+## 19. Contributions
+
+A contributor retains ownership of original material they contribute unless a separate written agreement states otherwise.
+
+By intentionally submitting a contribution for inclusion in a BlackRift Studios project and having that contribution accepted, the contributor grants BlackRift Studios a perpetual, worldwide, non-exclusive, royalty-free right to use, reproduce, modify, adapt, combine, maintain, distribute, publish, sublicense as part of the project, and otherwise exploit the accepted contribution as necessary to develop and distribute the relevant project.
+
+This grant survives later removal of the contribution from future versions and survives termination of the contributor's participation.
+
+A contributor must have the legal right to submit the material they contribute.
+
+## 20. Reverse Engineering and Interoperability
+
+Except where this Agreement or applicable law permits it, unauthorised decompilation, disassembly, reverse engineering, or circumvention of technical protection measures is prohibited.
+
+Nothing in this section limits observation, study, testing, interoperability work, security research, or another activity that applicable law does not permit BlackRift Studios to prohibit.
+
+Security and transparency research must not be used as a pretext to distribute tools whose primary purpose is malicious or commercial circumvention of lawful licence enforcement.
+
+---
+
+# PART VI. BENCHMARKING, RESEARCH, AND FAIR COMPETITION
+
+## 21. Benchmarking and Criticism
+
+Benchmarking, profiling, technical comparison, research, review, criticism, and competitive analysis of the Software are permitted.
+
+BlackRift Studios does not require favourable results.
+
+A benchmark showing that another product performs better is not a violation.
+
+A negative review is not a violation.
+
+A critical opinion is not a violation.
+
+The following are prohibited where done knowingly or deliberately:
+
+1. Fabricating benchmark results.
+2. Materially manipulating test conditions while representing them as equivalent.
+3. Falsifying BlackRift Studios Software behaviour.
+4. Presenting invented data as measured data.
+5. Violating this Agreement in order to obtain or publish the result.
+
+Lawful criticism remains permitted even where BlackRift Studios strongly disagrees with it.
+
+## 22. Fair Competition
+
+BlackRift Studios expressly permits and encourages fair competition.
+
+Competition gives users alternatives and creates pressure for BlackRift Studios and other developers to continue improving their work.
+
+A third party may:
+
+1. Create independently developed software with similar or better functionality.
+2. Compete for the same users.
+3. Offer alternatives to BlackRift Studios Software.
+4. Publicly compare competing products.
+5. Identify weaknesses in BlackRift Studios Software.
+6. Build independently developed solutions addressing those weaknesses.
+7. Attempt to outperform or become more successful than BlackRift Studios.
+
+Competition becomes a matter under this Agreement where it involves conduct such as copying protected BlackRift Studios code, unlawfully using protected or confidential material, unauthorised redistribution, false attribution, impersonation, fabricated comparisons, or another violation of this Agreement.
+
+BlackRift Studios does not use BRSSLA as a general non-compete restriction.
+
+## 23. Research Rights
+
+Ordinary technical, academic, educational, compatibility, preservation, security, and performance research is permitted subject to this Agreement and applicable law.
+
+Permission to conduct research does not by itself grant permission to redistribute protected BlackRift Studios code, relicense the Software, or use protected BlackRift Studios material for prohibited AI training or commercial product-development research.
+
+---
+
+# PART VII. AI TRAINING AND DEVELOPMENT PRACTICES
+
+## 24. Reservation of Rights for AI Training and Commercial Product Research
+
+To the maximum extent permitted by applicable law, BlackRift Studios expressly reserves its rights in protected material against unauthorised reproduction, extraction, collection, processing, or use for artificial intelligence training, machine learning, model development, dataset creation, or commercial product-development research.
+
+Without prior written permission from BlackRift Studios, protected BlackRift Studios material may not be intentionally used for:
+
+1. Training or fine-tuning an artificial intelligence or machine-learning model.
+2. Creating, expanding, validating, or curating a commercial AI training dataset.
+3. Training code-generation, code-completion, software-development, rendering, optimisation, reasoning, or similar models.
+4. Training a commercial model intended to reproduce or imitate protected BlackRift Studios implementation.
+5. Commercial research whose purpose is to use protected BlackRift Studios material to derive, reproduce, imitate, or accelerate development of a subsequent competing or commercial product.
+6. Supplying protected BlackRift Studios material to another person or organisation for any of the purposes above.
+
+This reservation applies, where legally protectable, to source code, object code, documentation, assets, diagrams, specifications, preparatory design material, copyrightable architecture documentation, datasets owned by BlackRift Studios, and other protected material.
+
+Public availability does not grant AI training rights.
+
+Source availability does not grant AI training rights.
+
+EOL status does not grant AI training rights.
+
+BlackRift Studios reserves applicable text and data mining rights to the maximum extent permitted by law, including rights that may be reserved under Article 4(3) of Directive (EU) 2019/790 and equivalent or successor provisions.
+
+Where appropriate for publicly available online material, BlackRift Studios may also express this reservation through machine-readable means, metadata, website terms, or other recognised technical methods.
+
+Nothing in this section restricts scientific research or another right where applicable law does not permit that right to be excluded.
+
+## 25. BlackRift Studios Use of AI-Assisted Development Tools
+
+For transparency, BlackRift Studios may use AI-assisted development tools as part of its development workflow.
+
+These tools may include IDE completion systems, code assistance, development agents, automated analysis, and similar systems.
+
+BlackRift Studios may use such tools to assist with development speed, repetitive implementation work, bug detection, quick bug fixes, code review assistance, testing assistance, and identification of technical flaws.
+
+AI-assisted output is not treated as a substitute for human engineering or creative decision-making.
+
+Research direction, software design, architecture, product decisions, accepted implementation, and release decisions remain subject to human judgement and review.
+
+Where AI-assisted output contributes to released code, that output is reviewed and accepted by a human maintainer before release.
+
+BlackRift Studios does not treat unreviewed autonomous code generation as an acceptable substitute for software development.
+
+BlackRift Studios does not use AI-generated creative assets as a substitute for human-created final production assets under its ordinary development practice.
+
+The use of AI-assisted development tools by BlackRift Studios does not grant any third party permission to use BlackRift Studios protected material for AI training or another activity prohibited by Section 24.
+
+---
+
+# PART VIII. HOSTED INFRASTRUCTURE
+
+## 26. Infrastructure Access
+
+Permission to use the Software does not create an unlimited or permanent entitlement to Hosted Infrastructure.
+
+Access to Hosted Infrastructure may be subject to reasonable technical limits, account rules, paid plans, usage limits, security controls, and separate service terms.
+
+Normal authorised high usage is not automatically abuse merely because it creates infrastructure cost.
+
+## 27. Infrastructure Abuse
+
+Abuse of free or paid Hosted Infrastructure is prohibited.
+
+Abuse includes:
+
+1. Deliberately bypassing rate limits or usage restrictions.
+2. Attempting to obtain paid benefits without payment or authorisation.
+3. Repeatedly creating identities or accounts to evade restrictions.
+4. Sharing restricted credentials, paid access, or API keys contrary to applicable terms.
+5. Intentionally creating unreasonable or malicious load.
+6. Using Hosted Infrastructure to attack, scrape, exploit, or disrupt BlackRift Studios or another system contrary to applicable terms or law.
+7. Reselling infrastructure access where resale has not been authorised.
+8. Deliberately exploiting an obvious technical error to obtain resources or benefits that were clearly not intended to be provided.
+
+Serious infrastructure abuse may result in immediate restriction.
+
+## 28. Infrastructure Decommissioning
+
+Where reasonably possible, BlackRift Studios will publicly announce permanent decommissioning of Hosted Infrastructure relied upon by publicly available BlackRift Studios Software at least seven calendar days before shutdown.
+
+The notice period may be shortened or omitted where continued operation is prevented or made unreasonable by:
+
+1. A serious security incident.
+2. A binding legal requirement.
+3. A provider termination or restriction outside reasonable BlackRift Studios control.
+4. An emergency infrastructure failure.
+5. Fraud or abuse creating an immediate risk.
+6. Another circumstance in which continued operation is no longer reasonably possible.
+
+Where practical, BlackRift Studios may choose to:
+
+1. Open source some or all of the affected infrastructure.
+2. Provide a self-hosted alternative.
+3. Transfer or migrate operation to another maintainer or organisation.
+4. Provide migration information.
+5. Replace the service with another system.
+
+These are options available to BlackRift Studios and are not guaranteed obligations unless separately agreed in writing.
+
+Any transfer involving personal data will be handled in accordance with applicable data-protection law and the applicable BlackRift Studios Privacy and Data Policy.
+
+---
+
+# PART IX. ENFORCEMENT, BLACKLISTING, AND EVASION
+
+## 29. Proportionate Enforcement
+
+For an ordinary violation, BlackRift Studios will normally provide written notice and a reasonable opportunity to correct the issue before permanent enforcement.
+
+Immediate action may be taken where reasonably necessary for:
+
+1. Deliberate Evasion.
+2. Theft or material copying of protected BlackRift Studios code.
+3. Malicious or deceptive redistribution.
+4. Fraud.
+5. Serious Hosted Infrastructure abuse.
+6. Security threats.
+7. Repeated material violations.
+8. Conduct creating a credible risk of substantial harm.
+
+Enforcement may include termination of rights granted under this Agreement, restriction of commercial permission, suspension of related BlackRift Studios services, requests for removal through applicable distribution or hosting platforms, copyright enforcement where legally justified, and other remedies available under applicable law.
+
+## 30. Related Service Restrictions
+
+A confirmed material BRSSLA violation may also result in suspension or termination of related BlackRift Studios services, including accounts, dashboards, API credentials, Hosted Infrastructure access, or telemetry programme access, where those services are reasonably connected to the violation or enforcement.
+
+Serious or deliberate Evasion may result in immediate service restriction.
+
+A service restriction remains subject to the terms governing that service.
+
+## 31. Public Blacklist
+
+Confirmed project-level restrictions may be published at:
+
+**https://www.blackriftstudios.com/blacklisted**
+
+The purpose of the public blacklist is enforcement transparency and the prevention of false or misleading accounts of BlackRift Studios enforcement.
+
+Before an entry is published, the proposed entry must undergo an internal review by a person authorised to conduct legal or enforcement review.
+
+Where reasonably practical, that reviewer should not be the only person responsible for the original enforcement finding.
+
+The review must confirm that:
+
+1. There is sufficient evidence supporting the restriction.
+2. The cited BRSSLA provision applies to the conduct described.
+3. Each factual statement intended for publication can reasonably be substantiated.
+4. Publication is reasonably necessary and proportionate to the enforcement purpose.
+5. Unnecessary personal or private information has been removed.
+6. Any material factual dispute known to BlackRift Studios has been considered before publication.
+
+A public entry must remain limited to factual statements that BlackRift Studios can reasonably support with available evidence.
+
+An entry may include:
+
+1. The project name.
+2. The relevant distribution platform or public location.
+3. The BRSSLA provision involved.
+4. A concise factual reason for the restriction.
+5. The date enforcement began.
+6. The current status.
+7. The review or appeal status.
+8. The date of the most recent review.
+
+BlackRift Studios will avoid publishing unnecessary private or personal information.
+
+Where a material factual dispute remains unresolved, the entry may be withheld from publication or clearly identified as under review unless immediate publication is reasonably necessary to protect users, infrastructure, or BlackRift Studios' rights.
+
+A person responsible for a listed project may challenge factual inaccuracies and request review.
+
+Active entries will be reviewed periodically and may be corrected where information becomes inaccurate, incomplete, or no longer necessary for the stated enforcement purpose.
+
+Where a restriction is reversed, resolved, or no longer reasonably requires publication, the entry may be corrected, marked resolved, archived, or removed as appropriate.
+
+## 32. Appeals and Reinstatement
+
+A person or project affected by enforcement may request review through the Legal Contact.
+
+A restriction may be reduced, removed, or otherwise changed where:
+
+1. The breach has been corrected.
+2. Enforcement relied on materially incorrect information.
+3. New evidence materially changes the circumstances.
+4. The restriction is no longer proportionate.
+5. BlackRift Studios otherwise determines that reinstatement is appropriate.
+
+Reinstatement does not erase a historical violation unless the original finding itself was incorrect.
+
+BlackRift Studios may impose reasonable conditions on reinstatement where necessary to prevent recurrence.
+
+## 33. Enforcement Evasion
+
+Deliberately bypassing an active BRSSLA restriction is a separate Material Breach.
+
+Evasion may include:
+
+1. Reuploading a restricted Distribution.
+2. Renaming or rebranding substantially the same restricted project.
+3. Transferring control to another account, organisation, studio, or person for the purpose of bypassing enforcement.
+4. Creating alternate accounts or organisations to continue the restricted activity.
+5. Using another person as an intermediary.
+6. Creating a substantially equivalent Distribution intended to continue activity already restricted under BRSSLA.
+
+Creating a genuinely independent and separate project is not automatically Evasion.
+
+Where Evasion causes continued unauthorised distribution or other infringement of BlackRift Studios rights, BlackRift Studios may pursue applicable copyright enforcement, hosting complaints, platform removal procedures, civil remedies, or other lawful action.
+
+BlackRift Studios will not use a copyright takedown procedure where no valid copyright or related rights basis exists.
+
+## 34. Copyright and Rights Enforcement
+
+BlackRift Studios may enforce its copyright, trademarks, contractual rights, and other legally protected interests where applicable.
+
+Potential remedies may include platform reports, hosting-provider notices, copyright takedown notices where a lawful basis exists, requests for removal, suspension of contractual permissions, and civil legal action.
+
+A violation of another platform's rules or data-protection law does not automatically constitute copyright infringement.
+
+## 34A. Remedies
+
+A breach of this Agreement does not limit any remedy otherwise available to BlackRift Studios under applicable copyright, contract, trademark, or other law.
+
+Where legally available and proportionate to the circumstances, BlackRift Studios may seek:
+
+1. Injunctive or equivalent relief intended to stop or prevent ongoing infringement or breach.
+2. Compensation for proven loss.
+3. Damages calculated by reference to an appropriate licence fee or royalty where applicable law permits that method.
+4. Consideration of profits obtained through the infringement where applicable law permits it.
+5. Recovery of reasonable and proportionate legal costs and other enforcement expenses where recoverable by law.
+6. Removal, disabling, or restriction of infringing material through lawful platform or hosting procedures.
+7. Another remedy available under applicable law.
+
+This Agreement does not create an automatic contractual penalty or fixed liquidated-damages amount.
+
+The availability and amount of any monetary remedy are determined under applicable law and the circumstances of the individual case.
+
+---
+
+# PART X. DATA, PRIVACY, AND SECURITY
+
+## 35. Privacy and Technical Data
+
+Where the Software processes personal data or offers optional technical-data programmes, the applicable BlackRift Studios Privacy and Data Policy governs the processing of that data.
+
+Optional telemetry or hardware statistics that rely on consent will not be treated as accepted merely because a user accepted BRSSLA.
+
+Where consent is the legal basis, consent must be requested separately in the manner required by applicable law.
+
+Refusing optional telemetry must not remove unrelated normal functionality or reduce performance.
+
+BlackRift Studios does not sell personal data.
+
+## 36. Security
+
+Users must not use BlackRift Studios Software or Hosted Infrastructure to perform unauthorised access, credential theft, malicious exploitation, denial-of-service activity, malware distribution, or other unlawful attacks.
+
+Responsible security research is not automatically prohibited.
+
+A researcher acting in good faith should report vulnerabilities privately where public disclosure before remediation would create a credible security risk.
+
+---
+
+# PART XI. LIFECYCLE SUBVERSIONS
+
+## 37. BRSSLA LTS
+
+BRSSLA LTS is a lifecycle subversion of the applicable main BRSSLA version.
+
+A project designated LTS has ended active major development and has entered maintenance.
+
+LTS projects may continue receiving:
+
+1. Bug fixes.
+2. Security fixes.
+3. Compatibility updates.
+4. Stability fixes.
+5. Maintenance updates.
+6. Other limited changes BlackRift Studios considers appropriate.
+
+Reproducible issues may still be reported.
+
+Major feature requests, architectural rewrites, large performance rewrites, or other major development requests will normally not be accepted unless BlackRift Studios determines that an exception is appropriate.
+
+LTS changes support expectations. It does not transfer ownership, remove BRSSLA, or create additional redistribution rights.
+
+## 38. BRSSLA EOL
+
+BRSSLA EOL is a lifecycle subversion of the applicable main BRSSLA version.
+
+A project designated EOL has ended official development and ordinary support.
+
+BlackRift Studios is not expected to provide further:
+
+1. Bug fixes.
+2. Compatibility updates.
+3. Security updates.
+4. Feature development.
+5. Performance improvements.
+6. Platform updates.
+7. Ordinary development support.
+
+Requests for further official development may be closed or ignored.
+
+EOL does not transfer ownership, remove BRSSLA, place the Software into the public domain, or automatically make the Software open source.
+
+## 39. EOL Community Addons and Fixes
+
+Because an EOL project is no longer officially maintained, third parties may freely create independent external addons, patches, compatibility layers, bridges, fixes, performance improvements, and similar extensions intended to repair or improve the EOL Software.
+
+No prior permission from BlackRift Studios is required for such external work.
+
+These projects may:
+
+1. Fix bugs.
+2. Restore compatibility.
+3. Improve performance.
+4. Add support for newer environments.
+5. Work around limitations.
+6. Extend functionality through lawful external integration.
+
+This permission does not automatically permit redistribution of modified BlackRift Studios binaries, substantial protected BlackRift Studios code, or a rebranded copy of the original project.
+
+An external addon or patch remains owned by the person who independently created it.
+
+## 40. EOL Research and Preservation
+
+EOL Software may be freely used for:
+
+1. Personal research.
+2. Academic research.
+3. Large-scale technical research.
+4. Automated technical research.
+5. Benchmarking and profiling.
+6. Historical analysis.
+7. Compatibility research.
+8. Software preservation.
+9. Education.
+10. Investigation of older technologies and implementations.
+
+Reasonable archival copies may be maintained where genuinely necessary for preservation, reproducibility, or research.
+
+This permission does not automatically permit commercial resale, relicensing, rebranding, or redistribution as a maintained replacement for the official BlackRift Studios project.
+
+The AI training and commercial product-development restrictions in Section 24 continue to apply to EOL Software.
+
+EOL means official development ended. It does not mean ownership ended.
+
+---
+
+# PART XII. GENERAL LEGAL PROVISIONS
+
+## 40A. Good-Faith Resolution and Mediation
+
+Before starting ordinary legal proceedings concerning this Agreement, the parties should first make a good-faith attempt to resolve the dispute directly.
+
+A party seeking resolution should provide written notice describing the dispute and the outcome requested with enough detail for the other party to understand the issue.
+
+For disputes between BlackRift Studios and a business user, the parties will normally allow at least fourteen calendar days after written notice for direct resolution before commencing ordinary court proceedings.
+
+Either party may propose voluntary mediation or another suitable alternative dispute-resolution process.
+
+Participation in mediation does not waive a legal right or remedy and does not require either party to accept a proposed settlement.
+
+This Section does not:
+
+1. Prevent urgent injunctive or protective relief.
+2. Prevent action necessary to preserve a limitation period, evidence, or legal claim.
+3. Require BlackRift Studios to leave ongoing infringement, fraud, security abuse, or Evasion unaddressed during discussions.
+4. Restrict any mandatory consumer right or access to a court or statutory dispute-resolution mechanism.
+5. Require a consumer to participate in mediation or arbitration.
+
+Nothing in this Agreement requires private arbitration unless the parties separately agree to it in writing after a dispute arises.
+
+## 41. Governing Law and Jurisdiction
+
+This Agreement is governed by applicable European Union law and the law of the Republic of Lithuania.
+
+Mandatory consumer protections in the country where a consumer normally lives remain unaffected.
+
+Consumers retain access to courts and remedies available to them under applicable consumer law.
+
+Business disputes will be handled by the competent courts of Lithuania unless a separate written agreement lawfully provides otherwise.
+
+## 42. Severability
+
+If any provision of this Agreement is found invalid, unlawful, or unenforceable, it will be interpreted or modified only to the minimum extent necessary to make it enforceable where legally possible.
+
+If that is not possible, the affected provision will be severed.
+
+All remaining provisions continue in effect.
+
+## 43. No Waiver
+
+BlackRift Studios choosing not to enforce a provision in one situation does not permanently waive that provision.
+
+Giving additional time to correct a breach does not remove the underlying requirement.
+
+A previous decision not to act does not prevent proportionate enforcement of a later violation.
+
+## 44. Disclaimer of Warranties
+
+To the maximum extent permitted by applicable law, the Software is provided as available and without warranties that cannot reasonably be given for experimental software.
+
+BlackRift Studios does not guarantee that the Software will be uninterrupted, error-free, compatible with every environment, or suitable for every particular purpose.
+
+Nothing in this section excludes a warranty or consumer right that applicable law does not permit BlackRift Studios to exclude.
+
+## 45. Limitation of Liability
+
+To the maximum extent permitted by applicable law, BlackRift Studios is not liable for indirect or unforeseeable loss arising from use of or inability to use free or experimental Software.
+
+Nothing in this Agreement excludes or limits liability where applicable law does not permit exclusion or limitation, including applicable liability for fraud, deliberate misconduct, death, personal injury, or mandatory consumer rights.
+
+Users should maintain reasonable backups of important files, worlds, projects, and data.
+
+## 46. Termination
+
+Rights granted under this Agreement may be terminated where a Material Breach occurs.
+
+An ordinary breach that can reasonably be corrected will normally be handled under the notice and review process in Part IX before permanent termination.
+
+Immediate termination may occur where expressly permitted by Part IX.
+
+Provisions concerning ownership, intellectual property, accrued enforcement rights, confidentiality where applicable, AI training restrictions, liability, governing law, and provisions intended by their nature to survive termination remain effective after termination.
+
+## 47. Licence Versions and Amendments
+
+Each Software release should identify the BRSSLA version that governs that release.
+
+BRSSLA LTS and BRSSLA EOL remain lifecycle subversions of their applicable main BRSSLA version unless expressly stated otherwise.
+
+A newer BRSSLA version does not automatically rewrite the terms attached to an older Software release unless a lawful migration mechanism or separate agreement clearly provides otherwise.
+
+New Software releases may be published under a newer BRSSLA version.
+
+BlackRift Studios may announce material licence changes through its website, official community channels, distribution pages, or other reasonable public methods.
+
+Previous versions should remain available for reference and enforcement transparency.
+
+## 48. Separate Written Agreements
+
+BlackRift Studios may grant additional rights or exceptions through a separate written agreement.
+
+A separate agreement overrides BRSSLA only for the specific rights and circumstances it expressly addresses.
+
+All other applicable BRSSLA provisions remain in effect.
+
+## 49. No Transfer of Ownership Through Use
+
+Use of the Software, contribution to a project, support of BlackRift Studios, receipt of a community role, participation in research, or use of Hosted Infrastructure does not by itself create employment, partnership, agency, investment rights, ownership rights, or a right to BlackRift Studios revenue.
+
+Any separate commercial, working, ownership, partnership, or other formal arrangement must be agreed separately in writing.
+
+## 50. Contact
+
+Questions concerning BRSSLA, Commercial Licences, enforcement review, permissions, or legal matters may be sent to:
+
+**legal@blackriftstudios.com**
+
+BlackRift Studios may request reasonable information necessary to understand the proposed use or resolve a compliance question.
+
+Good-faith requests for clarification are encouraged.
+
+---
+
+**BlackRift Studios**
+**BRSSLA Version 2.0.0**
+**Copyright © 2026 BlackRift Studios. All rights reserved.**
