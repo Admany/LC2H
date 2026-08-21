@@ -53,6 +53,16 @@ public final class LostCitiesCacheBudgetManager {
         if (group == null || key == null) {
             return;
         }
+        /* Replacing an existing cache value does not change the budget. The
+         * old path still took a wall clock sample and ran both global budget
+         * checks for every replacement. CitySphere alone can replace the same
+         * entries tens of thousands of times during one spawn burst. */
+        if (!inserted) {
+            if (TOUCH_ON_ACCESS) {
+                group.recordAccess(key);
+            }
+            return;
+        }
         group.recordPut(key, entryBytes, inserted);
         if (shouldEnforceBudgetNow()) {
             maybeEvict();
@@ -214,12 +224,6 @@ public final class LostCitiesCacheBudgetManager {
 
         private void recordPut(Object key, long entryBytes, boolean inserted) {
             long now = System.currentTimeMillis();
-            if (!inserted) {
-                if (TOUCH_ON_ACCESS) {
-                    recordAccessInternal(key, now);
-                }
-                return;
-            }
             int size = (int) Math.min(Integer.MAX_VALUE, Math.max(1L, entryBytes));
             sizes.put(key, size);
             lastAccess.put(key, now);

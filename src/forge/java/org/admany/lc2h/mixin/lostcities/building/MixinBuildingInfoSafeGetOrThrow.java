@@ -16,8 +16,8 @@ import java.util.Locale;
  * Prevent hard-crashes during BuildingInfo construction when an asset pack references
  * a missing/typo'd building/part id (e.g. *_0_1_1, structurebundel).
  *
- * This does not "fix" the pack, but it avoids partial/duplicated generation caused by
- * repeated retries with different cached state.
+ * It does not repair the pack. It keeps a missing asset from causing partial
+ * generation and repeated retries.
  */
 @Mixin(value = mcjty.lostcities.worldgen.lost.BuildingInfo.class, remap = false)
 public abstract class MixinBuildingInfoSafeGetOrThrow {
@@ -48,8 +48,8 @@ public abstract class MixinBuildingInfoSafeGetOrThrow {
             }
         }
 
-        // As a last resort, use a stable fallback asset so BuildingInfo can complete.
-        // This prevents worldgen from repeatedly retrying and creating overlapping/partial results.
+        // Use a stable fallback so BuildingInfo can finish instead of retrying
+        // and producing overlapping or partial results.
         try {
             if (registry == AssetRegistries.BUILDINGS) {
                 return AssetRegistries.BUILDINGS.getOrWarn(world, "building1");

@@ -295,7 +295,7 @@ public final class DeferredTreeEventHandler {
         // re-queued forever (missingChunkRetries climbing into the tens of
         // thousands with entries stuck for minutes) and the tree never
         // landed at all - the same visual truncation, one stage later.
-        // Placing the loaded part immediately puts the tree in the world;
+        // Placing the loaded part immediately puts the tree in the world.
         // an unloaded fringe block is not worth stalling the whole tree.
         LinkedHashMap<ChunkCoord, ChunkShadowMutationPlan.Builder> plans = new LinkedHashMap<>();
         int queued = 0;

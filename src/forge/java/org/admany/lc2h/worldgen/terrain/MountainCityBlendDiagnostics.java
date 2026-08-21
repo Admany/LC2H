@@ -1,4 +1,4 @@
-package org.admany.lc2h.worldgen;
+package org.admany.lc2h.worldgen.terrain;
 
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
@@ -6,16 +6,8 @@ import net.minecraft.world.level.Level;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * Counters for {@code MixinBlenderCityEdge}.
- *
- * <p>Kept as a plain class rather than fields on the mixin itself: the mixin
- * merges its {@code @Unique} members directly into vanilla's {@code Blender}
- * class, which is invisible to normal Java code at compile time (nothing
- * outside the mixin transform can call a method that doesn't exist on the
- * real, untransformed {@code Blender.class}). Routing counters through an
- * ordinary class lets {@code /lc2h diagnostics} read them normally.</p>
- */
+/** Runtime counters for the density blender. Kept outside the mixin so the
+ * diagnostics command can read them before transformation. */
 public final class MountainCityBlendDiagnostics {
 
     private static final AtomicLong SEEN = new AtomicLong();
@@ -25,15 +17,8 @@ public final class MountainCityBlendDiagnostics {
     private static final AtomicLong APPLIED = new AtomicLong();
     private static final AtomicLong BLEND_CALLS = new AtomicLong();
 
-    /**
-     * What actually happened for each chunk AT GENERATION TIME.
-     *
-     * <p>Re-evaluating the decision later is misleading: ChunkRoleProbe can
-     * answer "no city nearby" during noise generation and "city right there"
-     * once its cache is warm, so a chunk that was never blended looks like it
-     * should have been when inspected afterwards. Recording the decision as
-     * it is made is the only way to tell those apart.</p>
-     */
+    /** The decision recorded at generation time. A later warm-cache lookup is not
+     * a substitute for this value. */
     public record GenerationOutcome(String summary, double centreShift) {
     }
 
@@ -71,14 +56,7 @@ public final class MountainCityBlendDiagnostics {
         return CHUNK_OUTCOMES.get(key(dimension, chunkX, chunkZ));
     }
 
-    /**
-     * Drops generation-time outcomes at the server lifecycle boundary.
-     *
-     * <p>The outcome key intentionally stays compact for the hot diagnostic
-     * lookup. Clearing it with the world-scoped terrain caches prevents a
-     * coordinate in a newly opened world from inheriting an explanation from
-     * the previous world.</p>
-     */
+    /** Drops generation outcomes with the world-scoped terrain state. */
     public static void clearLifecycleState() {
         CHUNK_OUTCOMES.clear();
     }

@@ -2,7 +2,6 @@ package org.admany.lc2h.mixin.lostcities.cache;
 
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.lost.CitySphere;
-import org.admany.lc2h.data.cache.LostCitiesCacheBridge;
 import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -39,14 +38,6 @@ public class MixinCitySphereCacheBudget {
     )
     private static Object lc2h$trackSphereCacheGet(Map<ChunkCoord, CitySphere> cache, Object key) {
         Object value = cache.get(key);
-        if (value == null && key instanceof ChunkCoord coord) {
-            CitySphere disk = LostCitiesCacheBridge.getDisk("city_sphere", coord, CitySphere.class);
-            if (disk != null) {
-                Object prev = cache.put(coord, disk);
-                LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_SPHERE_BUDGET, coord, LC2H_CITY_SPHERE_BUDGET.defaultEntryBytes(), prev == null);
-                value = disk;
-            }
-        }
         if (value != null) {
             LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_SPHERE_BUDGET, key);
         }
@@ -63,9 +54,6 @@ public class MixinCitySphereCacheBudget {
     private static Object lc2h$trackSphereCachePut(Map<ChunkCoord, CitySphere> cache, Object key, Object value) {
         Object prev = cache.put((ChunkCoord) key, (CitySphere) value);
         LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_SPHERE_BUDGET, key, LC2H_CITY_SPHERE_BUDGET.defaultEntryBytes(), prev == null);
-        if (key instanceof ChunkCoord coord && value instanceof CitySphere sphere) {
-            LostCitiesCacheBridge.putDisk("city_sphere", coord, sphere);
-        }
         return prev;
     }
 

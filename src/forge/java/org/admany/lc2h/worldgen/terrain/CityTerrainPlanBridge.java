@@ -1,4 +1,4 @@
-package org.admany.lc2h.worldgen;
+package org.admany.lc2h.worldgen.terrain;
 
 import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
@@ -8,15 +8,8 @@ import org.admany.lc2h.worldgen.terrain.NaturalHeightSampler;
 
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * Bridges Lost Cities' late floor query to the terrain plan already selected
- * for Minecraft's density graph.
- *
- * <p>This class performs no shaping, scanning, interpolation, or independent
- * detection. The vanilla density hook is the only terrain shaper. This bridge
- * merely prevents Lost Cities' later block-placement pass from assuming a
- * different floor height than the authoritative density plan.</p>
- */
+/** Keeps Lost Cities' late floor query in step with the density plan. The
+ * Minecraft density hook remains the only terrain shaper. */
 public final class CityTerrainPlanBridge {
 
     private static final AtomicLong CALLS = new AtomicLong();
@@ -48,20 +41,29 @@ public final class CityTerrainPlanBridge {
             NOT_CITY.incrementAndGet();
             return null;
         }
-        if (MountainCityReservationPlanner.plan(
-            info.provider,
-            info.coord.dimension(),
-            info.coord.chunkX(),
-            info.coord.chunkZ(),
-            profile
-        ).removesBuildingCell()) {
-            NOT_CITY.incrementAndGet();
-            return null;
-        }
         NaturalHeightSampler.LevelSampler heights =
             NaturalHeightSampler.forLevel(info.provider.getWorld());
         CityShiftField.Context context = CityShiftField.context(info.provider, profile, heights);
         if (context == null || !context.settings().enabled()) {
+            NOT_CITY.incrementAndGet();
+            return null;
+        }
+        /* The late Lost Cities hook is still on a worldgen worker. If the
+         * natural height is not already resident, leave the original hook in
+         * place rather than sampling vanilla noise or joining another worker's
+         * flight. The density plan will publish the authoritative result once
+         * its asynchronous region is ready. */
+        if (heights.cachedChunkHeight(info.coord.chunkX(), info.coord.chunkZ()) == null) {
+            NOT_CITY.incrementAndGet();
+            return null;
+        }
+        /* Reservation publication is also asynchronous. The old call to
+         * plan() could synchronously build a cold reservation region from the
+         * late Lost Cities hook, defeating the non blocking terrain path. A
+         * missing publication keeps Lost Cities' original decision for this
+         * query and lets the next chunk reuse the completed immutable plan. */
+        if (MountainCityReservationPlanner.peekRemovesBuildingCell(
+            info.provider, info.coord, profile)) {
             NOT_CITY.incrementAndGet();
             return null;
         }

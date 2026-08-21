@@ -16,6 +16,7 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.runtime.Lc2hRuntimeModes;
+import org.admany.lc2h.util.ResourceLocations;
 import org.admany.lc2h.worldgen.apply.ShadowBlockMutationApplier;
 import org.admany.lc2h.worldgen.lostcities.DeferredTreeQueue;
 import org.admany.lc2h.worldgen.lostcities.DeferredTreeEventHandler;
@@ -218,7 +219,7 @@ public final class MultiChunkParityAutoRunner {
         if (token == null || token.isBlank()) {
             return null;
         }
-        ResourceLocation id = ResourceLocation.tryParse(token);
+        ResourceLocation id = ResourceLocations.tryParse(token);
         return id == null ? null : ResourceKey.create(Registries.DIMENSION, id);
     }
 

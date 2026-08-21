@@ -28,23 +28,8 @@ public abstract class MixinForgeEventHandlersBedFix {
         throw new IllegalStateException("Shadowed");
     }
 
-    /**
-     * Fixes two bugs in the original Lost Cities findLocation:
-     *
-     * Bug 1 (crash): The original while loop condition was `top.getY() > 1` where `top` never
-     * changes - it is a fixed reference to bedLocation.above(5). When the destination dimension
-     * is empty (fresh world, all air), `location` descends unchecked into negative Y, and
-     * ServerLevel.getBlockState() throws IllegalArgumentException for out-of-bounds Y, crashing
-     * the server. Fix: guard on `location.getY()` against the world's actual minimum build height.
-     *
-     * Bug 2: When no solid floor was found, the original code called
-     * `destWorld.setBlockAndUpdate(bedLocation, Blocks.COBBLESTONE...)`, placing a block in
-     * destWorld at the source-world bed coordinates (wrong dimension). Replaced with a heightmap
-     * lookup to find a safe surface in the destination world instead.
-     *
-     * @author Admany
-     * @reason Fix out-of-bounds Y crash and wrong-dimension block placement in bed ritual teleport.
-     */
+/** Keeps the Lost Cities bed search inside the destination world's height range
+ * and finds the fallback floor in the correct dimension. */
     @Overwrite
     private BlockPos findLocation(BlockPos bedLocation, ServerLevel destWorld) {
         BlockPos top = bedLocation.above(5);
@@ -54,23 +39,14 @@ public abstract class MixinForgeEventHandlersBedFix {
             location = location.below();
         }
         if (location.getY() <= minY || destWorld.isEmptyBlock(location.below())) {
-            // No solid surface found at bed coordinates in the dest world; fall back to heightmap.
+            // No solid surface at the bed coordinates. Use the destination heightmap.
             BlockPos surface = destWorld.getHeightmapPos(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, bedLocation);
             return surface.above();
         }
         return location.above(1);
     }
 
-    /**
-     * Defers the actual dimension-change call to the next server tick. Calling
-     * player.changeDimension() from within a PlayerSleepInBedEvent callback is unsafe because
-     * it removes/re-adds the player entity while the event dispatcher is still iterating the
-     * entity list, which can produce ConcurrentModificationException or leave the player in a
-     * partially-removed state and crash the client on the subsequent render tick.
-     *
-     * @author Admany
-     * @reason Prevent crash from calling changeDimension during PlayerSleepInBedEvent dispatch.
-     */
+    /** Defers dimension changes until the sleep event has finished dispatching. */
     @Overwrite
     public void onPlayerSleepInBedEvent(PlayerSleepInBedEvent event) {
         Level world = event.getEntity().getCommandSenderWorld();

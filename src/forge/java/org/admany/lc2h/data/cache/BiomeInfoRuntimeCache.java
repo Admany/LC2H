@@ -6,8 +6,12 @@ import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.lost.BiomeInfo;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
+import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.biome.Biome;
+import org.admany.lc2h.worldgen.lostcities.PlannerHotPath;
+import org.admany.lc2h.worldgen.terrain.NaturalHeightSampler;
 
+import java.lang.reflect.Constructor;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.LongAdder;
@@ -27,6 +31,9 @@ public final class BiomeInfoRuntimeCache {
     private static final LongAdder MISSES = new LongAdder();
     private static final LongAdder RACES = new LongAdder();
     private static final LongAdder EVICTIONS = new LongAdder();
+    private static final LongAdder PLANNER_EXACT_HEIGHTS = new LongAdder();
+    private static final LongAdder PLANNER_GROUND_FALLBACKS = new LongAdder();
+    private static final Constructor<BiomeInfo> BIOME_INFO_CONSTRUCTOR = resolveConstructor();
 
     private BiomeInfoRuntimeCache() {
     }
@@ -61,12 +68,46 @@ public final class BiomeInfoRuntimeCache {
             + " hits=" + HITS.sum()
             + " misses=" + MISSES.sum()
             + " races=" + RACES.sum()
-            + " evictions=" + EVICTIONS.sum();
+            + " evictions=" + EVICTIONS.sum()
+            + " plannerExactHeights=" + PLANNER_EXACT_HEIGHTS.sum()
+            + " plannerGroundFallbacks=" + PLANNER_GROUND_FALLBACKS.sum();
     }
 
-    private static BiomeInfo create(IDimensionInfo provider, ChunkCoord coord) {
+    private static BiomeInfo createExact(IDimensionInfo provider, ChunkCoord coord) {
         ChunkHeightmap heightmap = provider.getHeightmap(coord);
         int y = heightmap != null ? heightmap.getHeight() : 64;
+        return createAtHeight(provider, coord, y);
+    }
+
+    private static PlannerBiome createForPlanner(IDimensionInfo provider, ChunkCoord coord) {
+        Integer y = cachedNaturalHeight(provider, coord);
+        if (y != null) {
+            PLANNER_EXACT_HEIGHTS.increment();
+            return new PlannerBiome(createAtHeight(provider, coord, y), true);
+        }
+
+        /* City and shift planners ask for thousands of biome facts before the
+         * corresponding chunks exist. Calling provider.getHeightmap here opens
+         * a complete NoiseChunk density graph per cold coordinate and makes all
+         * worldgen workers compete with the chunk the server is waiting for.
+         * Ground level is a deterministic surface-biome approximation. Keep it
+         * transient so an exact resident height can replace it later. */
+        int fallbackY = provider.getProfile() == null ? 64 : provider.getProfile().GROUNDLEVEL;
+        PLANNER_GROUND_FALLBACKS.increment();
+        return new PlannerBiome(createAtHeight(provider, coord, fallbackY), false);
+    }
+
+    private static Integer cachedNaturalHeight(IDimensionInfo provider, ChunkCoord coord) {
+        try {
+            WorldGenLevel world = provider.getWorld();
+            NaturalHeightSampler.LevelSampler sampler = NaturalHeightSampler.forLevel(world);
+            return sampler == null ? null : sampler.cachedChunkHeight(coord.chunkX(), coord.chunkZ());
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static BiomeInfo createAtHeight(IDimensionInfo provider, ChunkCoord coord, int y) {
         Holder<Biome> biome = provider.getBiome(new BlockPos(
             (coord.chunkX() << 4) + 8,
             y,
@@ -76,11 +117,19 @@ public final class BiomeInfoRuntimeCache {
 
     private static BiomeInfo newBiomeInfo(Holder<Biome> biome) {
         try {
-            java.lang.reflect.Constructor<BiomeInfo> constructor = BiomeInfo.class.getDeclaredConstructor(Holder.class);
-            constructor.setAccessible(true);
-            return constructor.newInstance(biome);
+            return BIOME_INFO_CONSTRUCTOR.newInstance(biome);
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("Could not construct Lost Cities BiomeInfo", e);
+        }
+    }
+
+    private static Constructor<BiomeInfo> resolveConstructor() {
+        try {
+            Constructor<BiomeInfo> constructor = BiomeInfo.class.getDeclaredConstructor(Holder.class);
+            constructor.setAccessible(true);
+            return constructor;
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
         }
     }
 
@@ -95,7 +144,16 @@ public final class BiomeInfoRuntimeCache {
                 return cached;
             }
             MISSES.increment();
-            BiomeInfo computed = create(provider, coord);
+            BiomeInfo computed;
+            if (PlannerHotPath.isActive()) {
+                PlannerBiome plannerBiome = createForPlanner(provider, coord);
+                computed = plannerBiome.biome();
+                if (!plannerBiome.cacheable()) {
+                    return computed;
+                }
+            } else {
+                computed = createExact(provider, coord);
+            }
             BiomeInfo raced = entries.putIfAbsent(coord, computed);
             if (raced != null) {
                 RACES.increment();
@@ -121,6 +179,9 @@ public final class BiomeInfoRuntimeCache {
                 }
             }
         }
+    }
+
+    private record PlannerBiome(BiomeInfo biome, boolean cacheable) {
     }
 
     private static final class ScopeRef {

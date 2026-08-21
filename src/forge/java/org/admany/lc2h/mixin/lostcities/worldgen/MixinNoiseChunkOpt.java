@@ -25,7 +25,13 @@ public class MixinNoiseChunkOpt {
         Boolean.parseBoolean(System.getProperty("lc2h.noise.async_warmup", "false"));
 
     private static final boolean USE_IDENTITY_WRAP =
-        Boolean.parseBoolean(System.getProperty("lc2h.noise.identity_wrap", "false"));
+        // Minecraft's density graph nodes are immutable for a NoiseChunk.
+        // Identity lookup avoids recursively comparing large CubicSpline trees
+        // on every wrap call during cold highway and terrain planning.
+        Boolean.parseBoolean(System.getProperty("lc2h.noise.identity_wrap", "true"));
+
+    private static final int IDENTITY_INITIAL_CAPACITY = Math.max(64, Math.min(8192,
+        Integer.getInteger("lc2h.noise.identityInitialCapacity", 1024)));
 
     @Unique
     private Map<DensityFunction, DensityFunction> lc2h$identityWrapped;
@@ -49,7 +55,12 @@ public class MixinNoiseChunkOpt {
                                          NoiseChunkOpt.FluidStatusV fluidStatus,
                                          CallbackInfo ci) {
         if (USE_IDENTITY_WRAP) {
-            lc2h$identityWrapped = new IdentityHashMap<>();
+            // NoiseChunkOpt.wrap visits a large immutable density graph. A
+            // default IdentityHashMap starts at 32 slots and repeatedly
+            // resizes while the graph is being wrapped, which showed up as a
+            // hot allocation path in worldgen dumps. Reserve a modest table
+            // up front while keeping the size configurable for unusual packs.
+            lc2h$identityWrapped = new IdentityHashMap<>(IDENTITY_INITIAL_CAPACITY);
         }
     }
 
@@ -64,16 +75,26 @@ public class MixinNoiseChunkOpt {
     private Object lc2h$wrapWithIdentityCache(Map<DensityFunction, DensityFunction> map,
                                               Object key,
                                               Function<Object, Object> mappingFunction) {
-        if (!USE_IDENTITY_WRAP || lc2h$identityWrapped == null) {
+        if (!USE_IDENTITY_WRAP) {
             return map.computeIfAbsent((DensityFunction) key, k -> (DensityFunction) mappingFunction.apply(k));
         }
+        // Some Lost Cities builds construct the object through a path where
+        // the constructor injection is not reached before wrap().  Do not
+        // silently fall back to HashMap in that case: equals() on a density
+        // graph walks the whole CubicSpline tree and recreates the stall this
+        // cache is meant to remove.
+        Map<DensityFunction, DensityFunction> identity = lc2h$identityWrapped;
+        if (identity == null) {
+            identity = new IdentityHashMap<>(IDENTITY_INITIAL_CAPACITY);
+            lc2h$identityWrapped = identity;
+        }
         DensityFunction dfKey = (DensityFunction) key;
-        DensityFunction cached = lc2h$identityWrapped.get(dfKey);
+        DensityFunction cached = identity.get(dfKey);
         if (cached != null) {
             return cached;
         }
         DensityFunction created = (DensityFunction) mappingFunction.apply(dfKey);
-        lc2h$identityWrapped.put(dfKey, created);
+        identity.put(dfKey, created);
         return created;
     }
 }

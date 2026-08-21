@@ -106,6 +106,6 @@ public final class MidgardTreeCaptureHooks {
         TreeCompatTracker.recordMidgardTrunkPostpass();
         // This post-pass also runs for ordinary Midgard trees outside LC2H's capture
         // policy.  It is an observation point, not proof that a deferred replay is
-        // required; capture is owned by the outer feature boundary above.
+        // required. Capture is owned by the outer feature boundary above.
     }
 }

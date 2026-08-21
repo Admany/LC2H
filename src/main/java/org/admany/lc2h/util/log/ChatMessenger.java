@@ -2,6 +2,8 @@ package org.admany.lc2h.util.log;
 
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.ClickEvent;
+import net.minecraft.network.chat.HoverEvent;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.network.chat.Style;
 
@@ -60,5 +62,20 @@ public final class ChatMessenger {
 
     public static void error(CommandSourceStack source, String message) {
         error(source, Component.literal(message));
+    }
+
+    public static MutableComponent command(String command, String description) {
+        MutableComponent link = Component.literal(command).withStyle(style -> style
+            .withColor(COLOR_PREFIX)
+            .withUnderlined(true)
+            .withClickEvent(new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND, command))
+            .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
+                Component.literal("Click to put this command in chat"))));
+        return Component.empty().append(link)
+            .append(Component.literal("  " + description).withStyle(style -> style.withColor(COLOR_PRIMARY)));
+    }
+
+    public static void commandLine(CommandSourceStack source, String command, String description) {
+        source.sendSuccess(() -> Component.literal("  ").append(command(command, description)), false);
     }
 }

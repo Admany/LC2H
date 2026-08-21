@@ -8,8 +8,8 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.levelgen.blending.Blender;
 import org.admany.lc2h.mixin.accessor.minecraft.BlenderFactory;
 import org.admany.lc2h.util.server.DimensionInfoAccessor;
-import org.admany.lc2h.worldgen.CityDensityTransform;
-import org.admany.lc2h.worldgen.MountainCityBlendDiagnostics;
+import org.admany.lc2h.worldgen.terrain.CityDensityTransform;
+import org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics;
 import org.admany.lc2h.worldgen.terrain.CityShiftField;
 import org.admany.lc2h.worldgen.terrain.NaturalHeightSampler;
 import org.spongepowered.asm.mixin.Mixin;
@@ -43,7 +43,7 @@ import java.util.Arrays;
 public abstract class MixinBlenderCityEdge implements CityDensityTransform {
 
     private static final boolean ENABLED = Boolean.parseBoolean(
-        System.getProperty("lc2h.terrain.cityBlender.enabled", "true"));
+        System.getProperty("lc2h.terrain.cityBlender.enabled", "false"));
 
     @Unique
     private boolean lc2h$active;

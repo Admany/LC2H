@@ -100,7 +100,7 @@ public final class TerrainCorrectionGpuPipeline {
         CORRECTION_HOOKS.incrementAndGet();
         // Lost Cities' synchronous correction callback may only consume a
         // completed plan. Snapshot capture happens earlier in generate(),
-        // after setPrimer and heightmap construction; this callback never
+                // after setPrimer and heightmap construction. This callback never
         // queues GPU work and never waits for it.
         if (!TerrainRegionPlanCache.hasUpstreamCapture()) {
             return false;

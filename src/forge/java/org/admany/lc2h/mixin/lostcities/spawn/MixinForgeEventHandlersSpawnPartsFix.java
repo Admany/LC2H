@@ -20,12 +20,7 @@ public abstract class MixinForgeEventHandlersSpawnPartsFix {
         throw new IllegalStateException("Shadowed");
     }
 
-    /**
-     * This addresses an issue in Lost Cities - the spawn suitability check was performed at a fixed Y=128, but certain filters like 'forceSpawnParts' depend on the actual Y position. As a result, valid configurations could appear impossible, triggering endless spawn searches. We now assess the suitability predicate at the appropriate Y level.
-     *
-     * @author Admany
-     * @reason Avoid Y=128 suitability gate breaking forceSpawnParts.
-     */
+    /** Evaluates spawn suitability at the real Y level instead of a fixed 128. */
     @Overwrite
     private BlockPos findSafeSpawnPointAtColumn(Level world, IDimensionInfo provider, Predicate<BlockPos> isSuitable, int x, int z) {
         ChunkCoord coord = new ChunkCoord(provider.getType(), x >> 4, z >> 4);

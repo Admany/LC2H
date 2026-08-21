@@ -99,7 +99,7 @@ public abstract class MixinRegistryAssetRegistryWorldStyleFallback {
             // Only cache the fallback and emit a warning once the registry has been fully loaded
             // (indicated by lostcities:standard being present in assets from loadAll()).
             // If assets is still empty we're in early startup: datapacks may not have loaded yet,
-            // so a registry miss here is a false alarm. Don't cache — loadAll() will populate it
+            // so a registry miss here is a false alarm. Do not cache yet because loadAll() fills it
             // correctly later. If the asset is still missing after loadAll(), the next call will
             // hit this branch again, log once, and cache permanently.
             boolean registryLoaded = isWorldStyle

@@ -1,6 +1,7 @@
 package org.admany.lc2h.worldgen.lostcities;
 
 import mcjty.lostcities.api.LostChunkCharacteristics;
+import mcjty.lostcities.config.HighwayGenerationMode;
 import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
@@ -10,11 +11,17 @@ import mcjty.lostcities.worldgen.lost.CitySphere;
 import mcjty.lostcities.worldgen.lost.Highway;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
+import org.admany.lc2h.worldgen.terrain.IntercityHighwayIndex;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 public final class ChunkRoleProbe {
 
@@ -33,6 +40,36 @@ public final class ChunkRoleProbe {
      */
     private static final ConcurrentHashMap<IDimensionInfo, ConcurrentHashMap<ChunkCoord, Probe>>
         TERRAIN_CACHE = new ConcurrentHashMap<>();
+    /**
+     * Structure placement must never synchronously rebuild the city factor.
+     * Cold stable probes are therefore prepared on a tiny daemon executor and
+     * published for the next structure query. The executor is intentionally
+     * bounded so a large structure scan cannot create another worker stampede.
+     */
+    private static final AtomicInteger STABLE_PREWARM_THREAD_IDS = new AtomicInteger();
+    private static final ThreadPoolExecutor STABLE_PREWARM_EXECUTOR =
+        new ThreadPoolExecutor(
+            2,
+            2,
+            30L,
+            TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(64),
+            runnable -> {
+                Thread thread = new Thread(runnable,
+                    "lc2h-stable-role-prewarm-" + STABLE_PREWARM_THREAD_IDS.incrementAndGet());
+                thread.setDaemon(true);
+                thread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1));
+                return thread;
+            },
+            new ThreadPoolExecutor.AbortPolicy());
+    private static final ConcurrentHashMap<IDimensionInfo,
+        ConcurrentHashMap<ChunkCoord, CompletableFuture<Probe>>> STABLE_FLIGHTS =
+        new ConcurrentHashMap<>();
+    private static final AtomicLong STABLE_PREWARM_SUBMITTED = new AtomicLong();
+    private static final AtomicLong STABLE_PREWARM_COMPLETED = new AtomicLong();
+    private static final AtomicLong STABLE_PREWARM_REJECTED = new AtomicLong();
+    private static final AtomicLong STABLE_CONTENTION_FALLBACKS = new AtomicLong();
+    private static final AtomicLong STABLE_LIFECYCLE = new AtomicLong();
     private static final AtomicInteger OP_COUNTER = new AtomicInteger(0);
     private static final Probe EMPTY_PROBE = new Probe(false, false, 0, false, -1, false, false, false);
 
@@ -241,12 +278,126 @@ public final class ChunkRoleProbe {
         if (cached != null) {
             return cached;
         }
-        Probe resolved = computeStableTerrainProbe(dimInfo, coord);
-        if (resolved == null) {
-            return EMPTY_PROBE;
+        ConcurrentHashMap<ChunkCoord, CompletableFuture<Probe>> flights =
+            STABLE_FLIGHTS.computeIfAbsent(dimInfo, ignored -> new ConcurrentHashMap<>());
+        CompletableFuture<Probe> created = new CompletableFuture<>();
+        CompletableFuture<Probe> existing = flights.putIfAbsent(coord, created);
+        if (existing != null) {
+            try {
+                /* A role probe is queried from the worldgen hot path. Waiting
+                 * here turns one cold city-factor calculation into a global
+                 * worker stall. The flight owner publishes the immutable
+                 * result; contending workers use the conservative empty probe
+                 * and continue with their normal fallback. */
+                Probe ready = existing.getNow(null);
+                if (ready != null) {
+                    return ready;
+                }
+                STABLE_CONTENTION_FALLBACKS.incrementAndGet();
+                return EMPTY_PROBE;
+            } catch (Throwable ignored) {
+                STABLE_CONTENTION_FALLBACKS.incrementAndGet();
+                return EMPTY_PROBE;
+            }
         }
-        Probe previous = providerCache.putIfAbsent(coord, resolved);
-        return previous != null ? previous : resolved;
+        Probe resolved = computeStableTerrainProbe(dimInfo, coord);
+        try {
+            if (resolved == null) {
+                created.complete(EMPTY_PROBE);
+                return EMPTY_PROBE;
+            }
+            Probe previous = providerCache.putIfAbsent(coord, resolved);
+            Probe result = previous != null ? previous : resolved;
+            created.complete(result);
+            return result;
+        } finally {
+            flights.remove(coord, created);
+            if (flights.isEmpty()) {
+                STABLE_FLIGHTS.remove(dimInfo, flights);
+            }
+        }
+    }
+
+    /**
+     * Starts a stable role computation without making the caller wait. This
+     * is used by structure placement, where a cold city-factor query would
+     * otherwise hold a worldgen worker inside vanilla noise evaluation.
+     */
+    public static void requestStableTerrainProbe(IDimensionInfo dimInfo,
+                                                  ResourceKey<Level> dim,
+                                                  int chunkX,
+                                                  int chunkZ) {
+        if (dimInfo == null || dim == null) {
+            return;
+        }
+        ChunkCoord coord = new ChunkCoord(dim, chunkX, chunkZ);
+        ConcurrentHashMap<ChunkCoord, Probe> providerCache = TERRAIN_CACHE.get(dimInfo);
+        if (providerCache != null && providerCache.containsKey(coord)) {
+            return;
+        }
+        ConcurrentHashMap<ChunkCoord, CompletableFuture<Probe>> flights =
+            STABLE_FLIGHTS.computeIfAbsent(dimInfo, ignored -> new ConcurrentHashMap<>());
+        CompletableFuture<Probe> created = new CompletableFuture<>();
+        if (flights.putIfAbsent(coord, created) != null) {
+            return;
+        }
+        long lifecycle = STABLE_LIFECYCLE.get();
+        STABLE_PREWARM_SUBMITTED.incrementAndGet();
+        try {
+            STABLE_PREWARM_EXECUTOR.execute(() -> {
+                try {
+                    if (lifecycle != STABLE_LIFECYCLE.get()) {
+                        created.cancel(false);
+                        return;
+                    }
+                    Probe resolved = computeStableTerrainProbe(dimInfo, coord);
+                    if (resolved != null && lifecycle == STABLE_LIFECYCLE.get()) {
+                        TERRAIN_CACHE.computeIfAbsent(dimInfo, ignored -> new ConcurrentHashMap<>())
+                            .putIfAbsent(coord, resolved);
+                        created.complete(resolved);
+                    } else {
+                        created.complete(EMPTY_PROBE);
+                    }
+                    STABLE_PREWARM_COMPLETED.incrementAndGet();
+                } catch (Throwable failure) {
+                    created.completeExceptionally(failure);
+                } finally {
+                    flights.remove(coord, created);
+                    if (flights.isEmpty()) {
+                        STABLE_FLIGHTS.remove(dimInfo, flights);
+                    }
+                }
+            });
+        } catch (RejectedExecutionException rejected) {
+            STABLE_PREWARM_REJECTED.incrementAndGet();
+            flights.remove(coord, created);
+            if (flights.isEmpty()) {
+                STABLE_FLIGHTS.remove(dimInfo, flights);
+            }
+            created.completeExceptionally(rejected);
+        }
+    }
+
+    /**
+     * Returns a previously resolved stable terrain probe without doing any
+     * Lost Cities work.  The density path populates this cache before the
+     * shift field is normally built, so consumers that only need to reuse the
+     * raw city/highway decision can avoid running the same expensive queries a
+     * second time.  A null result deliberately means "compute normally" and
+     * never changes the authoritative fallback path.
+     */
+    public static Probe peekStableTerrainProbe(IDimensionInfo dimInfo,
+                                               ResourceKey<Level> dim,
+                                               int chunkX,
+                                               int chunkZ) {
+        if (dimInfo == null || dim == null) {
+            return null;
+        }
+        ConcurrentHashMap<ChunkCoord, Probe> providerCache = TERRAIN_CACHE.get(dimInfo);
+        if (providerCache == null) {
+            return null;
+        }
+        return providerCache.get(new ChunkCoord(dim, chunkX, chunkZ));
     }
 
     public static boolean isUnsafe(IDimensionInfo dimInfo, ResourceKey<Level> dim, int chunkX, int chunkZ) {
@@ -281,9 +432,13 @@ public final class ChunkRoleProbe {
     }
 
     public static void clear() {
+        STABLE_LIFECYCLE.incrementAndGet();
         CACHE.clear();
         TERRAIN_CACHE.clear();
         BuildingInfoSnapshotStore.clear();
+        STABLE_FLIGHTS.values().forEach(flights ->
+            flights.values().forEach(future -> future.cancel(false)));
+        STABLE_FLIGHTS.clear();
     }
 
     public static void rememberCharacteristics(ChunkCoord coord, LostChunkCharacteristics characteristics) {
@@ -342,9 +497,7 @@ public final class ChunkRoleProbe {
         boolean highwayTunnel = false;
         try {
             if (profile != null) {
-                int xLevel = Highway.getXHighwayLevel(coord, dimInfo, profile);
-                int zLevel = Highway.getZHighwayLevel(coord, dimInfo, profile);
-                highwayLevel = Math.max(xLevel, zLevel);
+                highwayLevel = highwayLevel(dimInfo, profile, coord);
                 hasHighway = highwayLevel >= 0;
                 highwayTunnel = hasHighway && isHighwayTunnel(dimInfo, coord, profile,
                     base.isCity(), base.cityLevel(), highwayLevel);
@@ -415,11 +568,16 @@ public final class ChunkRoleProbe {
         boolean hasRailway = false;
         try {
             if (profile != null) {
-                hasHighway = BuildingInfo.hasHighway(coord, dimInfo, profile);
+                if (dimInfo.getHighwayGenerationMode() == HighwayGenerationMode.INTERCITY_NETWORK_V1) {
+                    highwayLevel = highwayLevel(dimInfo, profile, coord);
+                    hasHighway = highwayLevel >= 0;
+                } else {
+                    hasHighway = BuildingInfo.hasHighway(coord, dimInfo, profile);
+                    if (hasHighway) {
+                        highwayLevel = highwayLevel(dimInfo, profile, coord);
+                    }
+                }
                 if (hasHighway) {
-                    highwayLevel = Math.max(
-                        Highway.getXHighwayLevel(coord, dimInfo, profile),
-                        Highway.getZHighwayLevel(coord, dimInfo, profile));
                     highwayTunnel = isHighwayTunnel(dimInfo, coord, profile,
                         isCity, cityLevel, highwayLevel);
                 }
@@ -450,9 +608,15 @@ public final class ChunkRoleProbe {
             }
 
             int cityLevel = isCity ? BuildingInfo.getCityLevel(coord, dimInfo) : 0;
-            int xLevel = Highway.getXHighwayLevel(coord, dimInfo, profile);
-            int zLevel = Highway.getZHighwayLevel(coord, dimInfo, profile);
-            int highwayLevel = Math.max(xLevel, zLevel);
+            /*
+             * Stable terrain probes are consumed from the density and shift
+             * paths.  They must never wake the intercity planner: that
+             * planner recursively evaluates Lost Cities' full heightmap and
+             * serializes on its own caches.  A route is published separately
+             * by the route-aware path; a cold stable probe simply reports no
+             * route until that immutable index is warm.
+             */
+            int highwayLevel = stableHighwayLevel(dimInfo, profile, coord);
             boolean hasHighway = highwayLevel >= 0;
             boolean highwayTunnel = hasHighway && isHighwayTunnel(dimInfo, coord, profile,
                 isCity, cityLevel, highwayLevel);
@@ -463,6 +627,26 @@ public final class ChunkRoleProbe {
             // call can retry once the provider has become fully usable.
             return null;
         }
+    }
+
+    private static int highwayLevel(IDimensionInfo dimInfo,
+                                    LostCityProfile profile,
+                                    ChunkCoord coord) {
+        if (dimInfo.getHighwayGenerationMode() == HighwayGenerationMode.INTERCITY_NETWORK_V1) {
+            return IntercityHighwayIndex.level(dimInfo, profile, coord);
+        }
+        return Math.max(Highway.getXHighwayLevel(coord, dimInfo, profile),
+            Highway.getZHighwayLevel(coord, dimInfo, profile));
+    }
+
+    private static int stableHighwayLevel(IDimensionInfo dimInfo,
+                                          LostCityProfile profile,
+                                          ChunkCoord coord) {
+        if (dimInfo.getHighwayGenerationMode() == HighwayGenerationMode.INTERCITY_NETWORK_V1) {
+            return IntercityHighwayIndex.peekLevel(dimInfo, profile, coord, null);
+        }
+        return Math.max(Highway.getXHighwayLevel(coord, dimInfo, profile),
+            Highway.getZHighwayLevel(coord, dimInfo, profile));
     }
 
     /** Mirrors Lost Cities' BuildingInfo#isTunnel(level) decision without

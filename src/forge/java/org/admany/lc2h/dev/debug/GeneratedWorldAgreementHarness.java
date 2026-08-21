@@ -9,6 +9,7 @@ import net.minecraft.resources.ResourceLocation;
 import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
 import org.admany.lc2h.worldgen.async.snapshot.MultiChunkSnapshot;
 import org.admany.lc2h.worldgen.lostcities.BuildingInfoSnapshotStore;
+import org.admany.lc2h.util.ResourceLocations;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -288,7 +289,7 @@ public final class GeneratedWorldAgreementHarness {
             return location.getPath();
         }
         String raw = String.valueOf(value);
-        ResourceLocation parsed = ResourceLocation.tryParse(raw);
+        ResourceLocation parsed = ResourceLocations.tryParse(raw);
         return parsed == null ? raw : parsed.getPath();
     }
 

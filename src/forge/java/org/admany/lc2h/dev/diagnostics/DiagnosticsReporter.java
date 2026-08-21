@@ -73,10 +73,10 @@ public final class DiagnosticsReporter {
         LC2H.LOGGER.info("[LC2H] PerfSnapshot {} TerrainCorrectionGPU={}", label,
             org.admany.lc2h.worldgen.gpu.TerrainCorrectionGpuPipeline.diagnostics());
         LC2H.LOGGER.info("[LC2H] TerrainDensity: {} | floorBridge={}",
-            org.admany.lc2h.worldgen.MountainCityBlendDiagnostics.diagnostics(),
-            org.admany.lc2h.worldgen.CityTerrainPlanBridge.diagnostics());
+            org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics.diagnostics(),
+            org.admany.lc2h.worldgen.terrain.CityTerrainPlanBridge.diagnostics());
         LC2H.LOGGER.info("[LC2H] MountainCityReservation: {}",
-            org.admany.lc2h.worldgen.MountainCityReservationPlanner.diagnostics());
+            org.admany.lc2h.worldgen.terrain.MountainCityReservationPlanner.diagnostics());
         LC2H.LOGGER.info("[LC2H] PerfSnapshot {} BiomeInfoRuntimeCache={}", label,
             org.admany.lc2h.data.cache.BiomeInfoRuntimeCache.diagnostics());
         LC2H.LOGGER.info("[LC2H] PerfSnapshot {} DistantHorizons={} recursiveWarmupSkips={}", label,
@@ -95,6 +95,9 @@ public final class DiagnosticsReporter {
             topTimingSummary(12));
         LC2H.LOGGER.info("[LC2H] PerfSnapshot {} chunkDriverBlockEntities={}", label,
             ChunkDriverBlockEntityCleanup.diagnostics());
+        LC2H.LOGGER.info("[LC2H] PerfSnapshot {} MultiBuildingFootprints={} CityStructureProtection={}", label,
+            org.admany.lc2h.worldgen.lostcities.MultiBuildingFootprintRegistry.diagnostics(),
+            org.admany.lc2h.worldgen.lostcities.CityStructureProtection.diagnostics());
     }
 
     public static void start(MinecraftServer server) {

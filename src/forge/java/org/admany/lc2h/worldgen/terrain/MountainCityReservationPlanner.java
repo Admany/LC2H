@@ -1,41 +1,39 @@
-package org.admany.lc2h.worldgen;
+package org.admany.lc2h.worldgen.terrain;
 
+import mcjty.lostcities.config.HighwayGenerationMode;
 import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
+import mcjty.lostcities.worldgen.highway.HighwayAxis;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import mcjty.lostcities.worldgen.lost.City;
 import mcjty.lostcities.worldgen.lost.CitySphere;
 import mcjty.lostcities.worldgen.lost.Highway;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
+import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 import org.admany.lc2h.worldgen.terrain.NaturalHeightSampler;
+import org.admany.lc2h.worldgen.terrain.IntercityHighwayIndex;
 
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.PriorityQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * Produces one compact, bounded mountain envelope before Lost Cities chooses
- * multibuildings.
- *
- * <p>A reservation is deliberately all-or-nothing at the regional level. The
- * previous implementation sorted every elevated city cell independently and
- * kept the highest-scoring cells until a budget was exhausted. That created
- * disconnected terrain islands and full-height walls between a preserved cell
- * and its flattened neighbour. This planner instead grows one connected patch
- * from the strongest mountain core, assigns a shaped transition shell around
- * it, and publishes the immutable result to both structure placement and the
- * Minecraft density transform.</p>
- *
- * <p>Highways are resolved only for the final compact patch. If a highway
- * cannot retain its complete route and both side walls until two real portals,
- * the whole patch is rejected. A partially exposed tunnel is never published.</p>
- */
+/** Builds one compact mountain envelope before LC chooses multibuildings.
+ * The result is shared by structure placement and the density transform. */
 public final class MountainCityReservationPlanner {
+
+    /* Terrain reservation alters Lost Cities' city predicate. Keep it opt-in
+     * until its output has visual parity across the modded terrain packs we
+     * support. The normal LC2H path still retains the safe caches and
+     * parallel planning, but never removes a native city cell. */
+    private static final boolean ENABLED = Boolean.parseBoolean(
+        System.getProperty("lc2h.terrain.reservation.enabled", "false"));
 
     private static final int REGION_SIDE = 32;
     private static final int HALO = 8;
@@ -53,22 +51,24 @@ public final class MountainCityReservationPlanner {
     private static final int MIN_TUNNEL_COVER = Math.max(6, Math.min(24,
         Integer.getInteger("lc2h.terrain.reservation.minTunnelCover", 10)));
     private static final int MAX_CACHE = Math.max(64,
-        Integer.getInteger("lc2h.terrain.reservation.cacheMax", 1024));
+        Integer.getInteger("lc2h.terrain.reservation.cacheMax", 256));
 
-    /**
-     * Boundary cells keep only a small amount of their native relief. This
-     * gives Minecraft's shared quintic density lattice a gentle final step into
-     * the ordinary city floor instead of a sixteen-block vertical wall.
-     */
+    /** Boundary cells keep a little native relief so the density lattice can
+     * ease into the city floor instead of making a hard wall. */
     private static final double OUTER_SHELL_CITY_WEIGHT = doubleProperty(
         "lc2h.terrain.reservation.outerShellCityWeight", 0.82D, 0.60D, 0.95D);
     private static final double INNER_SHELL_CITY_WEIGHT = doubleProperty(
         "lc2h.terrain.reservation.innerShellCityWeight", 0.45D, 0.15D, 0.75D);
 
     private static final ConcurrentHashMap<RegionKey, RegionPlan> CACHE = new ConcurrentHashMap<>();
+    private static final ConcurrentLinkedQueue<RegionKey> CACHE_ORDER = new ConcurrentLinkedQueue<>();
+    /* Cold regions can be requested by several worldgen workers at once. */
+    private static final ConcurrentHashMap<RegionKey, CompletableFuture<RegionPlan>> IN_FLIGHT =
+        new ConcurrentHashMap<>();
     private static final ThreadLocal<Boolean> PLANNING = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final AtomicLong REGIONS = new AtomicLong();
     private static final AtomicLong HITS = new AtomicLong();
+    private static final AtomicLong FLIGHT_WAITS = new AtomicLong();
     private static final AtomicLong RESERVED = new AtomicLong();
     private static final AtomicLong TRANSITIONS = new AtomicLong();
     private static final AtomicLong TUNNELS = new AtomicLong();
@@ -112,6 +112,10 @@ public final class MountainCityReservationPlanner {
                                 int chunkX,
                                 int chunkZ,
                                 LostCityProfile profile) {
+        if (!ENABLED) {
+            return cityPlan(profile == null ? 0 : profile.GROUNDLEVEL,
+                "terrain reservation disabled");
+        }
         if (provider == null || dimension == null || profile == null
             || profile.isSpace() || profile.isSpheres()) {
             return cityPlan(profile == null ? 0 : profile.GROUNDLEVEL, "unsupported terrain mode");
@@ -121,11 +125,33 @@ public final class MountainCityReservationPlanner {
         RegionKey key = new RegionKey(provider, dimension, regionX, regionZ, profile.GROUNDLEVEL);
         RegionPlan region = CACHE.get(key);
         if (region == null) {
-            RegionPlan built = buildRegion(provider, dimension, regionX, regionZ, profile);
-            RegionPlan previous = CACHE.putIfAbsent(key, built);
-            region = previous == null ? built : previous;
-            if (CACHE.size() > MAX_CACHE) {
-                CACHE.clear();
+            CompletableFuture<RegionPlan> created = new CompletableFuture<>();
+            CompletableFuture<RegionPlan> existing = IN_FLIGHT.putIfAbsent(key, created);
+            if (existing == null) {
+                try {
+                    // Recheck after claiming the flight. A racing publisher
+                    // or lifecycle callback may already have filled the cache.
+                    region = CACHE.get(key);
+                    if (region == null) {
+                        region = buildRegion(provider, dimension, regionX, regionZ, profile);
+                        RegionPlan previous = CACHE.putIfAbsent(key, region);
+                        if (previous != null) {
+                            region = previous;
+                        } else {
+                            CACHE_ORDER.add(key);
+                            trimCache();
+                        }
+                    }
+                    created.complete(region);
+                } catch (RuntimeException | Error failure) {
+                    created.completeExceptionally(failure);
+                    throw failure;
+                } finally {
+                    IN_FLIGHT.remove(key, created);
+                }
+            } else {
+                FLIGHT_WAITS.incrementAndGet();
+                region = existing.join();
             }
         } else {
             HITS.incrementAndGet();
@@ -135,11 +161,64 @@ public final class MountainCityReservationPlanner {
         return region.cells[localZ * REGION_SIDE + localX];
     }
 
+    private static void trimCache() {
+        while (CACHE.size() > MAX_CACHE) {
+            RegionKey oldest = CACHE_ORDER.poll();
+            if (oldest == null) {
+                return;
+            }
+            CACHE.remove(oldest);
+        }
+    }
+
     public static boolean removesBuildingCell(IDimensionInfo provider,
                                               ChunkCoord coord,
                                               LostCityProfile profile) {
+        if (!ENABLED) {
+            return false;
+        }
         return coord != null && plan(provider, coord.dimension(), coord.chunkX(), coord.chunkZ(), profile)
             .removesBuildingCell();
+    }
+
+    /**
+     * Returns a reservation decision only when this region has already been
+     * published. Density and structure planning use this non blocking view so
+     * a cold reservation build cannot run Lost Cities' full height sampler
+     * while Minecraft is checking structures. A missing publication means the
+     * caller keeps Lost Cities' original decision for this query; the owning
+     * terrain path remains responsible for publishing the authoritative plan.
+     */
+    public static boolean peekRemovesBuildingCell(IDimensionInfo provider,
+                                                  ChunkCoord coord,
+                                                  LostCityProfile profile) {
+        if (!ENABLED) {
+            return false;
+        }
+        if (provider == null || coord == null || profile == null
+            || profile.isSpace() || profile.isSpheres()) {
+            return false;
+        }
+        RegionKey key = new RegionKey(provider, coord.dimension(),
+            Math.floorDiv(coord.chunkX(), REGION_SIDE),
+            Math.floorDiv(coord.chunkZ(), REGION_SIDE), profile.GROUNDLEVEL);
+        RegionPlan region = CACHE.get(key);
+        if (region == null) {
+            CompletableFuture<RegionPlan> flight = IN_FLIGHT.get(key);
+            if (flight != null) {
+                try {
+                    region = flight.getNow(null);
+                } catch (RuntimeException ignored) {
+                    region = null;
+                }
+            }
+        }
+        if (region == null) {
+            return false;
+        }
+        int localX = Math.floorMod(coord.chunkX(), REGION_SIDE);
+        int localZ = Math.floorMod(coord.chunkZ(), REGION_SIDE);
+        return region.cells[localZ * REGION_SIDE + localX].removesBuildingCell();
     }
 
     private static RegionPlan buildRegion(IDimensionInfo provider,
@@ -174,12 +253,8 @@ public final class MountainCityReservationPlanner {
         boolean[] elevated = new boolean[cells];
         boolean[] baseCity = new boolean[cells];
 
-        /*
-         * Heights are needed in the halo to identify one connected landform.
-         * Raw city checks are intentionally limited to the owned 32x32 cells:
-         * city-factor resolution is substantially more expensive and the halo
-         * is never eligible for this region's structure reservation.
-         */
+    /* Heights in the halo identify one connected landform. Raw city checks stay
+     * inside the owned 32x32 cells because the halo cannot reserve structures. */
         for (int gz = 0; gz < GRID_SIDE; gz++) {
             int chunkZ = originZ + gz - HALO;
             for (int gx = 0; gx < GRID_SIDE; gx++) {
@@ -308,10 +383,8 @@ public final class MountainCityReservationPlanner {
         return new RegionPlan(result);
     }
 
-    /**
-     * Grows a single connected patch. Selection cannot jump to a second peak or
-     * leave isolated one-cell islands just because those cells scored higher.
-     */
+    /** Grows one connected patch so selection cannot jump to a second peak or
+     * leave isolated one-cell islands. */
     static boolean[] compactSelection(boolean[] eligible, int[] heights, int side, int budget) {
         if (eligible == null || heights == null || eligible.length != heights.length
             || eligible.length != side * side || budget <= 0) {
@@ -524,12 +597,8 @@ public final class MountainCityReservationPlanner {
                     || heights[sideB] < MIN_TUNNEL_COVER) {
                     return false;
                 }
-                /*
-                 * City-owned route/wall cells must already fit inside the
-                 * bounded reservation. Natural non-city cells do not consume
-                 * the city budget, but they still join the immutable envelope
-                 * so nearby city blending cannot lower one side wall later.
-                 */
+    /* City route and wall cells must fit inside the reservation. Natural cells
+     * do not consume the city budget, but stay in the envelope for side walls. */
                 if (baseCity[current] && !selected[current]) {
                     return false;
                 }
@@ -571,11 +640,8 @@ public final class MountainCityReservationPlanner {
         }
     }
 
-    /**
-     * A tunnel direction is valid only if every underground route cell has
-     * terrain on both sides and the route reaches an exposed portal within the
-     * bounded halo.
-     */
+    /** A tunnel is valid only when its route has terrain on both sides and
+     * reaches a portal inside the halo. */
     private static boolean tunnelExit(int startX,
                                       int startZ,
                                       boolean alongX,
@@ -614,6 +680,10 @@ public final class MountainCityReservationPlanner {
                                     boolean alongX) {
         HIGHWAY_LOOKUPS.incrementAndGet();
         try {
+            if (provider.getHighwayGenerationMode() == HighwayGenerationMode.INTERCITY_NETWORK_V1) {
+                return IntercityHighwayIndex.level(provider, profile, coord,
+                    alongX ? HighwayAxis.X : HighwayAxis.Z);
+            }
             return alongX
                 ? Highway.getXHighwayLevel(coord, provider, profile)
                 : Highway.getZHighwayLevel(coord, provider, profile);
@@ -727,6 +797,11 @@ public final class MountainCityReservationPlanner {
                                    IDimensionInfo provider,
                                    LostCityProfile profile) {
         try {
+            ChunkRoleProbe.Probe stable = ChunkRoleProbe.peekStableTerrainProbe(
+                provider, coord.dimension(), coord.chunkX(), coord.chunkZ());
+            if (stable != null) {
+                return stable.isCity();
+            }
             if (BuildingInfo.isVoidChunk(coord, provider)) {
                 return false;
             }
@@ -748,7 +823,8 @@ public final class MountainCityReservationPlanner {
             if (heights == null) {
                 return fallback;
             }
-            return heights.chunkHeight(coord.chunkX(), coord.chunkZ());
+            Integer cached = heights.cachedChunkHeight(coord.chunkX(), coord.chunkZ());
+            return cached == null ? fallback : cached;
         } catch (Throwable ignored) {
             return fallback;
         }
@@ -848,6 +924,8 @@ public final class MountainCityReservationPlanner {
 
     public static void clear() {
         CACHE.clear();
+        CACHE_ORDER.clear();
+        IN_FLIGHT.clear();
     }
 
     public static boolean isPlanning() {
@@ -861,6 +939,7 @@ public final class MountainCityReservationPlanner {
             + ", maxCityShare=" + MAX_CITY_SHARE
             + ", regions=" + REGIONS.get()
             + ", hits=" + HITS.get()
+            + ", singleFlightWaits=" + FLIGHT_WAITS.get()
             + ", reserved=" + RESERVED.get()
             + ", transitionCells=" + TRANSITIONS.get()
             + ", enclosedTunnelCells=" + TUNNELS.get()

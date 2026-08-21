@@ -1,355 +1,113 @@
 package org.admany.lc2h.mixin.lostcities.cache;
 
+import mcjty.lostcities.config.LostCityProfile;
+import mcjty.lostcities.setup.Config;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.varia.TimedCache;
 import mcjty.lostcities.worldgen.ChunkHeightmap;
+import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.LostCityTerrainFeature;
-import org.admany.lc2h.data.cache.LostCitiesCacheBridge;
+import net.minecraft.world.level.WorldGenLevel;
+import org.admany.lc2h.data.cache.AsyncHeightmapCoordinator;
 import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
+import org.admany.lc2h.worldgen.scope.WorldGenScope;
+import org.admany.lc2h.worldgen.terrain.LostCitiesHeightBranchKernel;
+import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.Redirect;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.Overwrite;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Modifier;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.WeakHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.Collections;
-import java.util.concurrent.atomic.AtomicReference;
+import javax.annotation.Nonnull;
 
 @Mixin(value = LostCityTerrainFeature.class, remap = false)
-public class MixinLostCityTerrainFeatureHeightmapCache {
+public abstract class MixinLostCityTerrainFeatureHeightmapCache {
+    @Shadow @Final public LostCityProfile profile;
+    @Shadow @Final public IDimensionInfo provider;
+    @Shadow @Final private TimedCache<ChunkCoord, ChunkHeightmap> cachedHeightmaps;
 
-    private static final Map<LostCityTerrainFeature, Object> LC2H_HEIGHTMAP_CACHES =
-        Collections.synchronizedMap(new WeakHashMap<>());
-    private static final AtomicReference<Field> HEIGHTMAP_CACHE_FIELD = new AtomicReference<>();
-    private static final AtomicReference<Field> TIMED_CACHE_MAP_FIELD = new AtomicReference<>();
-    private static final int LOCAL_HEIGHTMAP_CACHE_SIZE = Math.max(32, Integer.getInteger("lc2h.heightmap.localCache", 256));
-    private static final ThreadLocal<LinkedHashMap<String, ChunkHeightmap>> LOCAL_HEIGHTMAP_CACHE =
-        ThreadLocal.withInitial(() -> new LinkedHashMap<String, ChunkHeightmap>(LOCAL_HEIGHTMAP_CACHE_SIZE, 0.75f, true) {
-            @Override
-            protected boolean removeEldestEntry(Map.Entry<String, ChunkHeightmap> eldest) {
-                return size() > LOCAL_HEIGHTMAP_CACHE_SIZE;
-            }
-        });
+    @Shadow
+    private void generateHeightmap(int chunkX, int chunkZ, WorldGenLevel region, ChunkHeightmap heightmap) {
+        throw new AssertionError();
+    }
 
+    @Unique
     private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_HEIGHTMAP_BUDGET =
-        LostCitiesCacheBudgetManager.register("lc_heightmap", 2048, 256, MixinLostCityTerrainFeatureHeightmapCache::evictHeightmap);
+        LostCitiesCacheBudgetManager.register("lc_heightmap", 2048, 256, ignored -> false);
 
-    private static final ThreadLocal<net.minecraft.world.level.WorldGenLevel> LC2H_HEIGHTMAP_WORLD_CONTEXT =
-        ThreadLocal.withInitial(() -> null);
+    /**
+     * Lost Cities 7.5 calculates a cache miss while holding the feature monitor. Vanilla height sampling can
+     * take seconds, so unrelated chunks end up queued behind one worker. Keep the exact sampling rules, but
+     * run one calculation per sampled coordinate outside every cache and feature lock :]
+     *
+     * @author Admany
+     * @reason Exact async single flight heightmaps without the global LostCityTerrainFeature monitor
+     */
+    @Overwrite
+    public ChunkHeightmap getHeightmap(ChunkCoord chunk, @Nonnull WorldGenLevel world) {
+        ChunkHeightmap local = cachedHeightmaps.get(chunk);
+        if (local != null) {
+            LostCitiesCacheBudgetManager.recordAccess(LC2H_HEIGHTMAP_BUDGET, chunk);
+            return local;
+        }
 
-    @Unique
-    private static String scopedHeightmapCacheKey(String cacheType, ChunkCoord coord, net.minecraft.world.level.WorldGenLevel world) {
-        if (world == null || coord == null) {
-            return null;
-        }
-        String dimension = "<unknown-dim>";
-        long seed = 0L;
-        try {
-            dimension = world.toString();
-            seed = world.getSeed();
-        } catch (Throwable ignored) {
-        }
-        return cacheType + '|' + dimension + '|' + seed + '|' + coord;
+        AsyncHeightmapCoordinator.SamplePlan sample = lc2h$sample(chunk);
+        WorldGenScope.CacheScope scope = WorldGenScope.cache(provider);
+        ChunkHeightmap shared = AsyncHeightmapCoordinator.get(
+            scope,
+            chunk,
+            sample,
+            plan -> lc2h$calculate(plan, world)
+        );
+        boolean inserted = cachedHeightmaps.get(chunk) == null;
+        cachedHeightmaps.put(chunk, shared);
+        LostCitiesCacheBudgetManager.recordPut(
+            LC2H_HEIGHTMAP_BUDGET,
+            chunk,
+            LC2H_HEIGHTMAP_BUDGET.defaultEntryBytes(),
+            inserted
+        );
+        return shared;
     }
 
     @Unique
-    private static String scopedHeightmapCacheKeyCurrentContext(ChunkCoord coord) {
-        return scopedHeightmapCacheKey("heightmap", coord, LC2H_HEIGHTMAP_WORLD_CONTEXT.get());
+    private ChunkHeightmap lc2h$calculate(AsyncHeightmapCoordinator.SamplePlan plan, WorldGenLevel world) {
+        WorldGenScope.CacheScope scope = WorldGenScope.cache(provider);
+        return LostCitiesHeightBranchKernel.evaluate(scope, plan, world, profile, () -> {
+            ChunkHeightmap result = new ChunkHeightmap(profile.LANDSCAPE_TYPE, profile.GROUNDLEVEL);
+            generateHeightmap(plan.sampler().chunkX(), plan.sampler().chunkZ(), world, result);
+            return result;
+        });
     }
 
-    @Inject(method = "<init>", at = @At("RETURN"))
-    private void lc2h$initHeightmapCache(CallbackInfo ci) {
-        Object cache = lc2h$getHeightmapCache();
-        if (cache == null) {
-            return;
-        }
-        if (cache instanceof Map<?, ?> map) {
-            if (!(map instanceof ConcurrentHashMap) && lc2h$canReplaceHeightmapCache()) {
-                @SuppressWarnings("unchecked")
-                Map<ChunkCoord, ChunkHeightmap> typed = (Map<ChunkCoord, ChunkHeightmap>) map;
-                ConcurrentHashMap<ChunkCoord, ChunkHeightmap> replacement = new ConcurrentHashMap<>(typed);
-                if (lc2h$setHeightmapCache(replacement)) {
-                    cache = replacement;
-                }
+    @Unique
+    private static AsyncHeightmapCoordinator.SamplePlan lc2h$sample(ChunkCoord chunk) {
+        int size = Math.max(1, (Integer) Config.HEIGHT_SAMPLE_SIZE.get());
+        int top = chunk.chunkX();
+        int left = chunk.chunkZ();
+        int directionX = 1;
+        int directionZ = 1;
+        ChunkCoord sampler = chunk;
+
+        if (size > 1) {
+            top = chunk.chunkX() / size * size;
+            left = chunk.chunkZ() / size * size;
+            directionX = chunk.chunkX() < 0 ? -1 : 1;
+            directionZ = chunk.chunkZ() < 0 ? -1 : 1;
+            if (size > 2) {
+                int offset = size / 2;
+                sampler = new ChunkCoord(
+                    chunk.dimension(),
+                    top + offset * directionX,
+                    left + offset * directionZ
+                );
             }
         }
-        LC2H_HEIGHTMAP_CACHES.put((LostCityTerrainFeature) (Object) this, cache);
-    }
-
-    @Inject(method = "getHeightmap", at = @At("HEAD"), cancellable = true)
-    private void lc2h$fastLocalHeightmap(ChunkCoord chunk,
-                                         net.minecraft.world.level.WorldGenLevel world,
-                                         org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<ChunkHeightmap> cir) {
-        if (chunk == null) {
-            return;
-        }
-        LC2H_HEIGHTMAP_WORLD_CONTEXT.set(world);
-        String localKey = scopedHeightmapCacheKey("heightmap", chunk, world);
-        if (localKey == null) {
-            return;
-        }
-        ChunkHeightmap cached = LOCAL_HEIGHTMAP_CACHE.get().get(localKey);
-        if (cached != null) {
-            cir.setReturnValue(cached);
-            return;
-        }
-        ChunkHeightmap disk = LostCitiesCacheBridge.getDisk("heightmap", localKey, ChunkHeightmap.class);
-        if (disk != null) {
-            LOCAL_HEIGHTMAP_CACHE.get().put(localKey, disk);
-            cir.setReturnValue(disk);
-        }
-    }
-
-    @Inject(method = "getHeightmap", at = @At("RETURN"))
-    private void lc2h$clearWorldContext(ChunkCoord chunk,
-                                        net.minecraft.world.level.WorldGenLevel world,
-                                        org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<ChunkHeightmap> cir) {
-        LC2H_HEIGHTMAP_WORLD_CONTEXT.set(null);
-    }
-
-    @Redirect(
-        method = "getHeightmap",
-        at = @At(
-            value = "INVOKE",
-            target = "Ljava/util/Map;get(Ljava/lang/Object;)Ljava/lang/Object;"
-        ),
-        require = 0, expect = 0
-    )
-    private Object lc2h$trackHeightmapGet(Map<ChunkCoord, ChunkHeightmap> map, Object key) {
-        Object value = map.get(key);
-        if (value != null) {
-            LostCitiesCacheBudgetManager.recordAccess(LC2H_HEIGHTMAP_BUDGET, key);
-            if (key instanceof ChunkCoord coord && value instanceof ChunkHeightmap heightmap) {
-                String localKey = scopedHeightmapCacheKeyCurrentContext(coord);
-                if (localKey != null) {
-                    LOCAL_HEIGHTMAP_CACHE.get().put(localKey, heightmap);
-                }
-            }
-        }
-        return value;
-    }
-
-    @Redirect(
-        method = "getHeightmap",
-        at = @At(
-            value = "INVOKE",
-            target = "Ljava/util/Map;put(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
-        ),
-        require = 0, expect = 0
-    )
-    private Object lc2h$trackHeightmapPut(Map<ChunkCoord, ChunkHeightmap> map, Object key, Object value) {
-        Object prev = map.put((ChunkCoord) key, (ChunkHeightmap) value);
-        LostCitiesCacheBudgetManager.recordPut(LC2H_HEIGHTMAP_BUDGET, key, LC2H_HEIGHTMAP_BUDGET.defaultEntryBytes(), prev == null);
-        if (key instanceof ChunkCoord coord && value instanceof ChunkHeightmap heightmap) {
-            String diskKey = scopedHeightmapCacheKeyCurrentContext(coord);
-            if (diskKey != null) {
-                LOCAL_HEIGHTMAP_CACHE.get().put(diskKey, heightmap);
-                LostCitiesCacheBridge.putDisk("heightmap", diskKey, heightmap);
-            }
-        }
-        return prev;
-    }
-
-    @Redirect(
-        method = "getHeightmap",
-        at = @At(
-            value = "INVOKE",
-            target = "Lmcjty/lostcities/varia/TimedCache;get(Ljava/lang/Object;)Ljava/lang/Object;"
-        ),
-        require = 0, expect = 0
-    )
-    private Object lc2h$trackHeightmapGetTimed(TimedCache<ChunkCoord, ChunkHeightmap> cache, Object key) {
-        ChunkCoord coord = key instanceof ChunkCoord c ? c : null;
-        Object value = coord != null ? cache.get(coord) : null;
-        if (value != null) {
-            LostCitiesCacheBudgetManager.recordAccess(LC2H_HEIGHTMAP_BUDGET, key);
-            if (value instanceof ChunkHeightmap heightmap) {
-                String localKey = scopedHeightmapCacheKeyCurrentContext(coord);
-                if (localKey != null) {
-                    LOCAL_HEIGHTMAP_CACHE.get().put(localKey, heightmap);
-                }
-            }
-        }
-        return value;
-    }
-
-    @Redirect(
-        method = "getHeightmap",
-        at = @At(
-            value = "INVOKE",
-            target = "Lmcjty/lostcities/varia/TimedCache;put(Ljava/lang/Object;Ljava/lang/Object;)V"
-        ),
-        require = 0, expect = 0
-    )
-    private void lc2h$trackHeightmapPutTimed(TimedCache<ChunkCoord, ChunkHeightmap> cache, Object key, Object value) {
-        ChunkCoord coord = key instanceof ChunkCoord c ? c : null;
-        ChunkHeightmap heightmap = value instanceof ChunkHeightmap hm ? hm : null;
-        if (coord == null || heightmap == null) {
-            return;
-        }
-        boolean inserted = !timedCacheContains(cache, coord);
-        cache.put(coord, heightmap);
-        LostCitiesCacheBudgetManager.recordPut(LC2H_HEIGHTMAP_BUDGET, key, LC2H_HEIGHTMAP_BUDGET.defaultEntryBytes(), inserted);
-        String diskKey = scopedHeightmapCacheKeyCurrentContext(coord);
-        if (diskKey != null) {
-            LOCAL_HEIGHTMAP_CACHE.get().put(diskKey, heightmap);
-            LostCitiesCacheBridge.putDisk("heightmap", diskKey, heightmap);
-        }
-    }
-
-    private static boolean evictHeightmap(Object key) {
-        if (!(key instanceof ChunkCoord coord)) {
-            return false;
-        }
-        boolean removed = false;
-        List<Map.Entry<LostCityTerrainFeature, Object>> snapshot;
-        synchronized (LC2H_HEIGHTMAP_CACHES) {
-            snapshot = new ArrayList<>(LC2H_HEIGHTMAP_CACHES.entrySet());
-        }
-        for (Map.Entry<LostCityTerrainFeature, Object> entry : snapshot) {
-            LostCityTerrainFeature feature = entry.getKey();
-            Object cache = entry.getValue();
-            if (feature == null || cache == null) {
-                synchronized (LC2H_HEIGHTMAP_CACHES) {
-                    LC2H_HEIGHTMAP_CACHES.remove(feature);
-                }
-                continue;
-            }
-            removed |= removeFromCache(cache, coord);
-        }
-        return removed;
-    }
-
-    private static boolean removeFromCache(Object cache, ChunkCoord coord) {
-        if (cache instanceof Map<?, ?> map) {
-            return safeRemove(map, coord);
-        }
-        Map<?, ?> inner = resolveTimedCacheMap(cache);
-        if (inner == null) {
-            return false;
-        }
-        return safeRemove(inner, coord);
-    }
-
-    private Object lc2h$getHeightmapCache() {
-        Field field = HEIGHTMAP_CACHE_FIELD.get();
-        if (field == null || field.getDeclaringClass() != this.getClass()) {
-            field = findHeightmapCacheField(this.getClass());
-            if (field != null) {
-                HEIGHTMAP_CACHE_FIELD.set(field);
-            }
-        }
-        if (field == null) {
-            return null;
-        }
-        try {
-            return field.get(this);
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
-
-    private boolean lc2h$setHeightmapCache(Object value) {
-        Field field = HEIGHTMAP_CACHE_FIELD.get();
-        if (field == null || Modifier.isFinal(field.getModifiers())) {
-            return false;
-        }
-        try {
-            field.set(this, value);
-            return true;
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private boolean lc2h$canReplaceHeightmapCache() {
-        Field field = HEIGHTMAP_CACHE_FIELD.get();
-        return field != null && !Modifier.isFinal(field.getModifiers());
-    }
-
-    private static Field findHeightmapCacheField(Class<?> type) {
-        try {
-            Field field = type.getDeclaredField("cachedHeightmaps");
-            field.setAccessible(true);
-            return field;
-        } catch (Throwable ignored) {
-        }
-        return null;
-    }
-
-    private static boolean timedCacheContains(Object cache, Object key) {
-        Map<?, ?> inner = resolveTimedCacheMap(cache);
-        return inner != null && inner.containsKey(key);
-    }
-
-    private static Map<?, ?> resolveTimedCacheMap(Object cache) {
-        if (cache == null) {
-            return null;
-        }
-        Field field = TIMED_CACHE_MAP_FIELD.get();
-        if (field == null || field.getDeclaringClass() != cache.getClass()) {
-            field = findTimedCacheMapField(cache.getClass());
-            if (field != null) {
-                TIMED_CACHE_MAP_FIELD.set(field);
-            }
-        }
-        if (field == null) {
-            return null;
-        }
-        try {
-            Object value = field.get(cache);
-            if (!(value instanceof Map<?, ?> map)) {
-                return null;
-            }
-            if (map instanceof ConcurrentMap<?, ?>) {
-                return map;
-            }
-            if (!Modifier.isFinal(field.getModifiers())) {
-                ConcurrentHashMap<Object, Object> replacement = new ConcurrentHashMap<>(map);
-                field.set(cache, replacement);
-                return replacement;
-            }
-            return map;
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
-
-    private static Field findTimedCacheMapField(Class<?> type) {
-        try {
-            Field field = type.getDeclaredField("cache");
-            field.setAccessible(true);
-            return field;
-        } catch (Throwable ignored) {
-        }
-        for (Field field : type.getDeclaredFields()) {
-            if (Map.class.isAssignableFrom(field.getType())) {
-                try {
-                    field.setAccessible(true);
-                    return field;
-                } catch (Throwable ignored) {
-                }
-            }
-        }
-        return null;
-    }
-
-    private static boolean safeRemove(Map<?, ?> map, Object key) {
-        if (map instanceof ConcurrentMap<?, ?>) {
-            return map.remove(key) != null;
-        }
-        synchronized (map) {
-            return map.remove(key) != null;
-        }
+        AsyncHeightmapCoordinator.FlightKey flightKey = new AsyncHeightmapCoordinator.FlightKey(
+            chunk.dimension(), top, left, directionX, directionZ, size
+        );
+        return new AsyncHeightmapCoordinator.SamplePlan(
+            sampler, top, left, directionX, directionZ, size, flightKey
+        );
     }
 }

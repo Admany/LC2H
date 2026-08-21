@@ -13,6 +13,10 @@ import java.util.concurrent.CompletableFuture;
 @Mixin(ServerChunkCache.class)
 public interface ServerChunkCacheInvoker {
 
+    /**
+     * Calls the main-thread-only graph operation. Callers must schedule this
+     * through Minecraft's server executor and must not wait in that callback.
+     */
     @Invoker("getChunkFutureMainThread")
     CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>> lc2h$getChunkFutureMainThread(
         int chunkX,

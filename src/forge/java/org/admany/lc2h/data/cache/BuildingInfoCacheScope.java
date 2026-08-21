@@ -5,6 +5,7 @@ import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
 
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -17,6 +18,21 @@ import java.util.concurrent.ConcurrentMap;
  */
 public final class BuildingInfoCacheScope {
     public final ConcurrentMap<ChunkCoord, LostChunkCharacteristics> cityInfo = new ConcurrentHashMap<>();
+    /**
+     * Results produced by Lost Cities' own characteristics resolver. This is
+     * deliberately separate from {@link #cityInfo}: the latter belongs to
+     * LC2H's optional replacement implementation while this map only ever
+     * stores an already-completed native result.
+     */
+    public final ConcurrentMap<ChunkCoord, LostChunkCharacteristics> nativeCharacteristics = new ConcurrentHashMap<>();
+    /**
+     * One owner computes a cold native characteristics value for a coordinate.
+     * The owner runs Lost Cities outside ConcurrentHashMap internals, then
+     * publishes an immutable completed value for every waiter.
+     */
+    public final ConcurrentMap<ChunkCoord, CompletableFuture<LostChunkCharacteristics>> nativeCharacteristicFlights = new ConcurrentHashMap<>();
+    /** One producer builds a cold LC2H characteristic value per coordinate. */
+    public final ConcurrentMap<ChunkCoord, CompletableFuture<LostChunkCharacteristics>> characteristicFlights = new ConcurrentHashMap<>();
     public final ConcurrentMap<ChunkCoord, BuildingInfo> buildingInfo = new ConcurrentHashMap<>();
     public final ConcurrentMap<ChunkCoord, Integer> cityLevel = new ConcurrentHashMap<>();
     public final ConcurrentMap<ChunkCoord, Boolean> cityRaw = new ConcurrentHashMap<>();
@@ -27,6 +43,9 @@ public final class BuildingInfoCacheScope {
 
     public void clear() {
         cityInfo.clear();
+        nativeCharacteristics.clear();
+        nativeCharacteristicFlights.clear();
+        characteristicFlights.clear();
         buildingInfo.clear();
         cityLevel.clear();
         cityRaw.clear();

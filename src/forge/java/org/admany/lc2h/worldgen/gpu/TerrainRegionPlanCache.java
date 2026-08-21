@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * World-scoped, non-blocking terrain-operation cache.  It owns only immutable
- * snapshots and operation masks; ChunkDriver and Minecraft world access stay on
+ * snapshots and operation masks. ChunkDriver and Minecraft world access stay on
  * Lost Cities' owning worldgen thread.
  */
 final class TerrainRegionPlanCache {
@@ -32,15 +32,15 @@ final class TerrainRegionPlanCache {
     /**
      * Captures are made at Lost Cities' post-heightmap generate() boundary.
      * This is a real upstream producer, not a WorldGenRegion walk-ahead or a
-     * correction-hook dispatch.  The completed plan is only consumed when it
-     * is already available; every incomplete/stale region remains on the
+     * correction-hook dispatch. The completed plan is consumed only when it
+     * is already available. Every incomplete or stale region remains on the
      * exact scalar path with no wait on chunk generation.
      */
     // A region plan is only useful when it was captured before the owning
     // correction callback.  The real Forge lane has so far shown zero such
     // coverage: first-pass chunks finish correction before the isolated Vulkan
     // runtime becomes executable.  Keep this opt-in until an ahead-of-time
-    // producer proves non-zero audited coverage; otherwise capture merely adds
+    // producer proves non-zero audited coverage. Until then capture only adds
     // packing/allocation work to the CPU path it was meant to relieve.
     private static final boolean UPSTREAM_CAPTURE = Boolean.parseBoolean(
         System.getProperty("lc2h.gpu.terrainRegions.upstreamCapture", "false"));

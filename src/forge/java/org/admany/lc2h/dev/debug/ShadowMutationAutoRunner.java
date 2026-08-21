@@ -11,6 +11,7 @@ import org.admany.lc2h.LC2H;
 import org.admany.lc2h.dev.diagnostics.CriticalMixinHookValidator;
 import org.admany.lc2h.worldgen.apply.ShadowBlockMutationApplier;
 import org.admany.lc2h.worldgen.lostcities.TreeCompatTracker;
+import org.admany.lc2h.util.ResourceLocations;
 
 import java.util.List;
 import java.util.Locale;
@@ -84,7 +85,7 @@ public final class ShadowMutationAutoRunner {
             return server == null ? null : server.overworld();
         }
         try {
-            ResourceKey<Level> key = ResourceKey.create(Registries.DIMENSION, new ResourceLocation(AUTO_DIMENSION));
+            ResourceKey<Level> key = ResourceKey.create(Registries.DIMENSION, ResourceLocations.parse(AUTO_DIMENSION));
             return server.getLevel(key);
         } catch (Throwable t) {
             LC2H.LOGGER.warn("[LC2H] Shadow autorun could not resolve dimension '{}': {}", AUTO_DIMENSION, t.toString());

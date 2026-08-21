@@ -44,8 +44,12 @@ build
 /run.sh
 /user_jvm_args.txt
 /terrain-*.json
-/V4_ARCHITECTURE_PLAN.md
-/.impeccable.md
+/diagnostics/
+/tmp-javap/
+/%TEMP%/
+/net/
+/intercity-parity-compare.txt
+/source-reach-compare.txt
 
 # other
 eclipse

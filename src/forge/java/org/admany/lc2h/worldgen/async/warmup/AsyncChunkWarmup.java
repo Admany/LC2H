@@ -235,7 +235,7 @@ public final class AsyncChunkWarmup {
             // discarded every look-ahead request. That made the initial world
             // fall straight into synchronous MultiChunk calculation. With no
             // server yet there is no tick-pressure signal to honour, so admit
-            // this bounded pre-schedule; once a server exists, retain the
+            // this bounded pre-schedule. Once a server exists, retain the
             // normal pressure gate unchanged.
             bootstrap = server == null;
             if (server != null && !canPreschedule(server)) {

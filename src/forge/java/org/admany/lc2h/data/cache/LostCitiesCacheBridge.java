@@ -39,7 +39,6 @@ public final class LostCitiesCacheBridge {
     private static final java.util.concurrent.atomic.AtomicLong PUTS = new java.util.concurrent.atomic.AtomicLong();
     private static final java.util.concurrent.atomic.AtomicLong DISABLED_CALLS = new java.util.concurrent.atomic.AtomicLong();
     private static final java.util.concurrent.atomic.AtomicLong NON_SERIALIZABLE_REJECTIONS = new java.util.concurrent.atomic.AtomicLong();
-    private static final java.util.concurrent.atomic.AtomicLong HOT_PATH_BYPASSES = new java.util.concurrent.atomic.AtomicLong();
     private static final java.util.concurrent.atomic.AtomicLong UNSCOPED_BYPASSES = new java.util.concurrent.atomic.AtomicLong();
     private static final java.util.concurrent.atomic.AtomicLong REPEATED_NON_SERIALIZABLE_BYPASSES = new java.util.concurrent.atomic.AtomicLong();
     private static final Lc2hTimingRegistry.TimingHandle GET_TIMING = Lc2hTimingRegistry.bucket("cache.lostcities_disk_get");
@@ -47,11 +46,16 @@ public final class LostCitiesCacheBridge {
 
     private static final boolean DISK_CACHE_ON_CLIENT = Boolean.parseBoolean(
         System.getProperty("lc2h.lostcities.cache.diskOnClient", "false"));
+    private static final boolean DISK_CACHE_ENABLED = Boolean.parseBoolean(
+        System.getProperty("lc2h.lostcities.cache.diskEnabled", "false"));
 
     private LostCitiesCacheBridge() {
     }
 
     public static <T> T getDisk(String cacheName, Object key, Class<T> type) {
+        if (isWorldgenHotPath()) {
+            return null;
+        }
         if (!shouldUseDiskCache() || !ensureReady() || key == null || type == null) {
             DISABLED_CALLS.incrementAndGet();
             return null;
@@ -73,6 +77,9 @@ public final class LostCitiesCacheBridge {
     }
 
     public static void putDisk(String cacheName, Object key, Object value) {
+        if (isWorldgenHotPath()) {
+            return;
+        }
         if (!shouldUseDiskCache() || !ensureReady() || key == null || value == null) {
             DISABLED_CALLS.incrementAndGet();
             return;
@@ -119,8 +126,11 @@ public final class LostCitiesCacheBridge {
     }
 
     private static boolean shouldUseDiskCache() {
-        if (LostCityGenerationHotPath.isActive() || PlannerHotPath.isActive()) {
-            HOT_PATH_BYPASSES.incrementAndGet();
+        /* The QAPI cache lookup is synchronous. Cold misses were costing more
+         * than recomputing these tiny LC facts and could park worldgen for
+         * seconds. Keep it opt in until the lookup can be prefetched without
+         * making a chunk worker wait :L */
+        if (!DISK_CACHE_ENABLED) {
             return false;
         }
         if (!WorldGenScope.isDiskScopeReady()) {
@@ -131,6 +141,15 @@ public final class LostCitiesCacheBridge {
             return true;
         }
         return !isClientMainThread();
+    }
+
+    private static boolean isWorldgenHotPath() {
+        /* This check runs on every Lost Cities cache access. Do not update a
+         * shared AtomicLong here: a normal 31 by 31 generation burst can hit
+         * this branch more than a million times, and the diagnostic counter
+         * itself becomes cache line contention. Scope entry is the useful
+         * diagnostic; the bypass must stay a pair of thread local reads. */
+        return LostCityGenerationHotPath.isActive() || PlannerHotPath.isActive();
     }
 
     private static boolean isClientMainThread() {
@@ -188,6 +207,7 @@ public final class LostCitiesCacheBridge {
 
     public static String diagnostics() {
         return "available=" + AVAILABLE.get()
+            + ", enabled=" + DISK_CACHE_ENABLED
             + ", ready=" + READY
             + ", requests=" + CACHE_REQUESTS.size()
             + ", hits=" + GET_HITS.get()
@@ -196,7 +216,7 @@ public final class LostCitiesCacheBridge {
             + ", disabledCalls=" + DISABLED_CALLS.get()
             + ", nonSerializable=" + NON_SERIALIZABLE_REJECTIONS.get()
             + ", repeatedNonSerializable=" + REPEATED_NON_SERIALIZABLE_BYPASSES.get()
-            + ", hotPathBypasses=" + HOT_PATH_BYPASSES.get()
+            + ", hotPathBypass=direct"
             + ", unscopedBypasses=" + UNSCOPED_BYPASSES.get()
             + ", schema=" + WorldGenScope.CACHE_SCHEMA_VERSION
             + ", diskScope=" + WorldGenScope.activeDiskScope();

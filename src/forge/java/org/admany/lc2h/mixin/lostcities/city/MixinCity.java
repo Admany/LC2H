@@ -17,8 +17,11 @@ import mcjty.lostcities.worldgen.lost.regassets.data.PredefinedStreet;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.CommonLevelAccessor;
+import net.minecraft.world.level.WorldGenLevel;
 import org.admany.lc2h.data.cache.LostCitiesCacheBridge;
 import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
+import org.admany.lc2h.data.cache.NormalCityCenterRadiusCache;
+import org.admany.lc2h.data.cache.NormalCityFactorTileCache;
 import org.admany.lc2h.worldgen.lostcities.PlannerHotPath;
 import org.admany.lc2h.worldgen.lostcities.PredefinedCityCoordinateIndex;
 import org.spongepowered.asm.mixin.Mixin;
@@ -33,6 +36,10 @@ import org.spongepowered.asm.mixin.gen.Invoker;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletionException;
 @Mixin(value = City.class, remap = false)
 public abstract class MixinCity {
 
@@ -72,6 +79,35 @@ public abstract class MixinCity {
     private static final Object LC2H_NULL_LEVEL_KEY = new Object();
     @Unique
     private static final java.util.concurrent.ConcurrentHashMap<Object, CityRarityMap> LC2H_CITY_RARITY_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * City factor is a pure function of the loaded dimension, profile and
+     * chunk coordinate. Lost Cities calls it from several independent
+     * planners, and the terrain shift field can ask for the same 32 by 32
+     * window repeatedly while neighbouring regions are built. Keep the
+     * result once per lifecycle instead of re-running the radius scan and
+     * height/style checks for every consumer.
+     */
+    @Unique
+    private static final ConcurrentHashMap<IDimensionInfo,
+        ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, Float>>>
+        LC2H_CITY_FACTOR_CACHE = new ConcurrentHashMap<>();
+    /** Share one cold factor calculation across overlapping worldgen workers. */
+    @Unique
+    private static final ConcurrentHashMap<CityFactorKey, CompletableFuture<Float>>
+        LC2H_CITY_FACTOR_FLIGHTS = new ConcurrentHashMap<>();
+    @Unique
+    private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_CITY_FACTOR_BUDGET =
+        LostCitiesCacheBudgetManager.register("lc_city_factor", 8, 2048,
+            MixinCity::lc2h$evictCityFactor);
+    /**
+     * Planner callers must not enter Lost Cities' synchronous heightmap
+     * builder.  A missing sampled height is treated as unknown for that
+     * planner pass and is deliberately not retained in the factor cache.
+     * Vanilla Lost Cities callers keep the exact heightmap gate.
+     */
+    @Unique
+    private static final ThreadLocal<Boolean> LC2H_FACTOR_HEIGHT_UNKNOWN =
+        ThreadLocal.withInitial(() -> Boolean.FALSE);
     @Unique
     private static final Object LC2H_OCCUPIED_LOCK = new Object();
     @Unique
@@ -100,12 +136,7 @@ public abstract class MixinCity {
     @Invoker("calculateMap")
     private static void lc2h$calculateMap(CommonLevelAccessor level) { throw new AssertionError(); }
 
-    /**
-     * This removes the synchronized computeIfAbsent and employs a concurrent cache. It allows parallel warmup without a global City lock.
-     *
-     * @author Admany
-     * @reason Allow parallel warmup without global City lock
-     */
+    /** Uses the concurrent scoped cache so warmup does not hold a global City lock. */
     @Overwrite
     public static CityStyle getCityStyle(ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile) {
         Object cacheKey = lc2h$cityStyleKey(coord, provider, profile);
@@ -143,8 +174,8 @@ public abstract class MixinCity {
         LostCityProfile activeProfile = provider.getProfile();
         if (!activeProfile.isSpace() && !activeProfile.isSpheres()) {
             PredefinedCityCoordinateIndex predefined = lc2h$predefinedCityIndex(provider, coord);
-            return lc2h$isNormalCityCenterAt(
-                coord.chunkX(), coord.chunkZ(), activeProfile, predefined);
+            return lc2h$normalCenterRadiusAt(provider, activeProfile, predefined,
+                coord.chunkX(), coord.chunkZ()) > 0.0F;
         }
         Object dimensionKey = lc2h$dimensionKey(provider);
         long packedKey = lc2h$packedChunkKey(coord.chunkX(), coord.chunkZ());
@@ -177,8 +208,8 @@ public abstract class MixinCity {
         LostCityProfile activeProfile = provider.getProfile();
         if (!activeProfile.isSpace() && !activeProfile.isSpheres()) {
             PredefinedCityCoordinateIndex predefined = lc2h$predefinedCityIndex(provider, coord);
-            return lc2h$getNormalCityRadiusAt(
-                coord.chunkX(), coord.chunkZ(), activeProfile, predefined);
+            return lc2h$normalCenterRadiusAt(provider, activeProfile, predefined,
+                coord.chunkX(), coord.chunkZ());
         }
         Object dimensionKey = lc2h$dimensionKey(provider);
         long packedKey = lc2h$packedChunkKey(coord.chunkX(), coord.chunkZ());
@@ -208,6 +239,80 @@ public abstract class MixinCity {
         if (coord == null || provider == null || profile == null) {
             return 0.0F;
         }
+        // Space and sphere profiles can resolve a different profile per
+        // candidate coordinate. Keep their original path until a scoped
+        // cache can be proven safe for that topology.
+        if (profile.isSpace() || profile.isSpheres()) {
+            return lc2h$getCityFactorUncached(coord, provider, profile);
+        }
+        ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, Float>> byProfile =
+            LC2H_CITY_FACTOR_CACHE.computeIfAbsent(provider, ignored -> new ConcurrentHashMap<>());
+        ConcurrentHashMap<Long, Float> factors =
+            byProfile.computeIfAbsent(profile, ignored -> new ConcurrentHashMap<>());
+        long packed = lc2h$packedChunkKey(coord.chunkX(), coord.chunkZ());
+        Float cached = factors.get(packed);
+        if (cached != null) {
+            LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_FACTOR_BUDGET,
+                new CityFactorKey(provider, profile, packed));
+            return cached;
+        }
+        CityFactorKey key = new CityFactorKey(provider, profile, packed);
+        CompletableFuture<Float> created = new CompletableFuture<>();
+        CompletableFuture<Float> existing = LC2H_CITY_FACTOR_FLIGHTS.putIfAbsent(key, created);
+        if (existing != null) {
+            if (PlannerHotPath.isActive()) {
+                Float ready = existing.getNow(null);
+                if (ready != null) {
+                    return ready;
+                }
+                // A vanilla caller may own an exact heightmap flight. Never
+                // park a planner worker behind it. Recompute the cheap radius
+                // walk with the non blocking height gate instead.
+                LC2H_FACTOR_HEIGHT_UNKNOWN.set(Boolean.TRUE);
+                try {
+                    return lc2h$getCityFactorUncached(coord, provider, profile);
+                } finally {
+                    LC2H_FACTOR_HEIGHT_UNKNOWN.remove();
+                }
+            }
+            try {
+                return existing.join();
+            } catch (CancellationException | CompletionException failure) {
+                /* A lifecycle reset can cancel a cold flight. Keep the exact
+                 * fallback instead of publishing a stale decision. */
+                return lc2h$getCityFactorUncached(coord, provider, profile);
+            }
+        }
+        try {
+            LC2H_FACTOR_HEIGHT_UNKNOWN.set(Boolean.FALSE);
+            float calculated = lc2h$getCityFactorUncached(coord, provider, profile);
+            boolean heightUnknown = Boolean.TRUE.equals(LC2H_FACTOR_HEIGHT_UNKNOWN.get());
+            Float previous = factors.putIfAbsent(packed, calculated);
+            if (!heightUnknown) {
+                LostCitiesCacheBudgetManager.recordPut(LC2H_CITY_FACTOR_BUDGET,
+                    key, LC2H_CITY_FACTOR_BUDGET.defaultEntryBytes(), previous == null);
+            } else {
+                // The planner used a non-blocking height approximation. Do
+                // not publish a value which could outlive the sampler's
+                // eventual exact height for this coordinate.
+                factors.remove(packed, calculated);
+            }
+            float result = previous != null ? previous : calculated;
+            created.complete(result);
+            return result;
+        } catch (RuntimeException | Error failure) {
+            created.completeExceptionally(failure);
+            throw failure;
+        } finally {
+            LC2H_FACTOR_HEIGHT_UNKNOWN.remove();
+            LC2H_CITY_FACTOR_FLIGHTS.remove(key, created);
+        }
+    }
+
+    @Unique
+    private static float lc2h$getCityFactorUncached(ChunkCoord coord,
+                                                     IDimensionInfo provider,
+                                                     LostCityProfile profile) {
         CommonLevelAccessor world = provider.getWorld();
         PredefinedBuilding building = City.getPredefinedBuildingAtTopLeft(world, coord);
         if (building != null) {
@@ -232,6 +337,15 @@ public abstract class MixinCity {
 
         int chunkX = coord.chunkX();
         int chunkZ = coord.chunkZ();
+        if (!profile.isSpace() && !profile.isSpheres()) {
+            float factor = NormalCityFactorTileCache.get(provider, profile,
+                chunkX, chunkZ, !PlannerHotPath.isActive(),
+                (originX, originZ, side) -> lc2h$buildNormalFactorTile(
+                    provider, profile, originX, originZ, side));
+            return lc2h$finishNormalCityFactor(
+                coord, provider, profile, world, factor);
+        }
+
         float factor = 0.0F;
         if (profile.CITY_CHANCE < 0.0D) {
             CityRarityMap rarityMap = getCityRarityMap(
@@ -250,13 +364,14 @@ public abstract class MixinCity {
             if (!profile.isSpace() && !profile.isSpheres()) {
                 PredefinedCityCoordinateIndex predefined = lc2h$predefinedCityIndex(provider, coord);
                 for (int cx = chunkX - radiusChunks; cx <= chunkX + radiusChunks; cx++) {
-                    int dx = (cx - chunkX) << 4;
-                    int dx2 = dx * dx;
-                    for (int cz = chunkZ - radiusChunks; cz <= chunkZ + radiusChunks; cz++) {
-                        if (!lc2h$isNormalCityCenterAt(cx, cz, profile, predefined)) {
+                int dx = (cx - chunkX) << 4;
+                int dx2 = dx * dx;
+                for (int cz = chunkZ - radiusChunks; cz <= chunkZ + radiusChunks; cz++) {
+                        float radius = lc2h$normalCenterRadiusAt(
+                            provider, profile, predefined, cx, cz);
+                        if (radius <= 0.0F) {
                             continue;
                         }
-                        float radius = lc2h$getNormalCityRadiusAt(cx, cz, profile, predefined);
                         int dz = (cz - chunkZ) << 4;
                         float sqdist = dx2 + (dz * dz);
                         float radiusSq = radius * radius;
@@ -292,12 +407,31 @@ public abstract class MixinCity {
         }
 
         if (factor > 0.0001D && world != null) {
-            ChunkHeightmap heightmap = provider.getHeightmap(coord);
-            if (heightmap == null) {
-                return 0.0F;
+            Integer sampledHeight = null;
+            if (PlannerHotPath.isActive()) {
+                org.admany.lc2h.worldgen.terrain.NaturalHeightSampler.LevelSampler sampler =
+                    world instanceof WorldGenLevel genWorld
+                        ? org.admany.lc2h.worldgen.terrain.NaturalHeightSampler.forLevel(genWorld)
+                        : null;
+                if (sampler != null) {
+                    sampledHeight = sampler.cachedChunkHeight(chunkX, chunkZ);
+                }
+                if (sampledHeight == null) {
+                    // Never call provider.getHeightmap from a planner worker:
+                    // that path constructs NoiseChunk and evaluates the full
+                    // vanilla density graph. The bounded natural sampler will
+                    // publish the exact value for a later pass.
+                    LC2H_FACTOR_HEIGHT_UNKNOWN.set(Boolean.TRUE);
+                }
+            } else {
+                ChunkHeightmap heightmap = provider.getHeightmap(coord);
+                if (heightmap == null) {
+                    return 0.0F;
+                }
+                sampledHeight = heightmap.getHeight();
             }
-            int height = heightmap.getHeight();
-            if (height < profile.CITY_MINHEIGHT || height > profile.CITY_MAXHEIGHT) {
+            if (sampledHeight != null
+                && (sampledHeight < profile.CITY_MINHEIGHT || sampledHeight > profile.CITY_MAXHEIGHT)) {
                 return 0.0F;
             }
         }
@@ -323,12 +457,131 @@ public abstract class MixinCity {
         return Math.min(1.0F, Math.max(0.0F, factor));
     }
 
-    /**
-     * This makes the CityRarityMap cache safe for parallel worldgen.
-     *
-     * @author Admany
-     * @reason Prevent HashMap corruption and cross-chunk nondeterminism
-     */
+    @Unique
+    private static float lc2h$finishNormalCityFactor(ChunkCoord coord,
+                                                      IDimensionInfo provider,
+                                                      LostCityProfile profile,
+                                                      CommonLevelAccessor world,
+                                                      float factor) {
+        int chunkX = coord.chunkX();
+        int chunkZ = coord.chunkZ();
+        if (factor > 0.0001F && world != null) {
+            Integer sampledHeight = null;
+            if (PlannerHotPath.isActive()) {
+                org.admany.lc2h.worldgen.terrain.NaturalHeightSampler.LevelSampler sampler =
+                    world instanceof WorldGenLevel genWorld
+                        ? org.admany.lc2h.worldgen.terrain.NaturalHeightSampler.forLevel(genWorld)
+                        : null;
+                if (sampler != null) {
+                    sampledHeight = sampler.cachedChunkHeight(chunkX, chunkZ);
+                }
+                if (sampledHeight == null) {
+                    LC2H_FACTOR_HEIGHT_UNKNOWN.set(Boolean.TRUE);
+                }
+            } else {
+                ChunkHeightmap heightmap = provider.getHeightmap(coord);
+                if (heightmap == null) {
+                    return 0.0F;
+                }
+                sampledHeight = heightmap.getHeight();
+            }
+            if (sampledHeight != null
+                && (sampledHeight < profile.CITY_MINHEIGHT
+                || sampledHeight > profile.CITY_MAXHEIGHT)) {
+                return 0.0F;
+            }
+        }
+        if (factor > 0.0001F && world != null) {
+            WorldStyle worldStyle = (WorldStyle) AssetRegistries.WORLDSTYLES.get(
+                world, profile.getWorldStyle());
+            if (worldStyle != null) {
+                factor *= worldStyle.getCityChanceMultiplier(provider, coord);
+            }
+        }
+        if (profile.CITY_SPAWN_DISTANCE2 > 0) {
+            int blockX = chunkX << 4;
+            int blockZ = chunkZ << 4;
+            float dist = (float) Math.sqrt((blockX * blockX) + (blockZ * blockZ));
+            double multiplier;
+            if (dist <= profile.CITY_SPAWN_DISTANCE1) {
+                multiplier = profile.CITY_SPAWN_MULTIPLIER1;
+            } else if (dist >= profile.CITY_SPAWN_DISTANCE2) {
+                multiplier = profile.CITY_SPAWN_MULTIPLIER2;
+            } else {
+                float pct = (dist - profile.CITY_SPAWN_DISTANCE1)
+                    / (float) (profile.CITY_SPAWN_DISTANCE2 - profile.CITY_SPAWN_DISTANCE1);
+                multiplier = profile.CITY_SPAWN_MULTIPLIER1
+                    + pct * (profile.CITY_SPAWN_MULTIPLIER2
+                    - profile.CITY_SPAWN_MULTIPLIER1);
+            }
+            factor *= (float) multiplier;
+        }
+        return Math.min(1.0F, Math.max(0.0F, factor));
+    }
+
+    @Unique
+    private static NormalCityFactorTileCache.BuildResult lc2h$buildNormalFactorTile(
+            IDimensionInfo provider,
+            LostCityProfile profile,
+            int originX,
+            int originZ,
+            int side) {
+        CommonLevelAccessor world = provider.getWorld();
+        ResourceKey<Level> dimension = provider.getType();
+        int cells = side * side;
+        float[] factors = new float[cells];
+
+        if (profile.CITY_CHANCE < 0.0D) {
+            CityRarityMap rarityMap = getCityRarityMap(
+                provider.dimension(), provider.getSeed(), profile.CITY_PERLIN_SCALE,
+                profile.CITY_PERLIN_OFFSET, profile.CITY_PERLIN_INNERSCALE);
+            for (int localZ = 0; localZ < side; localZ++) {
+                for (int localX = 0; localX < side; localX++) {
+                    int index = localZ * side + localX;
+                    factors[index] = rarityMap.getCityFactor(
+                        originX + localX, originZ + localZ);
+                }
+            }
+        } else {
+            int radiusChunks = (profile.CITY_MAXRADIUS + 15) / 16;
+            ChunkCoord probe = new ChunkCoord(dimension, originX, originZ);
+            PredefinedCityCoordinateIndex predefined = lc2h$predefinedCityIndex(provider, probe);
+            int endX = originX + side - 1;
+            int endZ = originZ + side - 1;
+            for (int centerZ = originZ - radiusChunks;
+                 centerZ <= endZ + radiusChunks; centerZ++) {
+                for (int centerX = originX - radiusChunks;
+                     centerX <= endX + radiusChunks; centerX++) {
+                    float radius = lc2h$normalCenterRadiusAt(
+                        provider, profile, predefined, centerX, centerZ);
+                    if (radius <= 0.0F) {
+                        continue;
+                    }
+                    float radiusSq = radius * radius;
+                    int minX = Math.max(originX, centerX - radiusChunks);
+                    int maxX = Math.min(endX, centerX + radiusChunks);
+                    int minZ = Math.max(originZ, centerZ - radiusChunks);
+                    int maxZ = Math.min(endZ, centerZ + radiusChunks);
+                    for (int chunkZ = minZ; chunkZ <= maxZ; chunkZ++) {
+                        int dz = (centerZ - chunkZ) << 4;
+                        int dz2 = dz * dz;
+                        int row = (chunkZ - originZ) * side;
+                        for (int chunkX = minX; chunkX <= maxX; chunkX++) {
+                            int index = row + chunkX - originX;
+                            int dx = (centerX - chunkX) << 4;
+                            float sqdist = (dx * dx) + dz2;
+                            if (sqdist < radiusSq) {
+                                factors[index] += (radius - (float) Math.sqrt(sqdist)) / radius;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return new NormalCityFactorTileCache.BuildResult(factors, true);
+    }
+
+    /** Keeps the rarity map safe during parallel worldgen. */
     @Overwrite
     public static CityRarityMap getCityRarityMap(ResourceKey<Level> level, long seed, double scale, double offset, double innerScale) {
         Object cacheKey = lc2h$cityRarityKey(level, seed, scale, offset, innerScale);
@@ -340,12 +593,18 @@ public abstract class MixinCity {
         LC2H_CITY_STYLE_CACHE.clear();
         LC2H_CITY_CENTER_CACHE.clear();
         LC2H_CITY_RADIUS_CACHE.clear();
+        NormalCityCenterRadiusCache.clear();
+        NormalCityFactorTileCache.clear();
+        LC2H_CITY_FACTOR_CACHE.clear();
+        LC2H_CITY_FACTOR_FLIGHTS.values().forEach(flight -> flight.cancel(false));
+        LC2H_CITY_FACTOR_FLIGHTS.clear();
         LC2H_PROVIDER_SCOPE_KEYS.clear();
         LC2H_PREDEFINED_CITY_INDEX.clear();
         LC2H_CITY_RARITY_CACHE.clear();
         LostCitiesCacheBudgetManager.clear(LC2H_CITY_STYLE_BUDGET);
         LostCitiesCacheBudgetManager.clear(LC2H_CITY_CENTER_BUDGET);
         LostCitiesCacheBudgetManager.clear(LC2H_CITY_RADIUS_BUDGET);
+        LostCitiesCacheBudgetManager.clear(LC2H_CITY_FACTOR_BUDGET);
         LC2H_OCCUPIED_READY = false;
         LC2H_OCCUPIED_READY_KEY = null;
         LC2H_PREDEFINED_READY = false;
@@ -353,12 +612,7 @@ public abstract class MixinCity {
         LC2H_PREDEFINED_CITY_READY = false;
     }
 
-    /**
-     * This makes predefined city map initialization safe for parallel access.
-     *
-     * @author Admany
-     * @reason Prevent NPE when cache is cleared during async generation
-     */
+    /** Keeps predefined city map initialization safe during async generation. */
     @Overwrite
     public static PredefinedCity getPredefinedCity(CommonLevelAccessor level, ChunkCoord coord) {
         if (level == null || coord == null) {
@@ -455,7 +709,7 @@ public abstract class MixinCity {
         if (provider == null || provider.getWorld() == null) {
             return null;
         }
-        // WorldGenLevel in this mapping does not expose dimension(); use stable object identity.
+        // This WorldGenLevel mapping has no dimension accessor. Use object identity.
         return provider.getWorld();
     }
 
@@ -464,7 +718,7 @@ public abstract class MixinCity {
         if (level == null) {
             return null;
         }
-        // CommonLevelAccessor in this mapping does not expose dimension(); identity is sufficient.
+        // This accessor has no dimension method. Object identity is enough here.
         return level;
     }
 
@@ -548,6 +802,23 @@ public abstract class MixinCity {
     }
 
     @Unique
+    private static float lc2h$normalCenterRadiusAt(IDimensionInfo provider,
+                                                    LostCityProfile profile,
+                                                    PredefinedCityCoordinateIndex predefined,
+                                                    int chunkX,
+                                                    int chunkZ) {
+        float cached = NormalCityCenterRadiusCache.get(provider, profile, chunkX, chunkZ);
+        if (!Float.isNaN(cached)) {
+            return cached;
+        }
+
+        float radius = lc2h$isNormalCityCenterAt(chunkX, chunkZ, profile, predefined)
+            ? lc2h$getNormalCityRadiusAt(chunkX, chunkZ, profile, predefined)
+            : 0.0F;
+        return NormalCityCenterRadiusCache.publish(provider, profile, chunkX, chunkZ, radius);
+    }
+
+    @Unique
     private static PredefinedCityCoordinateIndex lc2h$predefinedCityIndex(IDimensionInfo provider,
                                                                           ChunkCoord probe) {
         PredefinedCityCoordinateIndex cached = LC2H_PREDEFINED_CITY_INDEX.get(provider);
@@ -555,9 +826,8 @@ public abstract class MixinCity {
             return cached;
         }
 
-        // This initializes Lost Cities' registry-backed map once. The supplied
-        // probe already exists at every caller, so the initialization path
-        // introduces no extra hot-loop coordinate allocation.
+        // Initialize LC's registry map once. The caller already has the probe,
+        // so this does not add a coordinate allocation to the hot loop.
         City.getPredefinedCity(provider.getWorld(), probe);
         Map<ChunkCoord, PredefinedCity> source = predefinedCityMap;
         PredefinedCityCoordinateIndex created =
@@ -714,6 +984,36 @@ public abstract class MixinCity {
             LC2H_CITY_RADIUS_CACHE.remove(dimensionKey, dimensionCache);
         }
         return removed;
+    }
+
+    @Unique
+    private static boolean lc2h$evictCityFactor(Object key) {
+        if (!(key instanceof CityFactorKey factorKey)) {
+            return false;
+        }
+        ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, Float>> byProfile =
+            LC2H_CITY_FACTOR_CACHE.get(factorKey.provider());
+        if (byProfile == null) {
+            return false;
+        }
+        ConcurrentHashMap<Long, Float> factors = byProfile.get(factorKey.profile());
+        if (factors == null) {
+            return false;
+        }
+        boolean removed = factors.remove(factorKey.packed()) != null;
+        if (removed && factors.isEmpty()) {
+            byProfile.remove(factorKey.profile(), factors);
+        }
+        if (byProfile.isEmpty()) {
+            LC2H_CITY_FACTOR_CACHE.remove(factorKey.provider(), byProfile);
+        }
+        return removed;
+    }
+
+    @Unique
+    private record CityFactorKey(IDimensionInfo provider,
+                                 LostCityProfile profile,
+                                 long packed) {
     }
 
     @Unique

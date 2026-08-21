@@ -28,6 +28,7 @@ import org.admany.lc2h.dev.diagnostics.ChunkGenTracker;
 import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.lc2h.dev.diagnostics.ViewCullingStats;
 import org.admany.lc2h.worldgen.lostcities.FastMultiChunkPlanner;
+import org.admany.lc2h.worldgen.lostcities.MultiBuildingFootprintRegistry;
 import org.admany.lc2h.worldgen.lostcities.MultiChunkBoundaryRegistry;
 import org.admany.lc2h.worldgen.dag.LostCityDagScheduler;
 import org.admany.lc2h.worldgen.kernel.JavaScalarLostCityKernel;
@@ -58,6 +59,16 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 
 public final class AsyncMultiChunkPlanner {
+
+    /*
+     * Native BuildingInfo holds its dimension lock while it can enter Railway.
+     * A background MultiChunk calculation can take Railway first and then enter
+     * BuildingInfo, which is the opposite order and deadlocks worldgen. The
+     * concurrent BuildingInfo replacement owns that paired execution model.
+     * Keep native BuildingInfo free of asynchronous MultiChunk work.
+     */
+    private static final boolean ASYNC_PLANNER_ENABLED =
+        Boolean.parseBoolean(System.getProperty("lc2h.concurrentBuildingInfo", "true"));
 
     private record PlannerKey(String scope, ResourceKey<net.minecraft.world.level.Level> dimension, int areaSize, int multiX, int multiZ) {
         private PlannerKey {
@@ -401,6 +412,10 @@ public final class AsyncMultiChunkPlanner {
         Objects.requireNonNull(provider, "provider");
         Objects.requireNonNull(coord, "coord");
 
+        if (!ASYNC_PLANNER_ENABLED) {
+            return;
+        }
+
         if (isInternalComputation()) {
             return;
         }
@@ -447,6 +462,7 @@ public final class AsyncMultiChunkPlanner {
 
         try {
             ChunkCoord topLeft = new ChunkCoord(multiCoord.dimension(), multiCoord.chunkX() * areaSize, multiCoord.chunkZ() * areaSize);
+            MultiBuildingFootprintRegistry.register(provider, multiCoord, multiChunk);
             org.admany.lc2h.util.lostcities.BuildingInfoCacheInvalidator.invalidateArea(topLeft, areaSize);
             AsyncBuildingInfoPlanner.invalidateArea(topLeft, areaSize);
             MultiChunkBoundaryRegistry.invalidateArea(topLeft, areaSize);
@@ -459,6 +475,10 @@ public final class AsyncMultiChunkPlanner {
 
     public static void preSchedule(IDimensionInfo provider, ChunkCoord coord) {
         if (provider == null || coord == null) {
+            return;
+        }
+
+        if (!ASYNC_PLANNER_ENABLED) {
             return;
         }
 
@@ -602,6 +622,10 @@ public final class AsyncMultiChunkPlanner {
      * state or performing a blocking world lookup.
      */
     public static void preScheduleWindow(IDimensionInfo provider, ChunkCoord coord, int requestedSide) {
+        if (!ASYNC_PLANNER_ENABLED) {
+            return;
+        }
+
         if (provider == null || coord == null || isInternalComputation()) {
             return;
         }
@@ -638,6 +662,7 @@ public final class AsyncMultiChunkPlanner {
             }
             MultiChunk multiChunk = new MultiChunk(multiCoord, areaSize);
             MultiChunk result = ((MultiChunkInvoker) multiChunk).lc2h$calculateBuildings(provider);
+            MultiBuildingFootprintRegistry.register(provider, multiCoord, result);
             MultiChunkBoundaryRegistry.register(provider, multiCoord, result);
 
             long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
@@ -843,6 +868,7 @@ public final class AsyncMultiChunkPlanner {
             int areaSize = areaSize(provider);
             try {
                 ChunkCoord topLeft = new ChunkCoord(multiCoord.dimension(), multiCoord.chunkX() * areaSize, multiCoord.chunkZ() * areaSize);
+                MultiBuildingFootprintRegistry.register(provider, multiCoord, gameCompatible);
                 org.admany.lc2h.util.lostcities.BuildingInfoCacheInvalidator.invalidateArea(topLeft, areaSize);
                 org.admany.lc2h.worldgen.async.planner.AsyncBuildingInfoPlanner.invalidateArea(topLeft, areaSize);
                 MultiChunkBoundaryRegistry.invalidateArea(topLeft, areaSize);
@@ -1008,6 +1034,10 @@ public final class AsyncMultiChunkPlanner {
     }
 
     public static void syncWarmup(IDimensionInfo provider, ChunkCoord coord) {
+        if (!ASYNC_PLANNER_ENABLED) {
+            return;
+        }
+
         if (provider == null || coord == null) {
             return;
         }
@@ -1490,7 +1520,7 @@ public final class AsyncMultiChunkPlanner {
     /**
      * Keeps multichunk work region-sized when the server has headroom without
      * allowing worldgen to consume every worker when the server is already
-     * late. This gate owns admission only; execution remains on the existing
+     * late. This gate owns admission only. Execution remains on the existing
      * QAPI/LC2H scheduler and no new executor is introduced here.
      */
     private static void tuneMultiChunkLimiter() {

@@ -24,7 +24,7 @@ public class MixinWorldGenRegion {
         try {
             if (cir.getReturnValue() && ChunkPostProcessor.isTracked(state.getBlock())) {
                 WorldGenRegion region = (WorldGenRegion)(Object)this;
-                ChunkPostProcessor.markForRemovalIfFloating(region, pos);
+                ChunkPostProcessor.markForRemovalIfFloating(region, pos, state);
             }
         } catch (Throwable ignored) {
         }
@@ -48,7 +48,7 @@ public class MixinWorldGenRegion {
             // owned one. Structure/template NBT can outlive that state, leaving an
             // invalid pending entity for air (or another ordinary block) to deserialize
             // later. Clear only an existing pending tag, and only for this immediate
-            // local write; captured and seam-owned writes above remain untouched.
+            // local write. Captured and seam-owned writes above stay untouched.
             if (!state.hasBlockEntity() && region.ensureCanWrite(pos)) {
                 ChunkAccess chunk = region.getChunk(pos);
                 if (chunk.getBlockEntityNbt(pos) != null) {

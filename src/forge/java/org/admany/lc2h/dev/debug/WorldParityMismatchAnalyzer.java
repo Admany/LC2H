@@ -3,6 +3,7 @@ package org.admany.lc2h.dev.debug;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 import org.admany.lc2h.worldgen.apply.ShadowMutationTraceRegistry;
+import org.admany.lc2h.util.ResourceLocations;
 
 import java.util.Locale;
 import java.util.Map;
@@ -66,7 +67,7 @@ final class WorldParityMismatchAnalyzer {
         String testState = test == null ? "<air>" : test.state;
         String baselineFluid = baseline == null ? "<none>" : baseline.fluid;
         String testFluid = test == null ? "<none>" : test.fluid;
-        ShadowMutationTraceRegistry.TraceSnapshot trace = ShadowMutationTraceRegistry.findLatest(ResourceLocation.tryParse(dimension), worldPos);
+        ShadowMutationTraceRegistry.TraceSnapshot trace = ShadowMutationTraceRegistry.findLatest(ResourceLocations.tryParse(dimension), worldPos);
         String bucket = classify(baselineState, testState, baselineFluid, testFluid, baselineBe, testBe);
         boolean nearBorder = x == 0 || x == 15 || z == 0 || z == 15;
         NeighborScan neighborScan = scanNeighbors(x, y, z, bucket, baselineBlocks, testBlocks);

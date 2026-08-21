@@ -4,13 +4,17 @@ import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.WorldGenLevel;
+import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.RandomState;
+import org.admany.lc2h.util.PackedCoordinateKey;
 
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class NaturalHeightSampler {
@@ -18,7 +22,7 @@ public final class NaturalHeightSampler {
     private static final Heightmap.Types TYPE = Heightmap.Types.OCEAN_FLOOR_WG;
 
     private static final int MAX_CACHED_CHUNKS = Math.max(4096,
-        Integer.getInteger("lc2h.terrain.naturalHeight.cacheMax", 1 << 19));
+        Integer.getInteger("lc2h.terrain.naturalHeight.cacheMax", 1 << 17));
 
     private static final Map<ServerLevel, LevelSampler> SAMPLERS = new ConcurrentHashMap<>();
     private static final AtomicLong SAMPLES = new AtomicLong();
@@ -26,6 +30,11 @@ public final class NaturalHeightSampler {
     private static final AtomicLong FAILURES = new AtomicLong();
     private static final AtomicLong EVICTIONS = new AtomicLong();
     private static final AtomicLong EROSION_FAILURES = new AtomicLong();
+    private static final AtomicLong EROSION_HITS = new AtomicLong();
+    private static final AtomicLong EROSION_SAMPLES = new AtomicLong();
+    private static final AtomicLong HEIGHT_FLIGHT_WAITS = new AtomicLong();
+    private static final AtomicLong HEIGHT_NON_BLOCKING_FALLBACKS = new AtomicLong();
+    private static final AtomicLong RESIDENT_PUBLISHES = new AtomicLong();
 
     private NaturalHeightSampler() {
     }
@@ -85,7 +94,13 @@ public final class NaturalHeightSampler {
             + ", failures=" + FAILURES.get()
             + ", cacheDrops=" + EVICTIONS.get()
             + ", erosionFailures=" + EROSION_FAILURES.get()
-            + ", cached=" + SAMPLERS.values().stream().mapToInt(s -> s.heights.size()).sum();
+            + ", erosionHits=" + EROSION_HITS.get()
+            + ", erosionSamples=" + EROSION_SAMPLES.get()
+            + ", heightFlightWaits=" + HEIGHT_FLIGHT_WAITS.get()
+            + ", heightNonBlockingFallbacks=" + HEIGHT_NON_BLOCKING_FALLBACKS.get()
+            + ", residentPublishes=" + RESIDENT_PUBLISHES.get()
+            + ", cached=" + SAMPLERS.values().stream().mapToInt(s -> s.heights.size()).sum()
+            + ", cachedErosion=" + SAMPLERS.values().stream().mapToInt(s -> s.erosion.size()).sum();
     }
 
     public static final class LevelSampler {
@@ -94,6 +109,11 @@ public final class NaturalHeightSampler {
         private final RandomState randomState;
         private final LevelHeightAccessor heightAccessor;
         private final ConcurrentHashMap<Long, Integer> heights = new ConcurrentHashMap<>();
+        private final ConcurrentLinkedQueue<Long> heightOrder = new ConcurrentLinkedQueue<>();
+        private final ConcurrentHashMap<Long, CompletableFuture<Integer>> heightFlights =
+            new ConcurrentHashMap<>();
+        private final ConcurrentHashMap<Long, Double> erosion = new ConcurrentHashMap<>();
+        private final ConcurrentLinkedQueue<Long> erosionOrder = new ConcurrentLinkedQueue<>();
 
         private LevelSampler(ChunkGenerator generator,
                              RandomState randomState,
@@ -104,19 +124,36 @@ public final class NaturalHeightSampler {
         }
 
         public int chunkHeight(int chunkX, int chunkZ) {
-            long key = (((long) chunkX) << 32) ^ (chunkZ & 0xffffffffL);
+            long key = PackedCoordinateKey.of(chunkX, chunkZ);
             Integer cached = this.heights.get(key);
             if (cached != null) {
                 HITS.incrementAndGet();
                 return cached;
             }
-            int height = sample((chunkX << 4) + 8, (chunkZ << 4) + 8);
-            if (this.heights.size() > MAX_CACHED_CHUNKS) {
-                this.heights.clear();
-                EVICTIONS.incrementAndGet();
+            CompletableFuture<Integer> created = new CompletableFuture<>();
+            CompletableFuture<Integer> existing = this.heightFlights.putIfAbsent(key, created);
+            if (existing != null) {
+                HEIGHT_FLIGHT_WAITS.incrementAndGet();
+                return existing.join();
             }
-            Integer previous = this.heights.putIfAbsent(key, height);
-            return previous == null ? height : previous;
+            try {
+                // Only the flight owner enters NoiseBasedChunkGenerator. All
+                // other workers reuse the same immutable sampled height.
+                int height = sample((chunkX << 4) + 8, (chunkZ << 4) + 8);
+                Integer previous = this.heights.putIfAbsent(key, height);
+                int result = previous != null ? previous : height;
+                if (previous == null) {
+                    this.heightOrder.add(key);
+                    trimHeightCache();
+                }
+                created.complete(result);
+                return result;
+            } catch (RuntimeException | Error failure) {
+                created.completeExceptionally(failure);
+                throw failure;
+            } finally {
+                this.heightFlights.remove(key, created);
+            }
         }
 
         public int blockHeight(int blockX, int blockZ) {
@@ -124,9 +161,23 @@ public final class NaturalHeightSampler {
         }
 
         public double erosionAt(int blockX, int blockZ) {
+            long key = PackedCoordinateKey.of(blockX, blockZ);
+            Double cached = this.erosion.get(key);
+            if (cached != null) {
+                EROSION_HITS.incrementAndGet();
+                return cached;
+            }
+            EROSION_SAMPLES.incrementAndGet();
             try {
-                return this.randomState.router().erosion().compute(
+                double value = this.randomState.router().erosion().compute(
                     new DensityFunction.SinglePointContext(blockX, 0, blockZ));
+                Double previous = this.erosion.putIfAbsent(key, value);
+                if (previous != null) {
+                    return previous;
+                }
+                this.erosionOrder.add(key);
+                trimErosionCache();
+                return value;
             } catch (Throwable ignored) {
                 EROSION_FAILURES.incrementAndGet();
                 return 0.0D;
@@ -146,6 +197,105 @@ public final class NaturalHeightSampler {
 
         public int cachedChunks() {
             return this.heights.size();
+        }
+
+        /**
+         * Noise and surface generation have already built this heightmap by
+         * the time Lost Cities enters its feature. Reuse that result instead
+         * of asking Minecraft to rebuild a full one-column NoiseChunk :]
+         */
+        public void publishResidentChunk(ChunkAccess chunk) {
+            if (chunk == null) {
+                return;
+            }
+            int chunkX = chunk.getPos().x;
+            int chunkZ = chunk.getPos().z;
+            long key = PackedCoordinateKey.of(chunkX, chunkZ);
+            if (this.heights.containsKey(key)) {
+                return;
+            }
+            int height;
+            try {
+                // ChunkAccess exposes the top block Y while getBaseHeight()
+                // returns the first free Y above it.
+                height = chunk.getHeight(TYPE, 8, 8) + 1;
+            } catch (Throwable ignored) {
+                return;
+            }
+            Integer previous = this.heights.putIfAbsent(key, height);
+            if (previous == null) {
+                RESIDENT_PUBLISHES.incrementAndGet();
+                this.heightOrder.add(key);
+                trimHeightCache();
+            }
+        }
+
+        /**
+         * Returns a resident height or a caller supplied approximation without
+         * ever joining another sampler.  Worldgen hot paths use this when a
+         * neighbouring worker is already evaluating the vanilla density graph.
+         * The exact sampler remains available to the bounded background owner
+         * through {@link #chunkHeight(int, int)}.
+         */
+        public int chunkHeightNonBlocking(int chunkX, int chunkZ, int fallback) {
+            long key = PackedCoordinateKey.of(chunkX, chunkZ);
+            Integer cached = this.heights.get(key);
+            if (cached != null) {
+                HITS.incrementAndGet();
+                return cached;
+            }
+            CompletableFuture<Integer> inFlight = this.heightFlights.get(key);
+            if (inFlight != null) {
+                HEIGHT_NON_BLOCKING_FALLBACKS.incrementAndGet();
+                return fallback;
+            }
+            /*
+             * This method is used from terrain/role hot paths.  Starting a
+             * fresh generator sample here made the method synchronous in the
+             * most common cold-cache case despite its name, reopening the
+             * NoiseBasedChunkGenerator graph on a worldgen worker.  Exact
+             * samples are owned by chunkHeight() and are published into this
+             * cache.  Until one is resident, return the caller's conservative
+             * fallback and let the next pass consume the immutable sample.
+             */
+            HEIGHT_NON_BLOCKING_FALLBACKS.incrementAndGet();
+            return fallback;
+        }
+
+        /**
+         * Returns a sampled height only when it is already resident. This is
+         * deliberately a cache peek: world generation callers must not join a
+         * cold height flight while another worker is sampling vanilla noise.
+         */
+        public Integer cachedChunkHeight(int chunkX, int chunkZ) {
+            long key = PackedCoordinateKey.of(chunkX, chunkZ);
+            Integer cached = this.heights.get(key);
+            if (cached != null) {
+                HITS.incrementAndGet();
+            }
+            return cached;
+        }
+
+        private void trimHeightCache() {
+            while (this.heights.size() > MAX_CACHED_CHUNKS) {
+                Long oldest = this.heightOrder.poll();
+                if (oldest == null) {
+                    return;
+                }
+                if (this.heights.remove(oldest) != null) {
+                    EVICTIONS.incrementAndGet();
+                }
+            }
+        }
+
+        private void trimErosionCache() {
+            while (this.erosion.size() > MAX_CACHED_CHUNKS) {
+                Long oldest = this.erosionOrder.poll();
+                if (oldest == null) {
+                    return;
+                }
+                this.erosion.remove(oldest);
+            }
         }
     }
 }

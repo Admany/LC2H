@@ -20,6 +20,7 @@ import org.admany.lc2h.compat.C2MECompat;
 import org.admany.lc2h.world.cleanup.VineClusterCleaner;
 import org.admany.lc2h.worldgen.async.warmup.AsyncChunkWarmup;
 import org.admany.lc2h.worldgen.lostcities.LostCityProfileOverrideManager;
+import org.admany.lc2h.worldgen.terrain.IntercityHighwayIndex;
 
 import java.util.logging.Handler;
 import java.util.logging.Level;
@@ -210,6 +211,7 @@ public class LC2H {
     @SubscribeEvent
     public void onServerStarted(ServerStartedEvent event) {
         org.admany.lc2h.worldgen.scope.WorldGenScope.refreshServer(event.getServer());
+        IntercityHighwayIndex.allowAsynchronousWarmups();
         LifecycleTortureTracker.onServerStarted(event.getServer());
         DiagnosticsReporter.logPerformanceSnapshot("server-started");
         try {
@@ -724,6 +726,11 @@ public class LC2H {
             LOGGER.debug("[LC2H] Could not clear Lost Cities Railway cache at {}: {}", phase, t.getMessage());
         }
         try {
+            org.admany.lc2h.data.cache.BiomeInfoRuntimeCache.clear();
+        } catch (Throwable t) {
+            LOGGER.debug("[LC2H] Could not clear LC2H biome cache at {}: {}", phase, t.getMessage());
+        }
+        try {
             org.admany.lc2h.worldgen.lostcities.MultiChunkPlanningCache.clear();
         } catch (Throwable t) {
             LOGGER.debug("[LC2H] Could not clear LC2H multichunk planning cache at {}: {}", phase, t.getMessage());
@@ -754,7 +761,7 @@ public class LC2H {
             LOGGER.debug("[LC2H] Could not clear natural height sampler at {}: {}", phase, t.getMessage());
         }
         try {
-            org.admany.lc2h.worldgen.MountainCityBlendDiagnostics.clearLifecycleState();
+            org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics.clearLifecycleState();
         } catch (Throwable t) {
             LOGGER.debug("[LC2H] Could not clear terrain blend diagnostics at {}: {}", phase, t.getMessage());
         }
@@ -762,140 +769,207 @@ public class LC2H {
 
     private static LiteralArgumentBuilder<CommandSourceStack> buildLc2hCommand() {
         LiteralArgumentBuilder<CommandSourceStack> root = Commands.literal("lc2h")
-            .then(Commands.literal("diagnostics").executes(ctx -> {
-                StallDetector.triggerDump(ctx.getSource().getServer());
-                ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.diagnostics.dump_triggered"), false);
-                return 1;
-            }))
-            .then(Commands.literal("gpu").executes(ctx -> {
-                String stats = org.admany.lc2h.worldgen.gpu.GPUMemoryManager.getComprehensiveMemoryStats()
-                    + " | " + AsyncChunkWarmup.describeGpuProcessingStats();
-                ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.gpu.stats", stats), false);
-                return 1;
-            }).then(
-                Commands.literal("cleanup").executes(ctx -> {
-                    org.admany.lc2h.worldgen.gpu.GPUMemoryManager.comprehensiveCleanup();
-                    String stats = org.admany.lc2h.worldgen.gpu.GPUMemoryManager.getComprehensiveMemoryStats()
-                        + " | " + AsyncChunkWarmup.describeGpuProcessingStats();
-                    ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.gpu.cleanup_done", stats), false);
-                    return 1;
-                })
-            ))
-            .then(Commands.literal("rescanChunk").executes(ctx -> {
-                ServerPlayer player = ctx.getSource().getPlayerOrException();
-                ChunkPos pos = player.chunkPosition();
-                ChunkPostProcessor.forceRescanChunk(player.serverLevel(), pos);
-                ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.translatable("lc2h.command.rescan.queued", pos), false);
-                return 1;
-            }).then(Commands.argument("radius", IntegerArgumentType.integer(0, 8)).executes(ctx -> {
-                ServerPlayer player = ctx.getSource().getPlayerOrException();
-                ChunkPos pos = player.chunkPosition();
-                int radius = IntegerArgumentType.getInteger(ctx, "radius");
-                int queued = ChunkPostProcessor.forceRescanArea(player.serverLevel(), pos, radius);
-                ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal(
-                    "[LC2H] Queued full artifact cleanup for " + queued + " loaded chunks (radius " + radius + ")"), false);
-                return queued;
-            })))
-            .then(Commands.literal("stats").executes(ctx -> reportStats(ctx.getSource())))
-            .then(Commands.literal("monitor")
-                .executes(ctx -> {
-                    ctx.getSource().sendSuccess(() -> Lc2hMonitorService.status(ctx.getSource().getServer()), false);
-                    return 1;
-                })
-                .then(Commands.literal("start")
+            .executes(ctx -> showCommandHelp(ctx.getSource()))
+            .then(Commands.literal("help").executes(ctx -> showCommandHelp(ctx.getSource())))
+            .then(Commands.literal("status").executes(ctx -> reportStats(ctx.getSource())))
+            .then(Commands.literal("gpu")
+                .executes(ctx -> showGpuStatus(ctx.getSource()))
+                .then(Commands.literal("status").executes(ctx -> showGpuStatus(ctx.getSource())))
+                .then(Commands.literal("cleanup")
+                    .requires(source -> source.hasPermission(2))
                     .executes(ctx -> {
-                        String initiator = ctx.getSource().getTextName();
-                        ctx.getSource().sendSuccess(() -> Lc2hMonitorService.start(ctx.getSource().getServer(), initiator, 60), false);
+                        GPUMemoryManager.comprehensiveCleanup();
+                        ChatMessenger.success(ctx.getSource(), "GPU cache cleanup completed");
+                        return showGpuStatus(ctx.getSource());
+                    })))
+            .then(Commands.literal("cache")
+                .executes(ctx -> showCacheStatus(ctx.getSource()))
+                .then(Commands.literal("status").executes(ctx -> showCacheStatus(ctx.getSource())))
+                .then(Commands.literal("clear")
+                    .requires(source -> source.hasPermission(2))
+                    .then(Commands.literal("memory").executes(ctx -> clearFeatureCache(ctx.getSource(), false)))
+                    .then(Commands.literal("disk").executes(ctx -> clearFeatureCache(ctx.getSource(), true))))
+                .then(Commands.literal("cleanup")
+                    .requires(source -> source.hasPermission(2))
+                    .executes(ctx -> {
+                        org.admany.lc2h.data.cache.FeatureCache.triggerMemoryPressureCleanup();
+                        ChatMessenger.success(ctx.getSource(), "Cache pressure cleanup completed");
+                        return showCacheStatus(ctx.getSource());
+                    })))
+            .then(Commands.literal("cleanup")
+                .requires(source -> source.hasPermission(2))
+                .then(Commands.literal("chunk")
+                    .executes(ctx -> rescanChunks(ctx.getSource(), 0))
+                    .then(Commands.argument("radius", IntegerArgumentType.integer(0, 8))
+                        .executes(ctx -> rescanChunks(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"))))))
+            .then(Commands.literal("terrain")
+                .then(Commands.literal("explain").executes(ctx -> explainTerrain(ctx.getSource()))))
+            .then(Commands.literal("diagnostics")
+                .executes(ctx -> showDiagnosticsHelp(ctx.getSource()))
+                .then(Commands.literal("dump")
+                    .requires(source -> source.hasPermission(2))
+                    .executes(ctx -> {
+                        StallDetector.triggerDump(ctx.getSource().getServer());
+                        ChatMessenger.success(ctx.getSource(), net.minecraft.network.chat.Component.translatable("lc2h.command.diagnostics.dump_triggered"));
                         return 1;
-                    })
-                    .then(Commands.argument("seconds", IntegerArgumentType.integer(10, 300))
+                    }))
+                .then(Commands.literal("monitor")
+                    .executes(ctx -> sendMonitorStatus(ctx.getSource()))
+                    .then(Commands.literal("start")
+                        .requires(source -> source.hasPermission(2))
+                        .executes(ctx -> startMonitor(ctx.getSource(), 60))
+                        .then(Commands.argument("seconds", IntegerArgumentType.integer(10, 300))
+                            .executes(ctx -> startMonitor(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "seconds")))))
+                    .then(Commands.literal("status").executes(ctx -> sendMonitorStatus(ctx.getSource())))
+                    .then(Commands.literal("stop")
+                        .requires(source -> source.hasPermission(2))
                         .executes(ctx -> {
-                            String initiator = ctx.getSource().getTextName();
-                            int seconds = IntegerArgumentType.getInteger(ctx, "seconds");
-                            ctx.getSource().sendSuccess(() -> Lc2hMonitorService.start(ctx.getSource().getServer(), initiator, seconds), false);
+                            ChatMessenger.info(ctx.getSource(), Lc2hMonitorService.stop(ctx.getSource().getServer()));
                             return 1;
-                        })
-                    )
-                )
-                .then(Commands.literal("status")
+                        })))
+                .then(Commands.literal("chunk")
+                    .executes(ctx -> showChunkInfo(ctx.getSource(), null, null))
+                    .then(Commands.argument("chunkX", IntegerArgumentType.integer())
+                        .then(Commands.argument("chunkZ", IntegerArgumentType.integer())
+                            .executes(ctx -> showChunkInfo(ctx.getSource(),
+                                IntegerArgumentType.getInteger(ctx, "chunkX"),
+                                IntegerArgumentType.getInteger(ctx, "chunkZ"))))))
+                .then(Commands.literal("chunkdebug")
+                    .requires(source -> source.hasPermission(2))
+                    .executes(ctx -> setChunkDebug(ctx.getSource(), true))
+                    .then(Commands.literal("enable").executes(ctx -> setChunkDebug(ctx.getSource(), true)))
+                    .then(Commands.literal("disable").executes(ctx -> setChunkDebug(ctx.getSource(), false)))
+                    .then(Commands.literal("clear").executes(ctx -> {
+                        ChunkDebugManager.clearSelection(ctx.getSource().getPlayerOrException());
+                        return 1;
+                    }))
+                    .then(Commands.literal("export")
+                        .executes(ctx -> exportChunkDebug(ctx.getSource().getPlayerOrException(), null))
+                        .then(Commands.argument("label", StringArgumentType.greedyString())
+                            .executes(ctx -> exportChunkDebug(ctx.getSource().getPlayerOrException(), StringArgumentType.getString(ctx, "label"))))))
+                .then(Commands.literal("frustum")
+                    .requires(source -> source.hasPermission(2))
                     .executes(ctx -> {
-                        ctx.getSource().sendSuccess(() -> Lc2hMonitorService.status(ctx.getSource().getServer()), false);
+                        FrustumDebugManager.toggle(ctx.getSource().getPlayerOrException());
                         return 1;
                     })
-                )
-                .then(Commands.literal("stop")
-                    .executes(ctx -> {
-                        ctx.getSource().sendSuccess(() -> Lc2hMonitorService.stop(ctx.getSource().getServer()), false);
-                        return 1;
-                    })
-                )
-            )
-            .then(Commands.literal("chunkinfo").executes(ctx -> {
-                ServerPlayer player = ctx.getSource().getPlayerOrException();
-                ChunkPos pos = player.chunkPosition();
-                ChunkCoord coord = new ChunkCoord(player.level().dimension(), pos.x, pos.z);
-                net.minecraft.network.chat.Component report = ChunkGenTracker.buildReportComponent(coord);
-                ctx.getSource().sendSuccess(() -> report, false);
+                    .then(Commands.literal("enable").executes(ctx -> setFrustumDebug(ctx.getSource(), true)))
+                    .then(Commands.literal("disable").executes(ctx -> setFrustumDebug(ctx.getSource(), false)))));
+
+        LiteralArgumentBuilder<CommandSourceStack> developer = Commands.literal("dev")
+            .requires(source -> source.hasPermission(4))
+            .executes(ctx -> {
+                ChatMessenger.info(ctx.getSource(), "Developer tools are grouped under /lc2h dev");
+                ChatMessenger.commandLine(ctx.getSource(), "/lc2h dev diagnostics", "Full internal diagnostics");
+                ChatMessenger.commandLine(ctx.getSource(), "/lc2h dev hooks", "Critical mixin hook state");
+                ChatMessenger.commandLine(ctx.getSource(), "/lc2h dev kernelbench", "Kernel benchmark tools");
                 return 1;
-            }).then(
-                Commands.argument("chunkX", IntegerArgumentType.integer()).then(
-                    Commands.argument("chunkZ", IntegerArgumentType.integer()).executes(ctx -> {
-                        int chunkX = IntegerArgumentType.getInteger(ctx, "chunkX");
-                        int chunkZ = IntegerArgumentType.getInteger(ctx, "chunkZ");
-                        ChunkCoord coord = new ChunkCoord(ctx.getSource().getLevel().dimension(), chunkX, chunkZ);
-                        net.minecraft.network.chat.Component report = ChunkGenTracker.buildReportComponent(coord);
-                        ctx.getSource().sendSuccess(() -> report, false);
-                        return 1;
-                    })
-                )
-            ))
-            .then(Commands.literal("chunkdebug")
-                .executes(ctx -> {
-                    ServerPlayer player = ctx.getSource().getPlayerOrException();
-                    ChunkDebugManager.setEnabled(player, true);
-                    return 1;
-                })
-                .then(Commands.literal("enable").executes(ctx -> {
-                    ServerPlayer player = ctx.getSource().getPlayerOrException();
-                    ChunkDebugManager.setEnabled(player, true);
-                    return 1;
-                }))
-                .then(Commands.literal("disable").executes(ctx -> {
-                    ServerPlayer player = ctx.getSource().getPlayerOrException();
-                    ChunkDebugManager.setEnabled(player, false);
-                    return 1;
-                }))
-                .then(Commands.literal("clear").executes(ctx -> {
-                    ServerPlayer player = ctx.getSource().getPlayerOrException();
-                    ChunkDebugManager.clearSelection(player);
-                    return 1;
-                }))
-                .then(Commands.literal("export")
-                    .executes(ctx -> exportChunkDebug(ctx.getSource().getPlayerOrException(), null))
-                    .then(Commands.argument("label", StringArgumentType.greedyString())
-                        .executes(ctx -> exportChunkDebug(ctx.getSource().getPlayerOrException(), StringArgumentType.getString(ctx, "label")))
-                    )
-                )
-            )
-            .then(Commands.literal("frustumdebug")
-                .executes(ctx -> {
-                    ServerPlayer player = ctx.getSource().getPlayerOrException();
-                    FrustumDebugManager.toggle(player);
-                    return 1;
-                })
-                .then(Commands.literal("enable").executes(ctx -> {
-                    ServerPlayer player = ctx.getSource().getPlayerOrException();
-                    FrustumDebugManager.setEnabled(player, true);
-                    return 1;
-                }))
-                .then(Commands.literal("disable").executes(ctx -> {
-                    ServerPlayer player = ctx.getSource().getPlayerOrException();
-                    FrustumDebugManager.setEnabled(player, false);
-                    return 1;
-                }))
-            );
-        DebugCommands.appendTo(root);
+            });
+        DebugCommands.appendTo(developer);
+        root.then(developer);
         return root;
+    }
+
+    private static int showCommandHelp(CommandSourceStack source) {
+        ChatMessenger.info(source, "LC2H V4 commands");
+        ChatMessenger.commandLine(source, "/lc2h status", "Runtime, queue and cache status");
+        ChatMessenger.commandLine(source, "/lc2h gpu", "GPU backend and workload status");
+        ChatMessenger.commandLine(source, "/lc2h cache", "Feature cache status and maintenance");
+        ChatMessenger.commandLine(source, "/lc2h cleanup chunk [radius]", "Rescan loaded chunks for worldgen artifacts");
+        ChatMessenger.commandLine(source, "/lc2h terrain explain", "Explain the terrain plan at your position");
+        ChatMessenger.commandLine(source, "/lc2h diagnostics", "Runtime diagnostics and capture tools");
+        if (source.hasPermission(4)) {
+            ChatMessenger.commandLine(source, "/lc2h dev", "Low level developer and parity tools");
+        }
+        return 1;
+    }
+
+    private static int showDiagnosticsHelp(CommandSourceStack source) {
+        ChatMessenger.info(source, "Diagnostics are idle until you explicitly start or capture them");
+        ChatMessenger.commandLine(source, "/lc2h diagnostics chunk", "Show generation state for your chunk");
+        ChatMessenger.commandLine(source, "/lc2h diagnostics monitor status", "Show monitor state");
+        ChatMessenger.commandLine(source, "/lc2h diagnostics monitor start 60", "Capture a bounded 60 second monitor report");
+        ChatMessenger.commandLine(source, "/lc2h diagnostics dump", "Write an immediate stall dump");
+        return 1;
+    }
+
+    private static int showGpuStatus(CommandSourceStack source) {
+        String stats = GPUMemoryManager.getComprehensiveMemoryStats()
+            + " | " + AsyncChunkWarmup.describeGpuProcessingStats();
+        ChatMessenger.info(source, net.minecraft.network.chat.Component.translatable("lc2h.command.gpu.stats", stats));
+        return 1;
+    }
+
+    private static int showCacheStatus(CommandSourceStack source) {
+        org.admany.lc2h.data.cache.FeatureCache.CacheStats stats = org.admany.lc2h.data.cache.FeatureCache.snapshot();
+        Long distributed = stats.quantifiedEntries();
+        String entries = distributed == null
+            ? "local=" + stats.localEntries()
+            : "local=" + stats.localEntries() + " quantified=" + distributed;
+        ChatMessenger.info(source, "Feature cache: " + entries
+            + " memory=" + org.admany.lc2h.data.cache.FeatureCache.getMemoryUsageMB() + " MiB"
+            + " pressure=" + (org.admany.lc2h.data.cache.FeatureCache.isMemoryPressureHigh() ? "high" : "normal"));
+        return 1;
+    }
+
+    private static int clearFeatureCache(CommandSourceStack source, boolean includeDisk) {
+        org.admany.lc2h.data.cache.FeatureCache.CacheStats cleared = org.admany.lc2h.data.cache.FeatureCache.clear(includeDisk);
+        ChatMessenger.success(source, "Cleared " + cleared.localEntries() + " local cache entries"
+            + (includeDisk ? " and the disk cache" : ""));
+        return 1;
+    }
+
+    private static int rescanChunks(CommandSourceStack source, int radius) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        ChunkPos pos = player.chunkPosition();
+        int queued = ChunkPostProcessor.forceRescanArea(player.serverLevel(), pos, radius);
+        ChatMessenger.success(source, "Queued artifact cleanup for " + queued
+            + " loaded chunk" + (queued == 1 ? "" : "s") + " around " + pos.x + ", " + pos.z);
+        return Math.max(1, queued);
+    }
+
+    private static int explainTerrain(CommandSourceStack source) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        for (String line : org.admany.lc2h.worldgen.terrain.CityBlendDebugger.explain(player.serverLevel(), player.blockPosition())) {
+            ChatMessenger.info(source, line);
+        }
+        return 1;
+    }
+
+    private static int sendMonitorStatus(CommandSourceStack source) {
+        ChatMessenger.info(source, Lc2hMonitorService.status(source.getServer()));
+        return 1;
+    }
+
+    private static int startMonitor(CommandSourceStack source, int seconds) {
+        ChatMessenger.info(source, Lc2hMonitorService.start(source.getServer(), source.getTextName(), seconds));
+        return 1;
+    }
+
+    private static int showChunkInfo(CommandSourceStack source, Integer chunkX, Integer chunkZ)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ChunkCoord coord;
+        if (chunkX == null || chunkZ == null) {
+            ServerPlayer player = source.getPlayerOrException();
+            ChunkPos pos = player.chunkPosition();
+            coord = new ChunkCoord(player.level().dimension(), pos.x, pos.z);
+        } else {
+            coord = new ChunkCoord(source.getLevel().dimension(), chunkX, chunkZ);
+        }
+        ChatMessenger.info(source, ChunkGenTracker.buildReportComponent(coord));
+        return 1;
+    }
+
+    private static int setChunkDebug(CommandSourceStack source, boolean enabled)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ChunkDebugManager.setEnabled(source.getPlayerOrException(), enabled);
+        return 1;
+    }
+
+    private static int setFrustumDebug(CommandSourceStack source, boolean enabled)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        FrustumDebugManager.setEnabled(source.getPlayerOrException(), enabled);
+        return 1;
     }
 
     private static int reportStats(CommandSourceStack source) {
@@ -1104,32 +1178,12 @@ public class LC2H {
     }
 
     private static void sendBoxedStats(CommandSourceStack source, String title, List<String> lines) {
-        String safeTitle = title == null ? "Stats" : title;
-        int width = safeTitle.length();
+        ChatMessenger.success(source, title == null ? "LC2H status" : title);
         for (String line : lines) {
-            if (line != null && line.length() > width) {
-                width = line.length();
+            if (line != null && !line.isBlank()) {
+                ChatMessenger.info(source, line.stripTrailing());
             }
         }
-        String border = "+-" + "-".repeat(width + 2) + "-+";
-        ChatMessenger.info(source, border);
-        ChatMessenger.info(source, "| " + padRight(safeTitle, width) + " |");
-        ChatMessenger.info(source, border);
-        for (String line : lines) {
-            String safeLine = line == null ? "" : line;
-            ChatMessenger.info(source, "| " + padRight(safeLine, width) + " |");
-        }
-        ChatMessenger.info(source, border);
-    }
-
-    private static String padRight(String value, int width) {
-        if (value == null) {
-            value = "";
-        }
-        if (value.length() >= width) {
-            return value;
-        }
-        return value + " ".repeat(width - value.length());
     }
 
     private static int exportChunkDebug(ServerPlayer player, String label) {

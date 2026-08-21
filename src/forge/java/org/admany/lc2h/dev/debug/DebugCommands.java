@@ -153,12 +153,14 @@ public class DebugCommands {
                     emitDiagnosticLine(context.getSource(), "ExactCityCenterGPU: " + org.admany.lc2h.worldgen.gpu.CityCenterGpuCache.diagnostics());
                     emitDiagnosticLine(context.getSource(), "TerrainCorrectionGPU: " + org.admany.lc2h.worldgen.gpu.TerrainCorrectionGpuPipeline.diagnostics());
                     emitDiagnosticLine(context.getSource(), "TerrainOwner: Minecraft NoiseChunk native-density coordinate transform (single shaper)");
-                    emitDiagnosticLine(context.getSource(), "MountainCityBlend: " + org.admany.lc2h.worldgen.MountainCityBlendDiagnostics.diagnostics());
+                    emitDiagnosticLine(context.getSource(), "MountainCityBlend: " + org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics.diagnostics());
                     emitDiagnosticLine(context.getSource(), "CityShiftField: " + org.admany.lc2h.worldgen.terrain.CityShiftField.diagnostics());
                     emitDiagnosticLine(context.getSource(), "NaturalHeight: " + org.admany.lc2h.worldgen.terrain.NaturalHeightSampler.diagnostics());
-                    emitDiagnosticLine(context.getSource(), "MountainCityReservation: " + org.admany.lc2h.worldgen.MountainCityReservationPlanner.diagnostics());
-                    emitDiagnosticLine(context.getSource(), "CityTerrainPlanBridge: " + org.admany.lc2h.worldgen.CityTerrainPlanBridge.diagnostics());
+                    emitDiagnosticLine(context.getSource(), "MountainCityReservation: " + org.admany.lc2h.worldgen.terrain.MountainCityReservationPlanner.diagnostics());
+                    emitDiagnosticLine(context.getSource(), "CityTerrainPlanBridge: " + org.admany.lc2h.worldgen.terrain.CityTerrainPlanBridge.diagnostics());
                     emitDiagnosticLine(context.getSource(), "MultiChunkPlanCache: " + MultiChunkPlanningCache.diagnostics());
+                    emitDiagnosticLine(context.getSource(), "MultiBuildingFootprints: " + org.admany.lc2h.worldgen.lostcities.MultiBuildingFootprintRegistry.diagnostics());
+                    emitDiagnosticLine(context.getSource(), "CityStructureProtection: " + org.admany.lc2h.worldgen.lostcities.CityStructureProtection.diagnostics());
                     emitDiagnosticLine(context.getSource(), "BiomeInfoRuntimeCache: " + org.admany.lc2h.data.cache.BiomeInfoRuntimeCache.diagnostics());
                     emitDiagnosticLine(context.getSource(), "BuildingInfoPlanner: " + AsyncBuildingInfoPlanner.telemetrySummary());
                     for (String line : MultiChunkParityHarness.summaryLines()) {
@@ -206,7 +208,7 @@ public class DebugCommands {
                         emitDiagnosticLine(context.getSource(), "whyflat: must be run by a player");
                         return 0;
                     }
-                    for (String line : org.admany.lc2h.worldgen.CityBlendDebugger.explain(
+                    for (String line : org.admany.lc2h.worldgen.terrain.CityBlendDebugger.explain(
                         player.serverLevel(), player.blockPosition())) {
                         emitDiagnosticLine(context.getSource(), line);
                     }

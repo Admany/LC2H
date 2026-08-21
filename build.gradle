@@ -35,6 +35,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(17)
 println "Java: ${System.getProperty 'java.version'}, JVM: ${System.getProperty 'java.vm.version'} (${System.getProperty 'java.vendor'}), Arch: ${System.getProperty 'os.arch'}"
 def lc2hRunDirProp = (findProperty('lc2h.runDir') ?: System.getProperty('lc2h.runDir') ?: 'run').toString()
 def lc2hJfrOutputProp = (findProperty('lc2h.jfrOutput') ?: System.getProperty('lc2h.jfrOutput') ?: '').toString().trim()
+def lc2hRunDebugProp = (findProperty('lc2h.runDebug') ?: System.getProperty('lc2h.runDebug') ?: 'false').toString()
 def lc2hShadowtestProps = [
     'lc2h.shadowtest.auto',
     'lc2h.shadowtest.auto.stop',
@@ -58,6 +59,9 @@ def lc2hParityProps = [
 ]
 def lc2hWorldParityProps = [
     'lc2h.baselineMode',
+    'lc2h.heightBranch.enabled',
+    'lc2h.heightBranch.auditSamples',
+    'lc2h.heightBranch.continuousAuditInterval',
     'lc2h.worldparity.auto',
     'lc2h.worldparity.auto.stop',
     'lc2h.worldparity.radius',
@@ -134,15 +138,15 @@ minecraft {
             // "SCAN": For mods scan.
             // "REGISTRIES": For firing of registry events.
             // "REGISTRYDUMP": For getting the contents of all registries.
-            property 'forge.logging.markers', 'REGISTRIES,FMLHANDSHAKE,MIXIN'
+            property 'forge.logging.markers', lc2hRunDebugProp.toBoolean() ? 'REGISTRIES,FMLHANDSHAKE,MIXIN' : ''
 
             // Recommended logging level for the console
             // You can set various levels here.
             // Please read: https://stackoverflow.com/questions/2031163/when-to-use-the-different-log-levels
-            property 'forge.logging.console.level', 'debug'
+            property 'forge.logging.console.level', lc2hRunDebugProp.toBoolean() ? 'debug' : 'info'
             
             // Set mixin configs for better debugging
-            property 'mixin.debug', 'true'
+            property 'mixin.debug', lc2hRunDebugProp
             property 'mixin.checks.interfaces', 'true'
             property 'mixin.env.remapRefMap', 'true'
             jvmArg("-Dlc2h.runtimeMappings=${mapping_channel}:${mapping_version}")
@@ -219,6 +223,27 @@ sourceSets {
     }
 }
 
+def lc2hIntegrationArtifacts = []
+def lc2hIntegrationModsDir = findProperty('lc2h.integrationModsDir')
+def lc2hIntegrationRepo = layout.buildDirectory.dir('integration-mod-repo').get().asFile
+if (lc2hIntegrationModsDir != null && lc2hIntegrationModsDir.toString().trim()) {
+    lc2hIntegrationRepo.mkdirs()
+    lc2hIntegrationRepo.listFiles({ file ->
+        file.isFile() && file.name.startsWith('lc2h-integration-') && file.name.endsWith('.jar')
+    } as FileFilter)?.each { it.delete() }
+    fileTree(dir: file(lc2hIntegrationModsDir.toString()), include: '*.jar').files
+        .sort { left, right -> left.name <=> right.name }
+        .eachWithIndex { integrationJar, index ->
+            def artifact = "lc2h-integration-${index}"
+            copy {
+                from integrationJar
+                into lc2hIntegrationRepo
+                rename { "${artifact}-1.0.jar" }
+            }
+            lc2hIntegrationArtifacts.add(artifact)
+        }
+}
+
 repositories {
     // Put repositories for dependencies here
     // ForgeGradle automatically adds the Forge maven and Maven Central for you
@@ -242,7 +267,7 @@ repositories {
 
     // Add local libs directory for mod jar dependencies
     flatDir {
-        dirs 'libs'
+        dirs 'libs', lc2hIntegrationRepo
     }
     mavenCentral()
 }
@@ -265,9 +290,18 @@ dependencies {
     implementation fg.deobf(files(quantifiedJar))
     compileOnly fg.deobf("local.mods:lostcities-1.20:${project.property('lostcities_version')}")
     runtimeOnly fg.deobf("local.mods:lostcities-1.20:${project.property('lostcities_version')}")
+    testImplementation fg.deobf("local.mods:lostcities-1.20:${project.property('lostcities_version')}")
 
     implementation 'com.github.oshi:oshi-core:6.4.5'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+
+    // Direct integrated runs can point at a small mod lane without copying
+    // production jars into the dev run's mods folder. ForgeGradle remaps every
+    // jar here before launch, which is required for HariChunk and similar
+    // production mixins to target the mapped Minecraft classes correctly.
+    lc2hIntegrationArtifacts.each { artifact ->
+        runtimeOnly fg.deobf("integration.mods:${artifact}:1.0")
+    }
 }
 
 
