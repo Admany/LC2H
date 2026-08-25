@@ -12,13 +12,16 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.LiquidBlock;
+import net.minecraft.world.level.block.SnowyDirtBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.ChunkStatus;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.tags.BlockTags;
@@ -120,6 +123,8 @@ public class ChunkPostProcessor {
     private static final int MAX_PENDING_FLOATING_CHECKS = Math.max(256, Integer.getInteger("lc.floating.max_pending_checks", 8192));
     private static final int MAX_FLOATING_CHECKS_PER_TICK = Math.max(8, Integer.getInteger("lc.floating.max_checks_per_tick", 128));
     private static final int MAX_SHADOW_REMOVALS_PER_TICK = Math.max(32, Integer.getInteger("lc.floating.max_shadow_removals_per_tick", 256));
+    private static final int MAX_SURFACE_RECONCILES_PER_TICK = Math.max(1,
+        Integer.getInteger("lc2h.surface_reconciles_per_tick", 2));
     private static final int MAX_FLUID_CLUSTER_SCAN = Math.max(16, Integer.getInteger("lc.floating.max_fluid_cluster_scan", 96));
     private static final int CITY_FLOATING_SOURCE_MIN_HEIGHT =
         Math.max(4, Integer.getInteger("lc.floating.city_source_column_min_height", 8));
@@ -138,7 +143,12 @@ public class ChunkPostProcessor {
     private static final double TARGET_TICK_MS = 20.0D;
     private static final boolean ENABLE_BATCH_DRAIN = Boolean.getBoolean("lc.floating.enable_batch_drain");
     private static final boolean AUTO_RESCAN_STARTUP = Boolean.getBoolean("lc.floating.auto_rescan_startup");
-    private static final boolean ENABLE_FLOATING_SCAN = Boolean.getBoolean("lc.floating.enable_scan");
+    /* Event-driven checks are bounded and only run for chunks adjacent to an
+     * LC-owned area. Keep them on by default so direct structure writes and
+     * tree replay are audited even when the expensive full-chunk scanner is
+     * disabled. The full scanner still requires ENABLE_AUTOMATIC_CHUNK_SCANS. */
+    private static final boolean ENABLE_FLOATING_SCAN = Boolean.parseBoolean(
+        System.getProperty("lc.floating.enable_scan", "true"));
     private static final int SAFE_SET_FLAGS = 2;
     private static final BlockState AIR_STATE = Blocks.AIR.defaultBlockState();
     private static final int SHADOW_Y_OFFSET = 1024;
@@ -176,9 +186,19 @@ public class ChunkPostProcessor {
     private static final Set<ChunkScanKey> INFLIGHT_CHUNK_SCANS = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private static final Set<ChunkScanKey> FORCED_CLEANUP_SCANS = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private static final Set<ChunkScanKey> COMPLETED_CHUNKS = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private static final Set<ChunkScanKey> GENERATED_AUDIT_CHUNKS = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private static final Set<ChunkScanKey> GENERATED_SURFACE_RECONCILIATION =
+        Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private static final AtomicInteger SNOW_RECONCILED_CHUNKS = new AtomicInteger();
+    private static final AtomicInteger SNOW_PLACED = new AtomicInteger();
+    private static final AtomicInteger SNOW_SURFACE_COLUMNS = new AtomicInteger();
+    private static final AtomicInteger SNOW_GRASS_COLUMNS = new AtomicInteger();
+    private static final AtomicInteger SNOW_BIOME_COLUMNS = new AtomicInteger();
+    private static final AtomicInteger SNOW_HEIGHTMAP_FALLBACKS = new AtomicInteger();
     private static final AtomicBoolean LOGGED_QUEUE_ALERT = new AtomicBoolean(false);
     private static final AtomicBoolean LOGGED_QUEUE_HARD_LIMIT = new AtomicBoolean(false);
     private static final AtomicBoolean LOGGED_FLOATING_QUEUE_HARD_LIMIT = new AtomicBoolean(false);
+    private static final AtomicBoolean LOGGED_FLOATING_CHECK_FAILURE = new AtomicBoolean(false);
     private static final AtomicBoolean BATCH_IN_FLIGHT = new AtomicBoolean(false);
     private static final AtomicBoolean FLOATING_DRAIN_REQUESTED = new AtomicBoolean(false);
     private static final AtomicBoolean SHADOW_REMOVAL_DRAIN_REQUESTED = new AtomicBoolean(false);
@@ -269,6 +289,11 @@ public class ChunkPostProcessor {
         return tracked;
     }
 
+    /** Fast candidate predicate shared by WorldGenRegion generation hooks. */
+    public static boolean isFloatingCandidate(BlockState state) {
+        return shouldWatchFloatingCandidate(state);
+    }
+
     private static boolean shouldWatchFloatingCandidate(BlockState state) {
         if (state == null) {
             return false;
@@ -277,7 +302,6 @@ public class ChunkPostProcessor {
             || isPotentialFloatingSourceFluid(state)
             || isHorrorElementBlock(state)
             || isAttachmentDecoration(state)
-            || state.is(BlockTags.LEAVES)
             || isModdedTreeDecoration(state);
     }
 
@@ -341,7 +365,12 @@ public class ChunkPostProcessor {
                 || !hasConnectedArtifactAnchor(level, pos, ArtifactFamily.ATTACHMENT);
         }
         if (state.is(BlockTags.LEAVES)) {
-            return isDecayMarkedLeaf(state);
+            /* Vanilla owns leaf decay.  A DISTANCE=7 leaf is observable while
+             * a feature is still writing its trunk, and seam replay can make
+             * the log live in a neighbouring chunk.  Treating it as LC2H
+             * floating vegetation was the direct cause of stripped canopies;
+             * never delete leaves from this repair pass. */
+            return false;
         }
         if (isModdedTreeDecoration(state)) {
             return !canSurviveAt(level, pos, state, unsupported)
@@ -747,6 +776,9 @@ public class ChunkPostProcessor {
         if (state == null) {
             return false;
         }
+        if (isConfiguredFloatingVegetation(state)) {
+            return true;
+        }
         if (state.is(Blocks.VINE)
             || state.is(Blocks.CAVE_VINES)
             || state.is(Blocks.CAVE_VINES_PLANT)
@@ -764,6 +796,39 @@ public class ChunkPostProcessor {
         }
         String path = key.getPath();
         return path.contains("vine") || path.contains("lichen") || path.contains("hanging_root");
+    }
+
+    /**
+     * Resolve user-configured attachment blocks by registry id.  The
+     * defaults cover glow lichen and Immersive Weathering frost, while the
+     * list lets packs add their own hanging vegetation without hardcoding a
+     * mod dependency in the production jar.
+     */
+    public static boolean isConfiguredFloatingVegetation(BlockState state) {
+        if (state == null || ForgeRegistries.BLOCKS.getKey(state.getBlock()) == null) {
+            return false;
+        }
+        ResourceLocation id = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+        String idString = id.toString().toLowerCase(java.util.Locale.ROOT);
+        // Built-in defaults are always active. Frost is conditional on the
+        // Immersive Weathering block actually existing in this pack, so a
+        // vanilla-only instance never pays for a missing mod dependency.
+        if (ConfigManager.DEFAULT_GLOW_LICHEN_ID.equals(idString)) {
+            return true;
+        }
+        if (ConfigManager.IMMERSIVE_WEATHERING_FROST_ID.equals(idString)
+            && ConfigManager.defaultFloatingVegetationBlocks().contains(idString)) {
+            return true;
+        }
+        ConfigManager.Config config = ConfigManager.CONFIG;
+        if (config != null && config.floatingVegetationAdditionalBlocks != null) {
+            for (String configured : config.floatingVegetationAdditionalBlocks) {
+                if (configured != null && idString.equals(configured.trim().toLowerCase(java.util.Locale.ROOT))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean isModdedTreeDecoration(BlockState state) {
@@ -830,6 +895,42 @@ public class ChunkPostProcessor {
                 }
                 if (isSolidOrFixedBlock(level, neighbor, neighborState)) {
                     return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * A leaf component can have valid distance values even after a building
+     * cutoff removed its trunk. Verify that the component still reaches a log
+     * before retaining it. Unloaded neighbours are treated conservatively so
+     * generation never deletes a cross-chunk tree prematurely.
+     */
+    private static boolean hasConnectedTreeAnchor(ServerLevel level, BlockPos start) {
+        if (level == null || start == null) {
+            return true;
+        }
+        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        HashSet<Long> visited = new HashSet<>();
+        queue.add(start.immutable());
+        visited.add(start.asLong());
+        while (!queue.isEmpty()) {
+            if (visited.size() > 512) {
+                return true;
+            }
+            BlockPos current = queue.removeFirst();
+            for (Direction direction : DIRECTIONS) {
+                BlockPos neighbor = current.relative(direction);
+                if (!level.isLoaded(neighbor)) {
+                    return true;
+                }
+                BlockState neighborState = level.getBlockState(neighbor);
+                if (neighborState.is(BlockTags.LOGS)) {
+                    return true;
+                }
+                if (neighborState.is(BlockTags.LEAVES) && visited.add(neighbor.asLong())) {
+                    queue.addLast(neighbor);
                 }
             }
         }
@@ -1077,6 +1178,18 @@ public class ChunkPostProcessor {
                     enqueue = shouldRemoveTallCityFluidSource(level, pos, state);
                 }
             }
+        } else if (isAttachmentDecoration(state) || isModdedTreeDecoration(state)) {
+            // WorldGenRegion is the first place modded features write their
+            // blocks.  Run the block's own survival predicate here as well as
+            // in the later server-side queue so glow lichen, frost, and other
+            // configured attachments cannot survive as generated floating
+            // decorations outside the near-surface audit window.
+            enqueue = !canSurviveAt(region, pos, state, unsupported);
+    } else if (state.is(BlockTags.LEAVES)) {
+      // Keep valid leaf canopies even when their trunk is outside the current
+      // WorldGenRegion. Decay distance is the only authoritative removal
+      // signal here; seam replay owns cross-chunk tree completion.
+      enqueue = isDecayMarkedLeaf(state);
         } else if (isHorrorElementBlock(state)) {
             enqueue = shouldRemoveFloatingHorrorElement(region, pos, state, unsupported);
         } else if (isTracked(state.getBlock())) {
@@ -1090,10 +1203,18 @@ public class ChunkPostProcessor {
         }
 
         if (enqueue) {
-            int removed = removeFloatingCandidate(region, pos, state);
-            if (removed > 0) {
-                FIXED_FLOATING += removed;
-                return;
+            /* A leaf can legitimately have DISTANCE=7 while a tree feature is
+             * still writing its trunk/branches.  Removing it synchronously
+             * from WorldGenRegion was the direct cause of the stripped-tree
+             * screenshots: the later log writes never got a chance to make
+             * the canopy valid.  Defer leaves to the server-side check;
+             * attachments/fluids/plants can still use the immediate path. */
+            if (!state.is(BlockTags.LEAVES)) {
+                int removed = removeFloatingCandidate(region, pos, state);
+                if (removed > 0) {
+                    FIXED_FLOATING += removed;
+                    return;
+                }
             }
             try {
                 if (level == null) {
@@ -1129,6 +1250,33 @@ public class ChunkPostProcessor {
         } catch (Throwable ignored) {
             return !fallbackUnsupported;
         }
+    }
+
+    private static boolean hasConnectedTreeAnchor(net.minecraft.server.level.WorldGenRegion region, BlockPos start) {
+        if (region == null || start == null) {
+            return true;
+        }
+        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        HashSet<Long> visited = new HashSet<>();
+        queue.add(start.immutable());
+        visited.add(start.asLong());
+        while (!queue.isEmpty()) {
+            if (visited.size() > 512) {
+                return true;
+            }
+            BlockPos current = queue.removeFirst();
+            for (Direction direction : DIRECTIONS) {
+                BlockPos neighbor = current.relative(direction);
+                BlockState neighborState = region.getBlockState(neighbor);
+                if (neighborState.is(BlockTags.LOGS)) {
+                    return true;
+                }
+                if (neighborState.is(BlockTags.LEAVES) && visited.add(neighbor.asLong())) {
+                    queue.addLast(neighbor);
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean hasTrackedPlantSelfSupport(BlockState state, BlockState belowState) {
@@ -1241,6 +1389,19 @@ public class ChunkPostProcessor {
 
     @SubscribeEvent
     public static void onChunkLoad(ChunkEvent.Load event) {
+        if (!(event.getChunk() instanceof LevelChunk chunk)) return;
+        // IMPORTANT: only track on the server. Client chunk loads can flood the queue on integrated servers.
+        if (!(chunk.getLevel() instanceof ServerLevel level)) {
+            return;
+        }
+        ChunkScanKey key = chunkKey(level.dimension().location(), chunk.getPos().x, chunk.getPos().z);
+        if (GENERATED_AUDIT_CHUNKS.remove(key)) {
+            queueGeneratedVegetationChecks(level, chunk);
+        }
+        // Surface reconciliation is deliberately drained from the server
+        // tick below.  ChunkEvent.Load fires while the chunk is still being
+        // promoted into ServerChunkCache; reading it through Level at this
+        // point can re-enter getChunk and block the integrated server.
         // A full vertical scan for every loaded chunk is a repair tool, not a
         // normal worldgen stage. Running it automatically duplicates work done
         // by Lost Cities and explodes under DH, which can load thousands of
@@ -1250,14 +1411,6 @@ public class ChunkPostProcessor {
         boolean floatingScanEnabled = ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL && ENABLE_FLOATING_SCAN;
         boolean doubleBlockEnabled = ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER;
         if (!floatingScanEnabled && !doubleBlockEnabled) return;
-        if (!(event.getChunk() instanceof LevelChunk chunk)) return;
-
-        // IMPORTANT: only track on the server. Client chunk loads can flood the queue on integrated servers.
-        if (!(chunk.getLevel() instanceof ServerLevel level)) {
-            return;
-        }
-
-        ChunkScanKey key = chunkKey(level.dimension().location(), chunk.getPos().x, chunk.getPos().z);
         boolean cityChunk = floatingScanEnabled && shouldScanFloatingInChunk(level, chunk.getPos().x, chunk.getPos().z);
         boolean effectiveFloating = floatingScanEnabled && cityChunk;
 
@@ -1337,6 +1490,10 @@ public class ChunkPostProcessor {
         INFLIGHT_CHUNK_SCANS.remove(key);
         FORCED_CLEANUP_SCANS.remove(key);
         COMPLETED_CHUNKS.remove(key);
+        // Keep an unprocessed post-generation marker across a transient
+        // unload.  Generation can release its ticket before the next server
+        // tick drains the bounded snow pass; dropping the key here would make
+        // that surface repair permanently disappear.
         CITY_CHUNK_CACHE.remove(key);
         PROTECTED_TREE_BLOCKS.remove(key);
     }
@@ -1374,16 +1531,198 @@ public class ChunkPostProcessor {
         return CHUNK_SCAN_PROGRESS.size();
     }
 
+    /** Mark one Lost Cities output chunk for a bounded post-generation audit. */
+    public static void noteGeneratedChunk(ResourceKey<Level> dimension, int chunkX, int chunkZ) {
+        if (dimension == null) {
+            return;
+        }
+        if (ConfigManager.CITY_BLEND_ENABLED && GENERATED_SURFACE_RECONCILIATION.size() < 8192) {
+            GENERATED_SURFACE_RECONCILIATION.add(chunkKey(dimension.location(), chunkX, chunkZ));
+        }
+        if (ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL && ENABLE_FLOATING_SCAN
+            && GENERATED_AUDIT_CHUNKS.size() < 8192) {
+            GENERATED_AUDIT_CHUNKS.add(chunkKey(dimension.location(), chunkX, chunkZ));
+        }
+    }
+
+    /**
+     * Queue only vegetation positions near the generated surface. This is
+     * deliberately not the full vertical repair scan: it covers direct
+     * ChunkDriver/structure writes without adding a per-chunk 100k-block pass.
+     */
+    private static void queueGeneratedVegetationChecks(ServerLevel level, LevelChunk chunk) {
+        if (level == null || chunk == null || !isCleanupRelevantChunkCached(level, chunk.getPos().x, chunk.getPos().z)) {
+            return;
+        }
+        int minBuild = level.getMinBuildHeight();
+        int maxBuild = level.getMaxBuildHeight() - 1;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        for (int localX = 0; localX < 16; localX++) {
+            for (int localZ = 0; localZ < 16; localZ++) {
+                int surface = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, localX, localZ);
+                int fromY = Math.max(minBuild, surface - 32);
+                int toY = Math.min(maxBuild, surface + 12);
+                for (int y = fromY; y <= toY; y++) {
+                    BlockState state = chunk.getBlockState(pos.set(
+                        chunk.getPos().getMinBlockX() + localX, y,
+                        chunk.getPos().getMinBlockZ() + localZ));
+                    if (shouldWatchFloatingCandidate(state)) {
+                        enqueueFloatingCheck(level, pos.immutable());
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Lost Cities can move the final terrain surface after vanilla's snow
+     * feature has already run. Reconcile only newly generated LC chunks and
+     * only grass-backed columns, using the exact vanilla biome predicate. This
+     * avoids snowing roofs/trees and keeps the work bounded to 256 columns.
+     */
+    private static void reconcileGeneratedSnow(ServerLevel level, LevelChunk chunk) {
+        // The marker is written by LostCityTerrainFeature.generate itself, so
+        // this callback already knows that the chunk belongs to the LC output
+        // path.  Do not call isCleanupRelevantChunkCached() here: that helper
+        // can synchronously rebuild Lost Cities' role/heightmap data while a
+        // ChunkEvent.Load is promoting the same chunk, re-entering
+        // ServerChunkCache.getChunk and stalling the integrated server.
+        if (level == null || chunk == null || !ConfigManager.CITY_BLEND_ENABLED) {
+            return;
+        }
+        int minY = level.getMinBuildHeight();
+        int maxY = level.getMaxBuildHeight() - 1;
+        BlockPos.MutableBlockPos top = new BlockPos.MutableBlockPos();
+        int placed = 0;
+        for (int localX = 0; localX < 16; localX++) {
+            for (int localZ = 0; localZ < 16; localZ++) {
+                int surfaceY = chunk.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, localX, localZ);
+                if (surfaceY <= minY || surfaceY > maxY) {
+                    continue;
+                }
+                top.set(chunk.getPos().getMinBlockX() + localX, surfaceY,
+                    chunk.getPos().getMinBlockZ() + localZ);
+                BlockState above = level.getBlockState(top);
+                if (!above.isAir() && !above.is(Blocks.SNOW)) {
+                    continue;
+                }
+                SNOW_SURFACE_COLUMNS.incrementAndGet();
+                BlockPos.MutableBlockPos belowPos = new BlockPos.MutableBlockPos().set(top).move(Direction.DOWN);
+                BlockState below = level.getBlockState(belowPos);
+                if (!below.is(Blocks.GRASS_BLOCK)) {
+                    /* Direct terrain/structure writes can leave the cached
+                     * heightmap one or two updates behind.  Search a bounded
+                     * window for the actual air-backed grass surface before
+                     * giving up; this is still at most 64 blocks per column
+                     * and only runs for the two queued chunks per tick. */
+                    int foundGrassY = -1;
+                    int fromY = Math.max(minY + 1, surfaceY - 32);
+                    int toY = Math.min(maxY - 1, surfaceY + 32);
+                    for (int candidateY = toY; candidateY >= fromY; candidateY--) {
+                        BlockPos candidateBelow = belowPos.set(
+                            chunk.getPos().getMinBlockX() + localX, candidateY,
+                            chunk.getPos().getMinBlockZ() + localZ);
+                        BlockState candidate = level.getBlockState(candidateBelow);
+                        if (!candidate.is(Blocks.GRASS_BLOCK)) {
+                            continue;
+                        }
+                        BlockState candidateAbove = level.getBlockState(candidateBelow.above());
+                        if (candidateAbove.isAir() || candidateAbove.is(Blocks.SNOW)) {
+                            foundGrassY = candidateY;
+                            break;
+                        }
+                    }
+                    if (foundGrassY < 0) {
+                        continue;
+                    }
+                    SNOW_HEIGHTMAP_FALLBACKS.incrementAndGet();
+                    top.set(chunk.getPos().getMinBlockX() + localX, foundGrassY + 1,
+                        chunk.getPos().getMinBlockZ() + localZ);
+                    above = level.getBlockState(top);
+                    belowPos.set(top).move(Direction.DOWN);
+                    below = level.getBlockState(belowPos);
+                }
+                SNOW_GRASS_COLUMNS.incrementAndGet();
+                if (!level.getBiome(top).value().shouldSnow(level, top)) {
+                    continue;
+                }
+                SNOW_BIOME_COLUMNS.incrementAndGet();
+                if (above.isAir()) {
+                    if (level.setBlock(top, Blocks.SNOW.defaultBlockState(), SAFE_SET_FLAGS)) {
+                        placed++;
+                    }
+                }
+                if (below.hasProperty(SnowyDirtBlock.SNOWY)) {
+                    level.setBlock(belowPos,
+                        below.setValue(SnowyDirtBlock.SNOWY, Boolean.TRUE), SAFE_SET_FLAGS);
+                }
+            }
+        }
+        SNOW_RECONCILED_CHUNKS.incrementAndGet();
+        SNOW_PLACED.addAndGet(placed);
+        if (placed > 0) {
+            LC2H.LOGGER.debug("[LC2H] Reconciled {} snow columns in generated chunk {},{}",
+                placed, chunk.getPos().x, chunk.getPos().z);
+        }
+    }
+
+    public static String snowDiagnostics() {
+        return "reconciledChunks=" + SNOW_RECONCILED_CHUNKS.get()
+            + ", placed=" + SNOW_PLACED.get()
+            + ", surfaceColumns=" + SNOW_SURFACE_COLUMNS.get()
+            + ", grassColumns=" + SNOW_GRASS_COLUMNS.get()
+            + ", biomeColumns=" + SNOW_BIOME_COLUMNS.get()
+            + ", heightmapFallbacks=" + SNOW_HEIGHTMAP_FALLBACKS.get()
+            + ", pending=" + GENERATED_SURFACE_RECONCILIATION.size();
+    }
+
+    private static void drainGeneratedSnow(ServerLevel level) {
+        if (level == null || !ConfigManager.CITY_BLEND_ENABLED
+            || GENERATED_SURFACE_RECONCILIATION.isEmpty()) {
+            return;
+        }
+        ResourceLocation dimension = level.dimension().location();
+        int processed = 0;
+        for (ChunkScanKey key : GENERATED_SURFACE_RECONCILIATION) {
+            if (processed >= MAX_SURFACE_RECONCILES_PER_TICK) {
+                break;
+            }
+            if (!dimension.equals(key.dimension())) {
+                continue;
+            }
+            LevelChunk chunk = level.getChunkSource().getChunkNow(key.chunkX(), key.chunkZ());
+            if (chunk == null) {
+                continue;
+            }
+            if (chunk.getStatus() != ChunkStatus.FULL) {
+                // The terrain feature returns before vanilla surface/feature
+                // decoration finishes. Keep the marker until the full chunk
+                // is resident so the grass surface is final before scanning.
+                continue;
+            }
+            if (!GENERATED_SURFACE_RECONCILIATION.remove(key)) {
+                continue;
+            }
+            reconcileGeneratedSnow(level, chunk);
+            processed++;
+        }
+    }
+
     @SubscribeEvent
     public static void onLevelTick(TickEvent.LevelTickEvent event) {
         boolean floatingScanEnabled = ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL && ENABLE_FLOATING_SCAN;
-        if (!floatingScanEnabled && !ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER && FORCED_CLEANUP_SCANS.isEmpty()) return;
+        boolean surfaceReconciliationEnabled = ConfigManager.CITY_BLEND_ENABLED
+            && !GENERATED_SURFACE_RECONCILIATION.isEmpty();
+        if (!floatingScanEnabled && !ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER
+            && FORCED_CLEANUP_SCANS.isEmpty() && !surfaceReconciliationEnabled) return;
         if (!(event.level instanceof ServerLevel level) || event.phase != TickEvent.Phase.END) return;
 
         // Hard governor: never contribute to lag. If the tick is already "spent", skip all post-processing.
         if (ServerTickLoad.shouldPauseNonCritical(level.getServer())) {
             return;
         }
+
+        drainGeneratedSnow(level);
 
         long tick = level.getServer().getTickCount();
         if (FLOATING_DRAIN_REQUESTED.get() && LAST_FLOATING_DRAIN_TICK != tick) {
@@ -2206,6 +2545,7 @@ public class ChunkPostProcessor {
     public static void forceRescanChunk(ServerLevel level, net.minecraft.world.level.ChunkPos pos) {
         ChunkScanKey key = chunkKey(level.dimension().location(), pos.x, pos.z);
         COMPLETED_CHUNKS.remove(key);
+        GENERATED_AUDIT_CHUNKS.remove(key);
         RECENT_SCAN_ENQUEUE_MS.remove(key);
         int backlog = CHUNK_SCAN_PROGRESS.size();
         if (backlog >= MAX_QUEUE) {
@@ -2363,9 +2703,20 @@ public class ChunkPostProcessor {
                 if (!shouldScanFloatingInChunk(level, pos.getX() >> 4, pos.getZ() >> 4)) {
                     continue;
                 }
-                BlockState state = level.getBlockState(pos);
-                if (shouldRemoveFloatingCandidate(level, pos, state)) {
-                    FIXED_FLOATING += removeFloatingCandidate(level, pos, state);
+                try {
+                    BlockState state = level.getBlockState(pos);
+                    if (shouldRemoveFloatingCandidate(level, pos, state)) {
+                        FIXED_FLOATING += removeFloatingCandidate(level, pos, state);
+                    }
+                } catch (Throwable failure) {
+                    // Third-party block entities/features may throw while a
+                    // chunk is still being finalized. Retain the block and
+                    // keep draining the queue; cleanup must never abort the
+                    // server tick or turn an unknown state into air.
+                    if (LOGGED_FLOATING_CHECK_FAILURE.compareAndSet(false, true)) {
+                        LCLogger.warn("ChunkPostProcessor: retained floating candidate after block-state failure: {}",
+                            failure.toString());
+                    }
                 }
                 remainingBudget--;
             }
@@ -2625,6 +2976,20 @@ public class ChunkPostProcessor {
         }
         TREE_PROTECTED_BLOCK_CACHE.put(block, protectedTree);
         return protectedTree;
+    }
+
+    /**
+     * A seam-captured tree is intentionally allowed to be temporarily
+     * unsupported while its neighbouring chunk is replayed.  The floating
+     * cleanup queue must not interpret that intermediate state as leaf decay.
+     */
+    private static boolean isProtectedTreeBlock(ServerLevel level, BlockPos pos) {
+        if (level == null || pos == null) {
+            return false;
+        }
+        ChunkScanKey key = chunkKey(level.dimension().location(), pos.getX() >> 4, pos.getZ() >> 4);
+        java.util.concurrent.ConcurrentHashMap<Long, Boolean> protectedSet = PROTECTED_TREE_BLOCKS.get(key);
+        return protectedSet != null && protectedSet.containsKey(pos.asLong());
     }
 
     public static boolean isTreeProtectedBlockForDebug(BlockState state) {

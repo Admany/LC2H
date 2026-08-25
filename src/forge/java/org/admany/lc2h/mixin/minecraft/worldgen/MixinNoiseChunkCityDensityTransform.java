@@ -27,13 +27,17 @@ import java.util.List;
  * the unshifted noise-cell bounds. Globally changing {@link #blockY()} breaks
  * that invariant and can index one element past the aquifer cache.</p>
  *
- * <p>Within the scope, changing the context Y preserves the original
- * NoiseRouter function. This is fundamentally different from feeding Blender
- * a flat target height: the native density graph is evaluated at a smoothly
- * shifted vertical coordinate and therefore keeps the real mountain shape.</p>
+ * <p>The context-Y transform is retained only as an explicit legacy A/B arm.
+ * The production path leaves this coordinate and the preliminary surface
+ * cache untouched; {@code Blender#blendDensity} applies the bounded surface
+ * correction without invalidating Minecraft's cell interpolation.</p>
  */
 @Mixin(NoiseChunk.class)
 public abstract class MixinNoiseChunkCityDensityTransform {
+
+    @Unique
+    private static final boolean LC2H_DENSITY_OFFSET_MODE = Boolean.parseBoolean(
+        System.getProperty("lc2h.terrain.shift.densityOffset", "true"));
 
     @Shadow
     @Final
@@ -68,7 +72,7 @@ public abstract class MixinNoiseChunkCityDensityTransform {
 
     @Inject(method = "blockY", at = @At("RETURN"), cancellable = true)
     private void lc2h$shiftNativeDensityY(CallbackInfoReturnable<Integer> cir) {
-        if (this.lc2h$densitySamplingDepth <= 0) {
+        if (LC2H_DENSITY_OFFSET_MODE || this.lc2h$densitySamplingDepth <= 0) {
             return;
         }
         NoiseChunk self = (NoiseChunk) (Object) this;
@@ -81,6 +85,14 @@ public abstract class MixinNoiseChunkCityDensityTransform {
 
     @Inject(method = "computePreliminarySurfaceLevel", at = @At("RETURN"), cancellable = true)
     private void lc2h$shiftPreliminarySurfaceLevel(long packedColumn, CallbackInfoReturnable<Integer> cir) {
+        /* Density-offset mode leaves NoiseChunk's native coordinate system
+         * intact.  Moving the separate preliminary surface cache here would
+         * make Lost Cities' terrain feature fill/trim blocks at a different
+         * Y than the native graph, reintroducing underground air changes even
+         * though the density gate is limited to the surface band. */
+        if (LC2H_DENSITY_OFFSET_MODE) {
+            return;
+        }
         int vanilla = cir.getReturnValueI();
         if (vanilla == Integer.MAX_VALUE) {
             return;
@@ -96,7 +108,8 @@ public abstract class MixinNoiseChunkCityDensityTransform {
     private void lc2h$shiftClimateSampler(NoiseRouter router,
                                           List<Climate.ParameterPoint> points,
                                           CallbackInfoReturnable<Climate.Sampler> cir) {
-        if (!(this.blender instanceof CityDensityTransform transform)
+        if (LC2H_DENSITY_OFFSET_MODE
+            || !(this.blender instanceof CityDensityTransform transform)
             || !transform.lc2h$isDensityTransformActive()) {
             return;
         }

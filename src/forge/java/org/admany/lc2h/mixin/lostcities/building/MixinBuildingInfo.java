@@ -60,6 +60,20 @@ public abstract class MixinBuildingInfo {
     private static final ThreadLocal<Boolean> LC2H_CITY_RAW_COMPUTE_FLAG = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<Set<ChunkCoord>> LC2H_CHARACTERISTIC_OWNERS =
         ThreadLocal.withInitial(HashSet::new);
+    /**
+     * Concurrent mode must retain Lost Cities' exact characteristic
+     * decision. The old replacement rebuilt that decision in Java and could
+     * publish a different city/building result from the native resolver.
+     * Keep the per-coordinate flight, but let the native resolver make the
+     * decision so the only removed serialization is the outer dimension
+     * monitor.
+     */
+    @Unique
+    private static final boolean LC2H_EXACT_NATIVE_CHARACTERISTICS =
+        Boolean.parseBoolean(System.getProperty("lc2h.concurrentBuildingInfo.exactCharacteristics", "false"));
+    @Unique
+    private static final ThreadLocal<Set<NativeCharacteristicFlightKey>> LC2H_NATIVE_CHARACTERISTIC_OWNERS =
+        ThreadLocal.withInitial(HashSet::new);
     @Unique
     private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_CITY_INFO_BUDGET =
         LostCitiesCacheBudgetManager.register("lc_city_info", 256, 256, MixinBuildingInfo::lc2h$evictCityInfo);
@@ -341,6 +355,8 @@ public abstract class MixinBuildingInfo {
     }
 
     @Shadow public static boolean isCityRaw(ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile) { return false; }
+    @Shadow private static Object getDimensionLock(net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) { return null; }
+    @Shadow private static LostChunkCharacteristics getChunkCharacteristicsLocked(ChunkCoord coord, IDimensionInfo provider) { throw new AssertionError(); }
     @Shadow private static void initMultiBuildingSection(LostChunkCharacteristics characteristics, ChunkCoord coord, IDimensionInfo provider, LostCityProfile profile) {}
     @Shadow private static int getAverageCityLevel(LostChunkCharacteristics thisone, ChunkCoord coord, IDimensionInfo provider) { return 0; }
     @Shadow private static int getTopLeftCityLevel(LostChunkCharacteristics thisone, ChunkCoord coord, IDimensionInfo provider) { return 0; }
@@ -937,6 +953,9 @@ public abstract class MixinBuildingInfo {
     /** Publishes one cold characteristic computation to every racing caller. */
     @Overwrite
     public static LostChunkCharacteristics getChunkCharacteristics(ChunkCoord coord, IDimensionInfo provider) {
+        if (LC2H_EXACT_NATIVE_CHARACTERISTICS) {
+            return lc2h$getNativeCharacteristicsExact(coord, provider);
+        }
         if (coord == null || provider == null) {
             return lc2h$computeChunkCharacteristics(coord, provider);
         }
@@ -980,6 +999,90 @@ public abstract class MixinBuildingInfo {
         } finally {
             owners.remove(coord);
             scope.characteristicFlights.remove(coord, created);
+        }
+    }
+
+    /**
+     * Exact native characteristics behind a provider-scoped single-flight.
+     * Lost Cities' private resolver already contains structure-avoidance,
+     * street-planner and event ordering that the former concurrent rewrite did
+     * not reproduce. Calling it directly keeps those semantics while allowing
+     * unrelated coordinates to resolve concurrently.
+     */
+    @Unique
+    private static LostChunkCharacteristics lc2h$getNativeCharacteristicsExact(
+        ChunkCoord coord, IDimensionInfo provider) {
+        if (coord == null || provider == null) {
+            return lc2h$nativeResolve(coord, provider);
+        }
+        BuildingInfoCacheScope scope = lc2h$scope(provider);
+        LostChunkCharacteristics cached = scope.nativeCharacteristics.get(coord);
+        if (cached != null) {
+            BuildingInfoDiagnostics.recordNativeCharacteristicsHit();
+            return cached;
+        }
+
+        BuildingInfoDiagnostics.recordNativeCharacteristicsMiss();
+        CompletableFuture<LostChunkCharacteristics> created = new CompletableFuture<>();
+        CompletableFuture<LostChunkCharacteristics> existing =
+            scope.nativeCharacteristicFlights.putIfAbsent(coord, created);
+        NativeCharacteristicFlightKey ownerKey = new NativeCharacteristicFlightKey(scope, coord);
+        if (existing != null) {
+            if (LC2H_NATIVE_CHARACTERISTIC_OWNERS.get().contains(ownerKey)) {
+                // Native LC can re-enter characteristics while resolving a
+                // multichunk. Never self-join that flight.
+                return lc2h$nativeResolve(coord, provider);
+            }
+            return existing.join();
+        }
+
+        Set<NativeCharacteristicFlightKey> owners = LC2H_NATIVE_CHARACTERISTIC_OWNERS.get();
+        owners.add(ownerKey);
+        try {
+            LostChunkCharacteristics resolved = lc2h$nativeResolve(coord, provider);
+            if (resolved == null) {
+                created.complete(null);
+                return null;
+            }
+            LostChunkCharacteristics published = scope.nativeCharacteristics.putIfAbsent(coord, resolved);
+            LostChunkCharacteristics result = published == null ? resolved : published;
+            if (published == null) {
+                BuildingInfoDiagnostics.recordNativeCharacteristicsPublish(true);
+                ChunkRoleProbe.rememberCharacteristics(coord, result);
+            }
+            created.complete(result);
+            return result;
+        } catch (Throwable failure) {
+            created.completeExceptionally(failure);
+            throw failure;
+        } finally {
+            owners.remove(ownerKey);
+            if (owners.isEmpty()) {
+                LC2H_NATIVE_CHARACTERISTIC_OWNERS.remove();
+            }
+            scope.nativeCharacteristicFlights.remove(coord, created);
+        }
+    }
+
+    /**
+     * Lost Cities' private resolver assumes its public caller already owns
+     * the per-dimension monitor. Preserve that exact synchronization boundary
+     * when invoking it from the concurrent front cache; otherwise two cold
+     * chunks can race native cache/structure-avoidance state and publish
+     * different terrain decisions.
+     */
+    @Unique
+    private static LostChunkCharacteristics lc2h$nativeResolve(
+        ChunkCoord coord, IDimensionInfo provider) {
+        if (coord == null || coord.dimension() == null) {
+            return getChunkCharacteristicsLocked(coord, provider);
+        }
+        Object lock = getDimensionLock(coord.dimension());
+        if (lock == null) {
+            return getChunkCharacteristicsLocked(coord, provider);
+        }
+        synchronized (lock) {
+            return getChunkCharacteristicsLocked(coord, provider);
         }
     }
 
@@ -1251,7 +1354,16 @@ public abstract class MixinBuildingInfo {
         return result;
     }
 
-    /** Uses the concurrent building cache without a global lock. */
+    /**
+     * Uses the concurrent front cache while retaining Lost Cities' required
+     * construction ordering.  A BuildingInfo constructor can synchronously
+     * ask for neighbouring BuildingInfo objects from DamageArea/multichunk
+     * code.  The old LC2H per-key-only lock allowed two workers to hold
+     * different keys while waiting on each other's memoizationLock (the
+     * C2ME deadlock reported in LC2H#14).  Cached reads remain concurrent;
+     * only cold object construction is put back under Lost Cities' existing
+     * per-dimension monitor, which is re-entrant for the recursive lookups.
+     */
     @Overwrite
     public static BuildingInfo getBuildingInfo(ChunkCoord key, IDimensionInfo provider) {
         AsyncMultiChunkPlanner.ensureIntegrated(provider, key);
@@ -1264,13 +1376,29 @@ public abstract class MixinBuildingInfo {
             return cached;
         }
 
-        // BuildingInfo touches shared registries and caches. Serialize by chunk key
-        // instead of blocking the whole fork join pool.
+        Object dimensionLock = key == null || key.dimension() == null
+            ? null
+            : getDimensionLock(key.dimension());
+        if (dimensionLock == null) {
+            return lc2h$constructBuildingInfo(scope, key, provider);
+        }
+        synchronized (dimensionLock) {
+            return lc2h$constructBuildingInfo(scope, key, provider);
+        }
+    }
+
+    @Unique
+    private static BuildingInfo lc2h$constructBuildingInfo(BuildingInfoCacheScope scope,
+                                                            ChunkCoord key,
+                                                            IDimensionInfo provider) {
+        // The dimension monitor above is intentional.  Keep the per-key
+        // flight as a cheap same-key fast path and as a defensive fallback
+        // for callers that do not provide a dimension key.
         Object lock = scope.buildingLocks.computeIfAbsent(key, k -> new Object());
         long lockWaitStartNs = System.nanoTime();
         synchronized (lock) {
             BuildingInfoDiagnostics.recordBuildingInfoLockWait(System.nanoTime() - lockWaitStartNs);
-            cached = scope.buildingInfo.get(key);
+            BuildingInfo cached = scope.buildingInfo.get(key);
             if (cached != null) {
                 BuildingInfoDiagnostics.recordBuildingInfoMemoryHit();
                 LostCitiesCacheBudgetManager.recordAccess(LC2H_BUILDING_INFO_BUDGET, key);
@@ -1459,5 +1587,9 @@ public abstract class MixinBuildingInfo {
         Boolean previous = lc2h$scope(provider).highway.putIfAbsent(coord, cir.getReturnValue());
         LostCitiesCacheBudgetManager.recordPut(LC2H_HIGHWAY_BUDGET, coord,
             LC2H_HIGHWAY_BUDGET.defaultEntryBytes(), previous == null);
+    }
+
+    @Unique
+    private record NativeCharacteristicFlightKey(BuildingInfoCacheScope scope, ChunkCoord coord) {
     }
 }

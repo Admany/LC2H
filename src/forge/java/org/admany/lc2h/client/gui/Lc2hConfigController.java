@@ -10,6 +10,7 @@ import org.admany.lc2h.LC2H;
 import org.admany.lc2h.dev.benchmark.BenchmarkManager;
 import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.config.sync.ConfigSyncNetwork;
+import org.admany.lc2h.worldgen.lostcities.LostCitiesStreetModePolicy;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -352,6 +353,9 @@ final class Lc2hConfigController {
         tryParseInt(values.seamOwnershipMaxIntentsPerChunk(), v -> target.seamOwnershipMaxIntentsPerChunk = Math.max(256, v));
         tryParseInt(values.seamOwnershipIntentTtlMs(), v -> target.seamOwnershipIntentTtlMs = Math.max(30_000L, v));
         tryParseInt(values.highwaySupportMaxDepth(), v -> target.highwaySupportMaxDepth = clampIntRange(v, 40, 384));
+        if (values.floatingVegetationAdditionalBlocks() != null) {
+            target.floatingVegetationAdditionalBlocks = values.floatingVegetationAdditionalBlocks();
+        }
         tryParseCacheMaxMb(values.cacheCombinedMaxMB(), v -> target.cacheCombinedMaxMB = v);
         tryParseCacheMaxMb(values.cacheMaxMB(), v -> target.cacheMaxMB = v);
         tryParseCacheMaxMb(values.cacheLostCitiesMaxMB(), v -> target.cacheLostCitiesMaxMB = v);
@@ -371,8 +375,10 @@ final class Lc2hConfigController {
         copy.enableAsyncDoubleBlockBatcher = src.enableAsyncDoubleBlockBatcher;
         copy.enableLostCitiesGenerationLock = src.enableLostCitiesGenerationLock;
         copy.enableLostCitiesPartSliceCompat = src.enableLostCitiesPartSliceCompat;
+        copy.lostCitiesStreetGenerationMode = src.lostCitiesStreetGenerationMode;
         copy.enableCacheStatsLogging = src.enableCacheStatsLogging;
         copy.enableFloatingVegetationRemoval = src.enableFloatingVegetationRemoval;
+        copy.floatingVegetationAdditionalBlocks = src.floatingVegetationAdditionalBlocks;
         copy.enableExplosionDebris = src.enableExplosionDebris;
         copy.hideExperimentalWarning = src.hideExperimentalWarning;
         copy.enableDebugLogging = src.enableDebugLogging;
@@ -472,8 +478,11 @@ final class Lc2hConfigController {
         c.cityVerticalTerrainClearance = src.cityVerticalTerrainClearance;
         c.enableLostCitiesGenerationLock = src.enableLostCitiesGenerationLock;
         c.enableLostCitiesPartSliceCompat = src.enableLostCitiesPartSliceCompat;
+        c.lostCitiesStreetGenerationMode = src.lostCitiesStreetGenerationMode;
         c.enableCacheStatsLogging = src.enableCacheStatsLogging;
         c.enableFloatingVegetationRemoval = src.enableFloatingVegetationRemoval;
+        c.floatingVegetationAdditionalBlocks = ConfigManager.normalizeFloatingVegetationBlocks(
+            src.floatingVegetationAdditionalBlocks);
         c.enableExplosionDebris = src.enableExplosionDebris;
         c.hideExperimentalWarning = src.hideExperimentalWarning;
         c.enableDebugLogging = src.enableDebugLogging;
@@ -504,6 +513,8 @@ final class Lc2hConfigController {
         UiState state = new UiState();
         if (config == null) {
             state.cacheCombinedMaxMB = clampCacheMaxMb(ConfigManager.CACHE_COMBINED_MAX_MB);
+            state.floatingVegetationAdditionalBlocks = ConfigManager.floatingVegetationText(null);
+            state.lostCitiesStreetGenerationMode = LostCitiesStreetModePolicy.modeName();
             state.cacheMaxMB = clampCacheMaxMb(ConfigManager.CACHE_MAX_MB);
             state.cacheLostCitiesMaxMB = clampCacheMaxMb(ConfigManager.LOSTCITIES_CACHE_MAX_MB);
             state.cacheEnforceCombinedMax = ConfigManager.CACHE_ENFORCE_COMBINED_MAX;
@@ -520,8 +531,11 @@ final class Lc2hConfigController {
         state.enableAsyncDoubleBlockBatcher = config.enableAsyncDoubleBlockBatcher;
         state.enableLostCitiesGenerationLock = config.enableLostCitiesGenerationLock;
         state.enableLostCitiesPartSliceCompat = config.enableLostCitiesPartSliceCompat;
+        state.lostCitiesStreetGenerationMode = LostCitiesStreetModePolicy.normalizeValue(config.lostCitiesStreetGenerationMode);
         state.enableCacheStatsLogging = config.enableCacheStatsLogging;
         state.enableFloatingVegetationRemoval = config.enableFloatingVegetationRemoval;
+        state.floatingVegetationAdditionalBlocks = ConfigManager.floatingVegetationText(
+            config.floatingVegetationAdditionalBlocks);
         state.enableExplosionDebris = config.enableExplosionDebris;
         state.hideExperimentalWarning = config.hideExperimentalWarning;
         state.enableDebugLogging = config.enableDebugLogging;
@@ -552,8 +566,11 @@ final class Lc2hConfigController {
         config.enableAsyncDoubleBlockBatcher = state.enableAsyncDoubleBlockBatcher;
         config.enableLostCitiesGenerationLock = state.enableLostCitiesGenerationLock;
         config.enableLostCitiesPartSliceCompat = state.enableLostCitiesPartSliceCompat;
+        config.lostCitiesStreetGenerationMode = LostCitiesStreetModePolicy.normalizeValue(state.lostCitiesStreetGenerationMode);
         config.enableCacheStatsLogging = state.enableCacheStatsLogging;
         config.enableFloatingVegetationRemoval = state.enableFloatingVegetationRemoval;
+        config.floatingVegetationAdditionalBlocks = ConfigManager.parseFloatingVegetationText(
+            state.floatingVegetationAdditionalBlocks);
         config.enableExplosionDebris = state.enableExplosionDebris;
         config.hideExperimentalWarning = state.hideExperimentalWarning;
         config.enableDebugLogging = state.enableDebugLogging;
@@ -589,8 +606,12 @@ final class Lc2hConfigController {
         return a.enableAsyncDoubleBlockBatcher == b.enableAsyncDoubleBlockBatcher
             && a.enableLostCitiesGenerationLock == b.enableLostCitiesGenerationLock
             && a.enableLostCitiesPartSliceCompat == b.enableLostCitiesPartSliceCompat
+            && safeEquals(a.lostCitiesStreetGenerationMode, b.lostCitiesStreetGenerationMode)
             && a.enableCacheStatsLogging == b.enableCacheStatsLogging
             && a.enableFloatingVegetationRemoval == b.enableFloatingVegetationRemoval
+            && safeEquals(
+                ConfigManager.normalizeFloatingVegetationBlocks(a.floatingVegetationAdditionalBlocks),
+                ConfigManager.normalizeFloatingVegetationBlocks(b.floatingVegetationAdditionalBlocks))
             && a.enableExplosionDebris == b.enableExplosionDebris
             && a.hideExperimentalWarning == b.hideExperimentalWarning
             && a.enableDebugLogging == b.enableDebugLogging
@@ -628,6 +649,7 @@ final class Lc2hConfigController {
         String seamOwnershipIntentTtlMs,
         String highwaySupportMaxDepth,
         String uiAccentColor,
+        String floatingVegetationAdditionalBlocks,
         String cacheMaxMB,
         String cacheLostCitiesMaxMB,
         String cacheCombinedMaxMB,
@@ -640,8 +662,10 @@ final class Lc2hConfigController {
         public boolean enableAsyncDoubleBlockBatcher;
         public boolean enableLostCitiesGenerationLock;
         public boolean enableLostCitiesPartSliceCompat;
+        public String lostCitiesStreetGenerationMode;
         public boolean enableCacheStatsLogging;
         public boolean enableFloatingVegetationRemoval;
+        public String floatingVegetationAdditionalBlocks;
         public boolean enableExplosionDebris;
         public boolean hideExperimentalWarning;
         public boolean enableDebugLogging;

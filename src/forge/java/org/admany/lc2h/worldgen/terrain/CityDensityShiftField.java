@@ -39,26 +39,109 @@ public final class CityDensityShiftField {
         double tx = Math.floorMod(blockX - 8, 16) / 16.0D;
         double tz = Math.floorMod(blockZ - 8, 16) / 16.0D;
 
-        double[] rows = new double[4];
-        for (int rz = 0; rz < 4; rz++) {
-            int chunkZ = baseChunkZ + rz - 1;
-            rows[rz] = catmullRom(
-                controls.shiftAtChunkCentre(baseChunkX - 1, chunkZ),
-                controls.shiftAtChunkCentre(baseChunkX, chunkZ),
-                controls.shiftAtChunkCentre(baseChunkX + 1, chunkZ),
-                controls.shiftAtChunkCentre(baseChunkX + 2, chunkZ),
-                tx);
-        }
-        return Math.max(0.0D, catmullRom(rows[0], rows[1], rows[2], rows[3], tz));
+        /*
+         * Catmull-Rom is visually pleasant for ordinary curves, but it is not
+         * shape preserving: a single tall city cell can make the interpolant
+         * overshoot its two neighbouring controls.  That overshoot becomes a
+         * real vertical density offset and shows up as a thin stone wall at a
+         * mountain edge.  Use the monotone cubic Hermite segment on both axes
+         * instead.  It has the same C1 continuity at normal transitions while
+         * guaranteeing that every segment stays inside its endpoint envelope.
+         */
+        int z0 = baseChunkZ - 1;
+        double row0 = monotoneCubic(
+            controls.shiftAtChunkCentre(baseChunkX - 1, z0),
+            controls.shiftAtChunkCentre(baseChunkX, z0),
+            controls.shiftAtChunkCentre(baseChunkX + 1, z0),
+            controls.shiftAtChunkCentre(baseChunkX + 2, z0),
+            tx);
+        int z1 = baseChunkZ;
+        double row1 = monotoneCubic(
+            controls.shiftAtChunkCentre(baseChunkX - 1, z1),
+            controls.shiftAtChunkCentre(baseChunkX, z1),
+            controls.shiftAtChunkCentre(baseChunkX + 1, z1),
+            controls.shiftAtChunkCentre(baseChunkX + 2, z1),
+            tx);
+        int z2 = baseChunkZ + 1;
+        double row2 = monotoneCubic(
+            controls.shiftAtChunkCentre(baseChunkX - 1, z2),
+            controls.shiftAtChunkCentre(baseChunkX, z2),
+            controls.shiftAtChunkCentre(baseChunkX + 1, z2),
+            controls.shiftAtChunkCentre(baseChunkX + 2, z2),
+            tx);
+        int z3 = baseChunkZ + 2;
+        double row3 = monotoneCubic(
+            controls.shiftAtChunkCentre(baseChunkX - 1, z3),
+            controls.shiftAtChunkCentre(baseChunkX, z3),
+            controls.shiftAtChunkCentre(baseChunkX + 1, z3),
+            controls.shiftAtChunkCentre(baseChunkX + 2, z3),
+            tx);
+        return Math.max(0.0D, monotoneCubic(row0, row1, row2, row3, tz));
     }
 
+    /**
+     * Shape-preserving cubic interpolation for the segment {@code [p1,p2]}.
+     * The control points are equally spaced and {@code t} is clamped to that
+     * segment.  The Fritsch-Carlson limiter removes tangent components that
+     * point against the segment slope and scales the remaining pair when the
+     * monotonicity circle would otherwise be exceeded.
+     */
+    public static double monotoneCubic(double p0, double p1, double p2, double p3, double t) {
+        double u = Mth.clamp(t, 0.0D, 1.0D);
+        double delta = p2 - p1;
+        if (delta == 0.0D) {
+            return p1;
+        }
+
+        double m1 = 0.5D * (p2 - p0);
+        double m2 = 0.5D * (p3 - p1);
+        if (m1 * delta <= 0.0D) {
+            m1 = 0.0D;
+        }
+        if (m2 * delta <= 0.0D) {
+            m2 = 0.0D;
+        }
+
+        double a = m1 / delta;
+        double b = m2 / delta;
+        double radius = a * a + b * b;
+        if (radius > 9.0D) {
+            double scale = 3.0D / Math.sqrt(radius);
+            m1 = scale * a * delta;
+            m2 = scale * b * delta;
+        }
+
+        double u2 = u * u;
+        double u3 = u2 * u;
+        double h00 = 2.0D * u3 - 3.0D * u2 + 1.0D;
+        double h10 = u3 - 2.0D * u2 + u;
+        double h01 = -2.0D * u3 + 3.0D * u2;
+        double h11 = u3 - u2;
+        return h00 * p1 + h10 * m1 + h01 * p2 + h11 * m2;
+    }
+
+    /**
+     * Restricts a requested downward correction to the part of the native
+     * surface that protrudes above its local envelope. A broad ridge has a
+     * zero correction; an isolated high cell can only be lowered by its
+     * measured excess, never by the full city-floor demand.
+     */
+    public static double capToNativeSurfaceEnvelope(double requestedShift,
+                                                     int nativeSurface,
+                                                     int referenceSurface) {
+        if (!(requestedShift > 0.0D)) {
+            return 0.0D;
+        }
+        return Math.min(requestedShift, Math.max(0.0D, nativeSurface - referenceSurface));
+    }
+
+    /**
+     * Kept as a source-compatible helper for diagnostics and old callers. It
+     * intentionally uses the same bounded interpolant as the production
+     * sampler; no raw Catmull-Rom path is allowed to reintroduce overshoot.
+     */
     public static double catmullRom(double p0, double p1, double p2, double p3, double t) {
-        double t2 = t * t;
-        double t3 = t2 * t;
-        return 0.5D * ((2.0D * p1)
-            + (-p0 + p2) * t
-            + (2.0D * p0 - 5.0D * p1 + 4.0D * p2 - p3) * t2
-            + (-p0 + 3.0D * p1 - 3.0D * p2 + p3) * t3);
+        return monotoneCubic(p0, p1, p2, p3, t);
     }
 
     public static double quintic(double value) {

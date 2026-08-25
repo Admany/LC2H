@@ -26,6 +26,7 @@ import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 import org.admany.lc2h.worldgen.lostcities.LostCitiesGenerationLocks;
 import org.admany.lc2h.worldgen.lostcities.LostCityTerrainFeatureGuards;
 import org.admany.lc2h.worldgen.terrain.NaturalHeightSampler;
+import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -46,6 +47,17 @@ public class MixinLostCityTerrainFeature {
     @Unique
     private static final boolean LC2H_SKIP_INTERIOR_TERRAIN_CORRECTION =
         Boolean.parseBoolean(System.getProperty("lc2h.terrain.skipInteriorCorrection", "false"));
+    /**
+     * Lost Cities' legacy correction is meant to keep a building's ground
+     * envelope clear. On a natural, non-city chunk it can instead move whole
+     * columns toward neighbouring desired building heights, producing the
+     * narrow conical/terraced mountains seen in LC2H worlds. Let Minecraft's
+     * native density/surface pass own those chunks; real buildings, roads,
+     * multichunk cutoffs and direct structure-avoidance regions stay native.
+     */
+    @Unique
+    private static final boolean LC2H_PRESERVE_NATURAL_MOUNTAINS =
+        Boolean.parseBoolean(System.getProperty("lc2h.terrain.preserveNaturalMountains", "true"));
 
 	    @Shadow public IDimensionInfo provider;
 	    @Shadow public BlockState air;
@@ -57,6 +69,43 @@ public class MixinLostCityTerrainFeature {
             return ((LostCityTerrainFeature) (Object) this).getDriver();
         } catch (Throwable ignored) {
             return null;
+        }
+    }
+
+    @Unique
+    private boolean lc2h$preserveNaturalTerrain(ChunkCoord coord) {
+        if (!LC2H_PRESERVE_NATURAL_MOUNTAINS || !ConfigManager.CITY_BLEND_ENABLED
+            || coord == null || provider == null || provider.getType() == null) {
+            return false;
+        }
+        try {
+            BuildingInfo info = BuildingInfo.getBuildingInfo(coord, provider);
+            /* `hasBuilding` is also set for a non-city chunk that is the
+             * outside/cutoff half of a neighbouring building. Treating that
+             * bit as a veto here was the reason the native correction still
+             * ran on the natural side of a city wall. The only cases that
+             * must stay on Lost Cities' authoritative path are an actual city
+             * column, a direct-avoidance reservation, or an outside building
+             * column whose block envelope really crosses this chunk. */
+            if (info == null || info.isCity || info.hasDirectStructureAvoidance()
+                || (info.outsideChunk && info.hasBuilding)) {
+                return false;
+            }
+            /* BuildingInfo already contains the authoritative reservations
+             * needed by this correction.  Calling the route-aware probe here
+             * performs another Lost Cities graph walk while the terrain
+             * feature is holding its generation lock, which was a major
+             * source of stalls and made otherwise natural chunks diverge.
+             * Keep the native correction for roads, rails and highways; only
+             * an unreserved natural column is eligible for preservation. */
+            return info.highwayXLevel < 0
+                && info.highwayZLevel < 0
+                && !info.xRailCorridor
+                && !info.zRailCorridor;
+        } catch (Throwable ignored) {
+            // A failed role probe must not suppress Lost Cities' own safety
+            // correction. The native path remains the conservative fallback.
+            return false;
         }
     }
     @Unique
@@ -104,6 +153,15 @@ public class MixinLostCityTerrainFeature {
 
     @Inject(method = "correctTerrainShape", at = @At("HEAD"), cancellable = true, remap = false)
     private void lc2h$skipInteriorTerrainCorrection(WorldGenLevel world, ChunkCoord coord, ChunkHeightmap heightmap, CallbackInfo ci) {
+        if (lc2h$preserveNaturalTerrain(coord)) {
+            org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics.naturalCorrectionSkip();
+            PreCaptureTargetTraceRegistry.recordControlFlowAltered(
+                "correctTerrainShape.cancel",
+                coord,
+                "native Lost Cities column correction skipped for natural terrain");
+            ci.cancel();
+            return;
+        }
         if (TerrainCorrectionGpuPipeline.tryCorrect(world, coord, heightmap, provider, lc2h$getDriver(), air)) {
             ci.cancel();
             return;
@@ -155,7 +213,6 @@ public class MixinLostCityTerrainFeature {
             }
         }
         ChunkCoord coord = new ChunkCoord(self.provider.getType(), chunk.getPos().x, chunk.getPos().z);
-
 	        long now = System.currentTimeMillis();
 	        if (LostCityTerrainFeatureGuards.isGeneratedRecently(coord, now)
                 && LostCityTerrainFeatureGuards.TRACE_GENERATE) {
@@ -230,9 +287,14 @@ public class MixinLostCityTerrainFeature {
 	    @Inject(method = "generate(Lnet/minecraft/server/level/WorldGenRegion;Lnet/minecraft/world/level/chunk/ChunkAccess;)V", at = @At("RETURN"), remap = false)
 	    private void lc2h$markGenerated(WorldGenRegion region, ChunkAccess chunk, CallbackInfo ci) {
 	        LostCityTerrainFeature self = (LostCityTerrainFeature) (Object) this;
-	        if (self.provider.getWorld() == null) return;
-	        ChunkCoord coord = new ChunkCoord(self.provider.getType(), chunk.getPos().x, chunk.getPos().z);
-	        LostCityTerrainFeatureGuards.IN_FLIGHT_GENERATE_MS.remove(coord);
+        if (self.provider.getWorld() == null) return;
+        ChunkCoord coord = new ChunkCoord(self.provider.getType(), chunk.getPos().x, chunk.getPos().z);
+	        // Mark only after Lost Cities has finished writing the terrain,
+	        // structures, and surface.  Queuing at HEAD let the server tick
+		// reconcile a partially generated heightmap, which is why snowy grass
+		// could be missed even though the final chunk had a grass surface.
+		ChunkPostProcessor.noteGeneratedChunk(self.provider.getType(), coord.chunkX(), coord.chunkZ());
+        LostCityTerrainFeatureGuards.IN_FLIGHT_GENERATE_MS.remove(coord);
 	        LostCityTerrainFeatureGuards.markGenerated(coord, System.currentTimeMillis());
 	        if (LostCityTerrainFeatureGuards.TRACE_GENERATE) {
 	            org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityTerrainFeature.generate end coord={} thread={}", coord, Thread.currentThread().getName());

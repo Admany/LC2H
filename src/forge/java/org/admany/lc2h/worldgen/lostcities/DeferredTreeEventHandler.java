@@ -31,6 +31,7 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 
 import java.util.HashSet;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Optional;
@@ -298,6 +299,7 @@ public final class DeferredTreeEventHandler {
         // Placing the loaded part immediately puts the tree in the world.
         // an unloaded fringe block is not worth stalling the whole tree.
         LinkedHashMap<ChunkCoord, ChunkShadowMutationPlan.Builder> plans = new LinkedHashMap<>();
+        List<DeferredTreeQueue.CapturedBlock> unloadedBlocks = new ArrayList<>();
         int queued = 0;
         int unloadedSkipped = 0;
         for (DeferredTreeQueue.CapturedBlock block : pending.blocks()) {
@@ -305,6 +307,7 @@ public final class DeferredTreeEventHandler {
                 continue;
             }
             if (level.getChunkSource().getChunkNow(block.pos().getX() >> 4, block.pos().getZ() >> 4) == null) {
+                unloadedBlocks.add(block);
                 unloadedSkipped++;
                 continue;
             }
@@ -318,6 +321,11 @@ public final class DeferredTreeEventHandler {
         }
         if (unloadedSkipped > 0) {
             TreeCompatTracker.recordFallback(TreeCompatTracker.FallbackReason.UNLOADED_DESTINATION);
+            // Do not silently discard the fringe. Requeue only the blocks
+            // whose destination raced out of the loaded window; the already
+            // queued part can apply immediately while this subset waits for
+            // its chunk to return.
+            DeferredTreeQueue.requeue(pending.capturedSubset(unloadedBlocks));
         }
 
         if (queued == 0) {

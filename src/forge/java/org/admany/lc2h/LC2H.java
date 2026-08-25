@@ -200,6 +200,11 @@ public class LC2H {
     }
 
     public void onCommonSetup(FMLCommonSetupEvent event) {
+        // The mod constructor runs before third-party block registries are
+        // complete. Refresh registry-backed floating-vegetation defaults now
+        // so Immersive Weathering frost is written into the config when IW is
+        // actually present.
+        ConfigManager.refreshFloatingVegetationDefaults();
         if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
             LOGGER.info("[LC2H] onCommonSetup called");
         } else {

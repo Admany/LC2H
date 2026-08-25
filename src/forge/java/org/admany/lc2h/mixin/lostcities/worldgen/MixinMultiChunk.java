@@ -34,7 +34,7 @@ public class MixinMultiChunk {
      */
     @Unique
     private static final boolean LC2H_CONCURRENT_BUILDING_INFO =
-        Boolean.parseBoolean(System.getProperty("lc2h.concurrentBuildingInfo", "true"));
+        Boolean.parseBoolean(System.getProperty("lc2h.concurrentBuildingInfo", "false"));
 
     @Unique
     private static final int LC2H_MULTICHUNK_MIN_RETAIN = Math.max(64,

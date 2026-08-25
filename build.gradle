@@ -59,6 +59,9 @@ def lc2hParityProps = [
 ]
 def lc2hWorldParityProps = [
     'lc2h.baselineMode',
+    'lc2h.concurrentBuildingInfo',
+    'lc2h.concurrentBuildingInfo.exactCharacteristics',
+    'lc2h.treeSafety.surfaceRailOnly',
     'lc2h.heightBranch.enabled',
     'lc2h.heightBranch.auditSamples',
     'lc2h.heightBranch.continuousAuditInterval',
@@ -68,20 +71,42 @@ def lc2hWorldParityProps = [
     'lc2h.worldparity.samples',
     'lc2h.worldparity.primeChunksPerTick',
     'lc2h.worldparity.primeTimeoutMs',
+    'lc2h.worldparity.explicitTickets',
     'lc2h.worldparity.dimensions',
     'lc2h.worldparity.centers',
+    'lc2h.worldparity.targets',
     'lc2h.worldparity.profiles',
     'lc2h.worldparity.laneId',
     'lc2h.worldparity.role',
     'lc2h.worldparity.output',
     'lc2h.worldparity.compareAgainst',
     'lc2h.worldparity.compareOutput',
+    'lc2h.worldparity.roleScan',
+    'lc2h.worldparity.roleScanRadius',
+    'lc2h.worldparity.roleScanStep',
     'lc2h.precaptureTrace.enabled',
     'lc2h.precaptureTrace.dimension',
     'lc2h.precaptureTrace.pos',
     'lc2h.precaptureTrace.output',
     'lc2h.precaptureTrace.chunkRadius',
-    'lc2h.precaptureTrace.captureCaller'
+    'lc2h.precaptureTrace.captureCaller',
+    // Terrain A/B runs must carry the immutable JVM switches into the
+    // ForgeGradle server process; Gradle's own -D properties are otherwise
+    // consumed during configuration and never reach the integrated server.
+    'lc2h.terrain.shift.enabled',
+    'lc2h.terrain.shift.coarseStride',
+    'lc2h.terrain.shift.reliefStrength',
+    'lc2h.terrain.shift.maxShift',
+    'lc2h.terrain.shift.slopeFlat',
+    'lc2h.terrain.shift.slopeSteep',
+    'lc2h.terrain.shift.chunkConstant',
+    'lc2h.terrain.shift.densityOffset',
+    'lc2h.terrain.shift.densityOffsetScale',
+    'lc2h.terrain.shift.densityOffsetInputBand',
+    'lc2h.terrain.shift.densityOffsetVerticalBand',
+    'lc2h.terrain.cityBlender.enabled',
+    'lc2h.cityBlend.enabled',
+    'lc2h.terrain.preserveNaturalMountains'
 ]
 minecraft {
     // The mappings can be changed at any time and must be in the following format.

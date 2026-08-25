@@ -32,8 +32,17 @@ import java.util.function.Supplier;
  */
 public final class LostCitiesHeightBranchKernel {
     private static final Logger LOGGER = LogUtils.getLogger();
+    /*
+     * The resident ChunkGenerator shortcut is only an optimisation.  It is
+     * not the Lost Cities heightmap implementation: live audits have found
+     * coordinates where its base height differs from generateHeightmap().
+     * A wrong boundary height is amplified by Lost Cities' terrain correction
+     * into an open underground slab, so correctness must win by default.
+     * Keep the switch available for isolated experiments, but ship the exact
+     * path unless an operator explicitly opts in.
+     */
     private static final boolean ENABLED = Boolean.parseBoolean(
-        System.getProperty("lc2h.heightBranch.enabled", "true")
+        System.getProperty("lc2h.heightBranch.enabled", "false")
     );
     private static final int REQUIRED_AUDITS = Math.max(1,
         Integer.getInteger("lc2h.heightBranch.auditSamples", 2));

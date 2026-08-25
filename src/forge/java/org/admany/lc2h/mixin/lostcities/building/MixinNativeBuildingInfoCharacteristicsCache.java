@@ -45,6 +45,11 @@ public abstract class MixinNativeBuildingInfoCharacteristicsCache {
      * while allowing independent chunk keys to progress together.
      */
     @Shadow
+    private static Object getDimensionLock(net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) {
+        return null;
+    }
+
+    @Shadow
     private static LostChunkCharacteristics getChunkCharacteristicsLocked(ChunkCoord coord, IDimensionInfo provider) {
         throw new AssertionError();
     }
@@ -57,7 +62,7 @@ public abstract class MixinNativeBuildingInfoCharacteristicsCache {
     @Overwrite
     public static LostChunkCharacteristics getChunkCharacteristics(ChunkCoord coord, IDimensionInfo provider) {
         if (!LC2H_NATIVE_CHARACTERISTICS_CACHE || coord == null || provider == null) {
-            return getChunkCharacteristicsLocked(coord, provider);
+            return lc2h$nativeResolve(coord, provider);
         }
         BuildingInfoCacheScope scope = BuildingInfoCacheRegistry.scope(provider);
         LostChunkCharacteristics cached = scope.nativeCharacteristics.get(coord);
@@ -75,7 +80,7 @@ public abstract class MixinNativeBuildingInfoCharacteristicsCache {
             if (LC2H_NATIVE_CHARACTERISTICS_OWNERS.get().contains(key)) {
                 // Lost Cities occasionally re-enters its resolver while building
                 // a multi chunk. Never self join a flight from that transaction.
-                return getChunkCharacteristicsLocked(coord, provider);
+                return lc2h$nativeResolve(coord, provider);
             }
             return existing.join();
         }
@@ -87,7 +92,7 @@ public abstract class MixinNativeBuildingInfoCharacteristicsCache {
             // This call keeps the native LC 7.5 resolver authoritative. It is
             // deliberately outside a map compute callback, so a recursive
             // MultiChunk calculation cannot hold a cache bin monitor.
-            LostChunkCharacteristics resolved = getChunkCharacteristicsLocked(coord, provider);
+            LostChunkCharacteristics resolved = lc2h$nativeResolve(coord, provider);
             if (resolved == null) {
                 created.complete(null);
                 return null;
@@ -109,6 +114,21 @@ public abstract class MixinNativeBuildingInfoCharacteristicsCache {
                 LC2H_NATIVE_CHARACTERISTICS_OWNERS.remove();
             }
             scope.nativeCharacteristicFlights.remove(coord, created);
+        }
+    }
+
+    @Unique
+    private static LostChunkCharacteristics lc2h$nativeResolve(
+        ChunkCoord coord, IDimensionInfo provider) {
+        if (coord == null || coord.dimension() == null) {
+            return getChunkCharacteristicsLocked(coord, provider);
+        }
+        Object lock = getDimensionLock(coord.dimension());
+        if (lock == null) {
+            return getChunkCharacteristicsLocked(coord, provider);
+        }
+        synchronized (lock) {
+            return getChunkCharacteristicsLocked(coord, provider);
         }
     }
 

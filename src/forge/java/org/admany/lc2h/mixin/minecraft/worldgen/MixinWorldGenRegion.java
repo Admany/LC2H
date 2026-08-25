@@ -22,7 +22,7 @@ public class MixinWorldGenRegion {
             at = @At("RETURN"))
     private void onBlockSet(BlockPos pos, BlockState state, int flags, int recursionLeft, CallbackInfoReturnable<Boolean> cir) {
         try {
-            if (cir.getReturnValue() && ChunkPostProcessor.isTracked(state.getBlock())) {
+            if (cir.getReturnValue() && ChunkPostProcessor.isFloatingCandidate(state)) {
                 WorldGenRegion region = (WorldGenRegion)(Object)this;
                 ChunkPostProcessor.markForRemovalIfFloating(region, pos, state);
             }

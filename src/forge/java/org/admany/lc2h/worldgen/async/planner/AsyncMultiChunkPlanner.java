@@ -68,7 +68,7 @@ public final class AsyncMultiChunkPlanner {
      * Keep native BuildingInfo free of asynchronous MultiChunk work.
      */
     private static final boolean ASYNC_PLANNER_ENABLED =
-        Boolean.parseBoolean(System.getProperty("lc2h.concurrentBuildingInfo", "true"));
+        Boolean.parseBoolean(System.getProperty("lc2h.concurrentBuildingInfo", "false"));
 
     private record PlannerKey(String scope, ResourceKey<net.minecraft.world.level.Level> dimension, int areaSize, int multiX, int multiZ) {
         private PlannerKey {

@@ -10,8 +10,10 @@ import net.minecraft.world.level.WorldGenLevel;
 /**
  * Shared tree-safety checks for Lost Cities worldgen.
  *
- * We consider city, highway, and railway chunks as unsafe for cross-chunk tree growth.
- * Trees near chunk edges that would cross into an unsafe neighbor are vetoed up front.
+ * We consider city, highway, and surface-rail/station chunks as unsafe for
+ * cross-chunk tree growth. Underground rail tunnels do not own the surface,
+ * so trees above them remain eligible. Trees near chunk edges that would cross
+ * into an unsafe neighbor are vetoed up front.
  */
 public final class LostCityTreeSafety {
 

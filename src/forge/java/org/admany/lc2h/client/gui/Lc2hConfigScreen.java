@@ -32,6 +32,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import net.minecraft.util.FormattedCharSequence;
@@ -242,6 +243,7 @@ public class Lc2hConfigScreen extends Screen {
     private EditBox seamOwnershipIntentTtlMsBox;
     private EditBox highwaySupportMaxDepthBox;
     private EditBox accentColorBox;
+    private EditBox floatingVegetationBlocksBox;
     private EditBox cacheCapBox;
     private EditBox lc2hCacheBox;
     private EditBox lostCitiesCacheBox;
@@ -446,12 +448,26 @@ private Component unsavedDiscardLabel = Component.empty();
                 working.enableFloatingVegetationRemoval,
                 tr("lc2h.config.option.floating_vegetation_removal.desc"),
                 false, val -> working.enableFloatingVegetationRemoval = val);
+        this.floatingVegetationBlocksBox = addTextField(layout,
+                tr("lc2h.config.option.floating_vegetation_blocks.title"),
+                tr("lc2h.config.option.floating_vegetation_blocks.desc"),
+                working.floatingVegetationAdditionalBlocks,
+                false,
+                1024);
+        this.floatingVegetationBlocksBox.setResponder(value -> working.floatingVegetationAdditionalBlocks = value);
         addToggle(layout,
                 tr("lc2h.config.option.explosion_debris.title"),
                 working.enableExplosionDebris,
                 tr("lc2h.config.option.explosion_debris.desc"),
                 false,
                 val -> working.enableExplosionDebris = val);
+        addChoice(layout,
+                tr("lc2h.config.option.lostcities_street_mode.title"),
+                working.lostCitiesStreetGenerationMode,
+                tr("lc2h.config.option.lostcities_street_mode.desc"),
+                new String[]{"LEGACY", "HIERARCHICAL_GRID_V1"},
+                this::streetModeLabel,
+                val -> working.lostCitiesStreetGenerationMode = val);
         addSectionHeader(layout, tr("lc2h.config.section.caching"));
         this.cacheCapBox = addNumberField(layout,
                 tr("lc2h.config.option.cache_combined_max_mb.title"),
@@ -486,15 +502,16 @@ private Component unsavedDiscardLabel = Component.empty();
         int layoutBottom = layout.maxHeight();
         int desiredFooterY = this.height - 48;
         int minFooterY = this.contentTop + 80;
-        int maxFooterY = this.height - 28;
+        // Keep the button's custom three-pixel glow inside the window even on
+        // short screens; the previous bound left its lower edge at the clip.
+        int maxFooterY = Math.max(0, this.height - 32);
         if (minFooterY > maxFooterY) {
             minFooterY = maxFooterY;
 	        }
 	        this.footerY = clampInt(minFooterY, maxFooterY, desiredFooterY);
 	
-	        int footerTop = this.footerY - 12;
 	        this.contentFullHeight = Math.max(0, layoutBottom - this.contentTop);
-	        this.viewportHeight = Math.max(0, footerTop - this.contentTop - 8);
+	        this.viewportHeight = Math.max(0, this.bodyBottom() - this.contentTop);
 	        this.maxScrollOffset = Math.max(0, this.contentFullHeight - this.viewportHeight);
 	        this.scrollOffset = Math.min(this.scrollOffset, this.maxScrollOffset);
         this.targetScrollOffset = Math.min(this.targetScrollOffset, this.maxScrollOffset);
@@ -685,6 +702,36 @@ private Component unsavedDiscardLabel = Component.empty();
         addRenderableWidget(button);
     }
 
+    private void addChoice(LayoutHelper layout, Component title, String initialValue, Component description,
+                           String[] values, Function<String, Component> labelFactory, Consumer<String> onChange) {
+        EntryPlacement placement = prepareEntry(layout, title, description, false, 190, 20);
+        String[] choices = values == null || values.length == 0 ? new String[]{"LEGACY"} : values.clone();
+        String initial = initialValue == null ? choices[0] : initialValue;
+        int initialIndex = 0;
+        for (int i = 0; i < choices.length; i++) {
+            if (choices[i].equalsIgnoreCase(initial)) {
+                initialIndex = i;
+                break;
+            }
+        }
+        final int[] index = {initialIndex};
+        CustomButton button = createAnimatedButton(placement.controlX(), placement.controlY(), placement.controlWidth(), placement.controlHeight(),
+                labelFactory.apply(choices[index[0]]), b -> {
+                    index[0] = (index[0] + 1) % choices.length;
+                    String selected = choices[index[0]];
+                    onChange.accept(selected);
+                    b.setMessage(labelFactory.apply(selected));
+                });
+        addRenderableWidget(button);
+    }
+
+    private Component streetModeLabel(String mode) {
+        if ("HIERARCHICAL_GRID_V1".equalsIgnoreCase(mode)) {
+            return tr("lc2h.config.option.lostcities_street_mode.value.hierarchical");
+        }
+        return tr("lc2h.config.option.lostcities_street_mode.value.legacy");
+    }
+
     private EditBox addNumberField(LayoutHelper layout, Component title, Component description, String value, boolean requiresRestart) {
         return addTextField(layout, title, description, value, requiresRestart, 12);
     }
@@ -852,12 +899,15 @@ private Component unsavedDiscardLabel = Component.empty();
         renderHeader(graphics, outerLeft, outerRight, headerTop, headerBottom);
         renderContentArea(graphics, mouseX, mouseY, partialTick, true);
         renderFooter(graphics);
+        // The footer is painted after the scrollable panel. Repaint its fixed
+        // controls now so the footer gradient cannot cover their borders.
+        renderFixedButtons(graphics, mouseX, mouseY);
         renderTextContent(graphics);
         renderScrollBar(graphics);
 
         int bodyTop = this.contentTop;
-        int bodyBottom = Math.max(bodyTop, (this.footerY - 12) - 8);
-        withBodyScissor(graphics, bodyTop, bodyBottom, () -> Lc2hConfigScreen.super.render(graphics, mouseX, mouseY, partialTick));
+        int bodyBottom = this.bodyBottom();
+        withBodyScissor(graphics, bodyTop, bodyBottom, () -> renderBodyWidgets(graphics, mouseX, mouseY, partialTick));
         renderButtonHighlights(graphics);
         renderButtonText(graphics);
         renderRestartWarning(graphics, mouseX, mouseY);
@@ -1011,10 +1061,38 @@ private Component unsavedDiscardLabel = Component.empty();
         }
     }
 
+    private void renderBodyWidgets(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+        // Footer and header controls are manually painted outside the viewport.
+        // Keep them out of Screen.render's body scissor so a future Button
+        // renderer cannot clip their lower half again.
+        Map<Button, Boolean> fixedVisibility = new IdentityHashMap<>();
+        for (Button button : buttonRects.keySet()) {
+            if (!buttonOriginalY.containsKey(button)) {
+                fixedVisibility.put(button, button.visible);
+                button.visible = false;
+            }
+        }
+        try {
+            Lc2hConfigScreen.super.render(graphics, mouseX, mouseY, partialTick);
+        } finally {
+            for (Map.Entry<Button, Boolean> entry : fixedVisibility.entrySet()) {
+                entry.getKey().visible = entry.getValue();
+            }
+        }
+    }
+
+    /**
+     * Leaves enough room below the scroll viewport for the custom widget
+     * border/glow pixels. The old eight-pixel gap clipped the last row's
+     * bottom edge against the footer.
+     */
+    private int bodyBottom() {
+        return Math.max(this.contentTop, this.footerY - 16);
+    }
+
     private void renderContentArea(GuiGraphics graphics, int mouseX, int mouseY, float partialTick, boolean renderWidgets) {
         int bodyTop = this.contentTop;
-        int footerTop = this.footerY - 12;
-        int bodyBottom = Math.max(bodyTop, footerTop - 8);
+        int bodyBottom = this.bodyBottom();
         int bodyBottomClipped = bodyBottom;
         int accent = getAccentColor();
         int panelTop = tintWithAlpha(0x1A1A2E, accent, 0.18f, 0xCC);
@@ -1035,7 +1113,6 @@ private Component unsavedDiscardLabel = Component.empty();
                 renderTextFields(graphics, bodyTop, bodyBottomClipped, fadeZone, maxSlide);
                 renderAccentPreview(graphics, bodyTop, bodyBottomClipped);
             });
-            renderFixedButtons(graphics, mouseX, mouseY);
         }
     }
 
@@ -1280,8 +1357,7 @@ private Component unsavedDiscardLabel = Component.empty();
 
     private void renderTextContent(GuiGraphics graphics) {
         int bodyTop = this.contentTop;
-        int footerTop = this.footerY - 12;
-        int bodyBottomClipped = Math.max(bodyTop, footerTop - 8);
+        int bodyBottomClipped = this.bodyBottom();
         int fadeZone = 24;
         int centerX = this.contentLeft + this.contentWidth / 2;
         int accent = getAccentColor();
@@ -1342,8 +1418,7 @@ private Component unsavedDiscardLabel = Component.empty();
 
     private void renderButtonHighlights(GuiGraphics graphics) {
         int bodyTop = this.contentTop;
-        int footerTop = this.footerY - 12;
-        int bodyBottomClipped = Math.max(bodyTop, footerTop - 8);
+        int bodyBottomClipped = this.bodyBottom();
 
         withBodyScissor(graphics, bodyTop, bodyBottomClipped, () -> {
             for (Map.Entry<Button, Float> entry : buttonScale.entrySet()) {
@@ -1367,8 +1442,7 @@ private Component unsavedDiscardLabel = Component.empty();
 
     private void renderButtonText(GuiGraphics graphics) {
         int bodyTop = this.contentTop;
-        int footerTop = this.footerY - 12;
-        int bodyBottomClipped = Math.max(bodyTop, footerTop - 8);
+        int bodyBottomClipped = this.bodyBottom();
 
         withBodyScissor(graphics, bodyTop, bodyBottomClipped, () -> {
             for (Map.Entry<Button, int[]> entry : buttonRects.entrySet()) {
@@ -1537,8 +1611,7 @@ private Component unsavedDiscardLabel = Component.empty();
         if (controller.isBenchmarkRunning()) return true;
 
         int bodyTop = this.contentTop;
-        int footerTop = this.footerY - 12;
-        int bodyBottomClipped = Math.max(bodyTop, footerTop - 8);
+        int bodyBottomClipped = this.bodyBottom();
 
         if (mouseX >= this.contentLeft - 18 && mouseX <= this.contentRight + 18 && mouseY >= bodyTop && mouseY <= bodyBottomClipped) {
             if (this.maxScrollOffset > 0) {
@@ -1626,6 +1699,7 @@ private Component unsavedDiscardLabel = Component.empty();
                 seamOwnershipIntentTtlMsBox == null ? null : seamOwnershipIntentTtlMsBox.getValue(),
                 highwaySupportMaxDepthBox == null ? null : highwaySupportMaxDepthBox.getValue(),
                 accentColorBox == null ? null : accentColorBox.getValue(),
+                floatingVegetationBlocksBox == null ? null : floatingVegetationBlocksBox.getValue(),
                 lc2hCacheBox == null ? null : lc2hCacheBox.getValue(),
                 lostCitiesCacheBox == null ? null : lostCitiesCacheBox.getValue(),
                 cacheCapBox == null ? null : cacheCapBox.getValue(),

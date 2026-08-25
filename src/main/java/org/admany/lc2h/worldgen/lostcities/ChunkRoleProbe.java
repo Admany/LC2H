@@ -71,7 +71,9 @@ public final class ChunkRoleProbe {
     private static final AtomicLong STABLE_CONTENTION_FALLBACKS = new AtomicLong();
     private static final AtomicLong STABLE_LIFECYCLE = new AtomicLong();
     private static final AtomicInteger OP_COUNTER = new AtomicInteger(0);
-    private static final Probe EMPTY_PROBE = new Probe(false, false, 0, false, -1, false, false, false);
+    private static final boolean TREE_SURFACE_RAIL_ONLY =
+        Boolean.parseBoolean(System.getProperty("lc2h.treeSafety.surfaceRailOnly", "true"));
+    private static final Probe EMPTY_PROBE = new Probe(false, false, 0, false, -1, false, false, false, false);
 
     private ChunkRoleProbe() {
     }
@@ -84,10 +86,15 @@ public final class ChunkRoleProbe {
         int highwayLevel,
         boolean highwayTunnel,
         boolean hasRailway,
+        boolean hasSurfaceRailway,
         boolean buildingTypeKnown
     ) {
         public boolean isUnsafe() {
-            return isCity || hasHighway || hasRailway;
+            // Underground rail tunnels do not own the surface. Treat only
+            // surface rail/stations as tree-unsafe; otherwise a tunnel in an
+            // otherwise normal chunk vetoes the trees above it.
+            return isCity || hasHighway
+                || (TREE_SURFACE_RAIL_ONLY ? hasSurfaceRailway : hasRailway);
         }
 
         public boolean hasSurfaceHighway() {
@@ -412,6 +419,64 @@ public final class ChunkRoleProbe {
         return getRouteAware(dimInfo, dim, chunkX, chunkZ).hasRailway();
     }
 
+    /** Returns the route-complete role used by tree-safety decisions. */
+    public static Probe getRouteAwareProbe(IDimensionInfo dimInfo, ResourceKey<Level> dim,
+                                           int chunkX, int chunkZ) {
+        return getRouteAware(dimInfo, dim, chunkX, chunkZ);
+    }
+
+    /**
+     * Summarizes rail roles in a generated window. The distinction is useful
+     * in parity runs because an underground-only rail chunk must not veto the
+     * surface tree feature.
+     */
+    public static RailSafetySummary summarizeRailSafety(IDimensionInfo dimInfo, ResourceKey<Level> dim,
+                                                        int minChunkX, int maxChunkX,
+                                                        int minChunkZ, int maxChunkZ) {
+        if (dimInfo == null || dim == null || minChunkX > maxChunkX || minChunkZ > maxChunkZ) {
+            return new RailSafetySummary(0, 0, 0, 0, 0, 0);
+        }
+        int scanned = 0;
+        int railway = 0;
+        int surfaceRailway = 0;
+        int undergroundOnly = 0;
+        int undergroundOnlyUnsafe = 0;
+        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                Probe probe = getRouteAware(dimInfo, dim, chunkX, chunkZ);
+                scanned++;
+                if (!probe.hasRailway()) {
+                    continue;
+                }
+                railway++;
+                if (probe.hasSurfaceRailway()) {
+                    surfaceRailway++;
+                    continue;
+                }
+                undergroundOnly++;
+                if (!probe.isCity() && !probe.hasHighway() && probe.isUnsafe()) {
+                    undergroundOnlyUnsafe++;
+                }
+            }
+        }
+        return new RailSafetySummary(scanned, railway, surfaceRailway, undergroundOnly,
+            undergroundOnlyUnsafe, undergroundOnly - undergroundOnlyUnsafe);
+    }
+
+    public record RailSafetySummary(int scanned, int railway, int surfaceRailway,
+                                    int undergroundOnly, int undergroundOnlyUnsafe,
+                                    int undergroundOnlyTreeSafe) {
+        public String summary() {
+            return "scanned=" + scanned
+                + " rail=" + railway
+                + " surfaceRail=" + surfaceRailway
+                + " undergroundOnly=" + undergroundOnly
+                + " undergroundOnlyUnsafe=" + undergroundOnlyUnsafe
+                + " undergroundOnlyTreeSafe=" + undergroundOnlyTreeSafe
+                + " surfaceRailOnly=" + TREE_SURFACE_RAIL_ONLY;
+        }
+    }
+
     public static void invalidate(ChunkCoord coord) {
         if (coord != null) {
             CACHE.remove(coord);
@@ -468,6 +533,7 @@ public final class ChunkRoleProbe {
             -1,
             false,
             false,
+            false,
             snapshot.buildingTypeKnown()
         );
         return new Entry(probe, snapshot.characteristics(), snapshot.timestampMs(), false, false);
@@ -505,7 +571,8 @@ public final class ChunkRoleProbe {
         } catch (Exception ignored) {
         }
         Probe upgraded = new Probe(base.isCity(), base.couldHaveBuilding(), base.cityLevel(),
-            hasHighway, highwayLevel, highwayTunnel, base.hasRailway(), base.buildingTypeKnown());
+            hasHighway, highwayLevel, highwayTunnel, base.hasRailway(), base.hasSurfaceRailway(),
+            base.buildingTypeKnown());
         CACHE.put(coord, new Entry(upgraded,
             cached == null ? null : cached.characteristics(), now, true,
             cached != null && cached.routeKnown()));
@@ -566,6 +633,7 @@ public final class ChunkRoleProbe {
         int highwayLevel = -1;
         boolean highwayTunnel = false;
         boolean hasRailway = false;
+        boolean hasSurfaceRailway = false;
         try {
             if (profile != null) {
                 if (dimInfo.getHighwayGenerationMode() == HighwayGenerationMode.INTERCITY_NETWORK_V1) {
@@ -582,12 +650,13 @@ public final class ChunkRoleProbe {
                         isCity, cityLevel, highwayLevel);
                 }
                 hasRailway = BuildingInfo.hasRailway(coord, dimInfo, profile);
+                hasSurfaceRailway = BuildingInfo.hasRailwayAtSurface(coord, dimInfo, profile);
             }
         } catch (Exception ignored) {
         }
 
         Probe probe = new Probe(isCity, couldHaveBuilding, cityLevel, hasHighway,
-            highwayLevel, highwayTunnel, hasRailway, buildingTypeKnown);
+            highwayLevel, highwayTunnel, hasRailway, hasSurfaceRailway, buildingTypeKnown);
         return new Entry(probe, characteristics, now, true, true);
     }
 
@@ -621,7 +690,7 @@ public final class ChunkRoleProbe {
             boolean highwayTunnel = hasHighway && isHighwayTunnel(dimInfo, coord, profile,
                 isCity, cityLevel, highwayLevel);
             return new Probe(isCity, false, cityLevel, hasHighway, highwayLevel,
-                highwayTunnel, false, false);
+                highwayTunnel, false, false, false);
         } catch (Throwable ignored) {
             // Do not poison the lifecycle cache with a false negative. A later
             // call can retry once the provider has become fully usable.

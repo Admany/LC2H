@@ -147,6 +147,14 @@ public final class DeferredTreeQueue {
                 createdAtMs, transactionId, mode, retryCount + 1, expiresAtMs);
         }
 
+        public PendingTree capturedSubset(List<CapturedBlock> subset) {
+            List<CapturedBlock> immutable = subset == null ? Collections.emptyList() : List.copyOf(subset);
+            return new PendingTree(pos, immutable, null, null, dim, computeTouchedChunks(immutable),
+                lifecycleId, seed, source, createdAtMs,
+                TreeCompatTracker.deterministicTransactionId(dim, seed, pos, source),
+                ReplayMode.CAPTURED_MUTATION, retryCount, expiresAtMs);
+        }
+
     }
 
     public static void enqueue(ResourceKey<Level> dim, PendingTree tree) {

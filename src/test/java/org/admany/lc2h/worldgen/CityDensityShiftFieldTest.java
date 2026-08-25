@@ -40,4 +40,44 @@ class CityDensityShiftFieldTest {
         assertEquals(18.0D, CityDensityShiftField.sample(-8, -8, controls), 1.0E-9D);
         assertTrue(CityDensityShiftField.sample(-1, -8, controls) > 0.0D);
     }
+
+    @Test
+    void smoothInterpolationNeverOvershootsAControlEnvelope() {
+        double max = 0.0D;
+        double min = 96.0D;
+        for (int i = 0; i <= 1000; i++) {
+            double t = i / 1000.0D;
+            double value = CityDensityShiftField.monotoneCubic(0.0D, 96.0D, 0.0D, 0.0D, t);
+            max = Math.max(max, value);
+            min = Math.min(min, value);
+        }
+        assertTrue(max <= 96.0D + 1.0E-9D, "the interpolant must not create a taller ridge than its control");
+        assertTrue(min >= -1.0E-9D, "the interpolant must not create a negative offset");
+    }
+
+    @Test
+    void smoothInterpolationPreservesMonotoneTransitions() {
+        double previous = Double.NEGATIVE_INFINITY;
+        for (int i = 0; i <= 1000; i++) {
+            double value = CityDensityShiftField.monotoneCubic(0.0D, 12.0D, 64.0D, 80.0D, i / 1000.0D);
+            assertTrue(value + 1.0E-9D >= previous, "a monotone control sequence must stay monotone");
+            previous = value;
+        }
+    }
+
+    @Test
+    void surfaceEnvelopeDoesNotLowerAFlatNativeRidge() {
+        assertEquals(0.0D,
+            CityDensityShiftField.capToNativeSurfaceEnvelope(30.0D, 102, 102), 1.0E-9D);
+        assertEquals(0.0D,
+            CityDensityShiftField.capToNativeSurfaceEnvelope(30.0D, 98, 102), 1.0E-9D);
+    }
+
+    @Test
+    void surfaceEnvelopeCapsAnIsolatedPeakToItsMeasuredExcess() {
+        assertEquals(6.0D,
+            CityDensityShiftField.capToNativeSurfaceEnvelope(30.0D, 102, 96), 1.0E-9D);
+        assertEquals(2.0D,
+            CityDensityShiftField.capToNativeSurfaceEnvelope(2.0D, 102, 96), 1.0E-9D);
+    }
 }

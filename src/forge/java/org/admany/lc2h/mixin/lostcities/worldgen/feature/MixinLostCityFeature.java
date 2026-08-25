@@ -20,6 +20,7 @@ import org.admany.lc2h.worldgen.lostcities.LostCityFeatureGuards;
 import org.admany.lc2h.worldgen.lostcities.LostCityGenerationHotPath;
 import org.admany.lc2h.worldgen.lostcities.LostCitiesGenerationLocks;
 import org.admany.lc2h.worldgen.seams.SeamOwnershipJournal;
+import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mutable;
@@ -244,6 +245,7 @@ public class MixinLostCityFeature {
             boolean placed = Boolean.TRUE.equals(cir.getReturnValue());
             if (placed) {
                 LostCityFeatureGuards.markPlaced(coord, System.currentTimeMillis());
+                ChunkPostProcessor.noteGeneratedChunk(provider.getType(), center.x, center.z);
             }
             if (LostCityFeatureGuards.TRACE_PLACE) {
                 org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityFeature.place end coord={} placed={} terrainPathReached={} generateRedirectReached={} thread={}",

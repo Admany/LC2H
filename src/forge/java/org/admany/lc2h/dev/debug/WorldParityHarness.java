@@ -539,6 +539,7 @@ public final class WorldParityHarness {
         snapshot.multichunkHash = stableHash(stableJson(snapshot.characteristics));
         snapshot.blocks = captureSparseBlocks(chunk, snapshot.minBuildY, snapshot.maxBuildY);
         snapshot.stateHash = stableHash(stableJson(snapshot.blocks));
+        snapshot.undergroundScan = captureUndergroundScan(level, provider, coord, chunk);
         snapshot.blockEntities = captureBlockEntities(chunk);
         snapshot.blockEntityHash = stableHash(stableJson(snapshot.blockEntities));
         return snapshot;
@@ -709,6 +710,67 @@ public final class WorldParityHarness {
             }
         }
         return cells;
+    }
+
+    /**
+     * Captures real air counts separately from the sparse block list.  The
+     * parity export intentionally omits empty cells, so counting air in that
+     * list would always under-report the open underground volume.  Keep this
+     * scan aligned with ChunkDebugExporter: profile ground level minus the
+     * previous 64 blocks, which is the window used by the cutoff/hole reports.
+     */
+    private static UndergroundScan captureUndergroundScan(ServerLevel level,
+                                                          IDimensionInfo provider,
+                                                          ChunkCoord coord,
+                                                          LevelChunk chunk) {
+        if (level == null || provider == null || coord == null || chunk == null) {
+            return null;
+        }
+        int groundLevel = 0;
+        try {
+            if (provider.getProfile() != null) {
+                groundLevel = provider.getProfile().GROUNDLEVEL;
+            }
+        } catch (Throwable ignored) {
+        }
+        int scanMaxY = groundLevel > 0
+            ? groundLevel - 1
+            : Math.min(level.getMaxBuildHeight() - 1, 70);
+        int scanMinY = groundLevel > 0
+            ? Math.max(level.getMinBuildHeight(), groundLevel - 64)
+            : Math.max(level.getMinBuildHeight(), 7);
+        if (scanMaxY < scanMinY) {
+            return null;
+        }
+
+        UndergroundScan scan = new UndergroundScan();
+        scan.scanMinY = scanMinY;
+        scan.scanMaxY = scanMaxY;
+        scan.totalBlocks = (scanMaxY - scanMinY + 1) * 16 * 16;
+        int baseX = coord.chunkX() << 4;
+        int baseZ = coord.chunkZ() << 4;
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                boolean edge = x == 0 || z == 0 || x == 15 || z == 15;
+                for (int y = scanMinY; y <= scanMaxY; y++) {
+                    BlockState state = chunk.getBlockState(new BlockPos(baseX + x, y, baseZ + z));
+                    if (state == null || !state.isAir()) {
+                        continue;
+                    }
+                    scan.airCount++;
+                    if (edge) {
+                        scan.edgeAirCount++;
+                    }
+                    if (scan.airMinY == null || y < scan.airMinY) {
+                        scan.airMinY = y;
+                    }
+                    if (scan.airMaxY == null || y > scan.airMaxY) {
+                        scan.airMaxY = y;
+                    }
+                }
+            }
+        }
+        return scan;
     }
 
     private static List<BlockEntityCell> captureBlockEntities(LevelChunk chunk) {
@@ -1418,8 +1480,19 @@ public final class WorldParityHarness {
         String multichunkHash;
         List<BlockCell> blocks;
         String stateHash;
+        UndergroundScan undergroundScan;
         List<BlockEntityCell> blockEntities;
         String blockEntityHash;
+    }
+
+    public static final class UndergroundScan {
+        int scanMinY;
+        int scanMaxY;
+        int totalBlocks;
+        int airCount;
+        Integer airMinY;
+        Integer airMaxY;
+        int edgeAirCount;
     }
 
     public static final class StructureInfo {

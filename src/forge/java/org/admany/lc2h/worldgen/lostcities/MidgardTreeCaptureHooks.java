@@ -26,7 +26,7 @@ public final class MidgardTreeCaptureHooks {
         if (context == null || context.level() == null || context.origin() == null) {
             return TreeCapturePolicy.Decision.PASS_THROUGH;
         }
-        return TreeCapturePolicy.decideAt(context.level().getLevel(), context.origin());
+        return TreeCapturePolicy.decideAt(context.level().getLevel(), context.origin(), 16);
     }
 
     public static boolean beginFeaturePlacement(FeaturePlaceContext<?> context, String hookId) {

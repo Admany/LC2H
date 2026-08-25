@@ -15,8 +15,15 @@ public final class TreeCapturePolicy {
     private static final LongAdder CHECKS = new LongAdder();
     private static final LongAdder PASSED = new LongAdder();
     private static final LongAdder REJECTED_UNSAFE_ROOT = new LongAdder();
+    private static final LongAdder REJECTED_UNDERGROUND_RAIL_ROOT = new LongAdder();
     private static final LongAdder CAPTURED_BOUNDARY = new LongAdder();
     private static final LongAdder TOTAL_TIME_NS = new LongAdder();
+    /* Vanilla tree canopies are handled by the feature's captured block list;
+     * the pre-feature policy only needs to protect an actual seam.  A broad
+     * 16-block scan classified ordinary forest roots as seam trees and left
+     * the world with trunks/branches but no leaves after replay. */
+    private static final int DEFAULT_TREE_FOOTPRINT_RADIUS_BLOCKS = Math.max(4,
+        Math.min(16, Integer.getInteger("lc2h.treeSafety.defaultFootprintBlocks", 8)));
 
     public enum Decision {
         PASS_THROUGH,
@@ -80,32 +87,41 @@ public final class TreeCapturePolicy {
         int originChunkX = x >> 4;
         int originChunkZ = z >> 4;
         ChunkUnsafeLookup unsafeLookup = new ChunkUnsafeLookup(dimInfo, dim);
-        if (LostCityTreeSafety.isUnsafeChunk(unsafeLookup, originChunkX, originChunkZ)) {
+        ChunkRoleProbe.Probe originProbe = ChunkRoleProbe.getRouteAwareProbe(
+            dimInfo, dim, originChunkX, originChunkZ);
+        if (originProbe.isUnsafe()) {
+            if (originProbe.hasRailway() && !originProbe.hasSurfaceRailway()
+                && !originProbe.isCity() && !originProbe.hasHighway()) {
+                REJECTED_UNDERGROUND_RAIL_ROOT.increment();
+            }
             REJECTED_UNSAFE_ROOT.increment();
             return Decision.REJECT;
         }
 
-        // Capture only roots that are actually next to an LC-owned chunk. The
-        // capture is replayed after terrain/structure work, so a boundary tree
-        // cannot be half-overwritten. Do not use a speculative BOP-size halo:
-        // it deferred normal forest generation and made every city expensive.
-        if (isOnUnsafeBoundary(unsafeLookup, x, z)) {
+        // Capture a bounded footprint around the root. The previous 1-4 block
+        // edge test allowed an ordinary tree canopy to cross a building
+        // cutoff after its root had already passed through. The radius is
+        // still small for vanilla trees and keeps the larger BOP radius only
+        // for BOP's known wide canopies.
+        int footprintRadius = minimumCaptureRadiusBlocks > 0
+            ? Math.min(64, minimumCaptureRadiusBlocks)
+            : DEFAULT_TREE_FOOTPRINT_RADIUS_BLOCKS;
+        footprintRadius = scaledRadius(footprintRadius);
+        if (isWithinUnsafeRadius(unsafeLookup, x, z, footprintRadius)) {
             CAPTURED_BOUNDARY.increment();
             return Decision.CAPTURE;
         }
 
-        // `minimumCaptureRadiusBlocks` remains in the API for compat callers,
-        // but a feature's maximum possible canopy is not a safe reason to
-        // capture its root before the real footprint is known.
         return pass();
     }
 
     public static String diagnostics() {
         long checks = CHECKS.sum();
         double averageUs = checks == 0L ? 0.0D : (TOTAL_TIME_NS.sum() / 1_000.0D) / checks;
-        return "deferredReplay=boundary-only checks=" + CHECKS.sum()
+        return "deferredReplay=bounded-footprint checks=" + CHECKS.sum()
             + " pass=" + PASSED.sum()
             + " rejectUnsafe=" + REJECTED_UNSAFE_ROOT.sum()
+            + " rejectUndergroundRail=" + REJECTED_UNDERGROUND_RAIL_ROOT.sum()
             + " captureBoundary=" + CAPTURED_BOUNDARY.sum()
             + " avgUs=" + String.format(java.util.Locale.ROOT, "%.3f", averageUs);
     }
@@ -136,6 +152,33 @@ public final class TreeCapturePolicy {
                 || (east && south && unsafeLookup.isUnsafe(chunkX + 1, chunkZ + 1));
         }
         return true;
+    }
+
+    private static boolean isWithinUnsafeRadius(ChunkUnsafeLookup unsafeLookup,
+                                                int worldX,
+                                                int worldZ,
+                                                int radiusBlocks) {
+        if (radiusBlocks <= 0) {
+            return isOnUnsafeBoundary(unsafeLookup, worldX, worldZ);
+        }
+        int minChunkX = Math.floorDiv(worldX - radiusBlocks, 16);
+        int maxChunkX = Math.floorDiv(worldX + radiusBlocks, 16);
+        int minChunkZ = Math.floorDiv(worldZ - radiusBlocks, 16);
+        int maxChunkZ = Math.floorDiv(worldZ + radiusBlocks, 16);
+        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                if (unsafeLookup.isUnsafe(chunkX, chunkZ)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Apply the live giant-tree seam multiplier to a real/estimated feature footprint. */
+    public static int scaledRadius(int radiusBlocks) {
+        double multiplier = Math.max(0.5D, Math.min(3.0D, ConfigManager.TREE_SEAM_RADIUS_MULTIPLIER));
+        return Math.max(4, Math.min(64, (int) Math.ceil(Math.max(1, radiusBlocks) * multiplier)));
     }
 
 }

@@ -40,7 +40,8 @@ public class MixinTreePlacer {
         if (DeferredTreeQueue.isReplaying() || DeferredTreeCaptureContext.isCapturing()) {
             return;
         }
-        TreeCapturePolicy.Decision decision = TreeCapturePolicy.decideAt(level, pos);
+        TreeCapturePolicy.Decision decision = TreeCapturePolicy.decideAt(level, pos,
+            mega ? 24 : 12);
         if (decision == TreeCapturePolicy.Decision.REJECT) {
             cir.setReturnValue(0);
             return;

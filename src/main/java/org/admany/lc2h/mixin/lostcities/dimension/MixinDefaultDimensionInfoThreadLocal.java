@@ -2,6 +2,7 @@ package org.admany.lc2h.mixin.lostcities.dimension;
 
 import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.config.ProfileSetup;
+import mcjty.lostcities.config.StreetGenerationMode;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.ChunkHeightmap;
 import mcjty.lostcities.worldgen.DefaultDimensionInfo;
@@ -16,6 +17,8 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
 import org.admany.lc2h.worldgen.lostcities.LostCityProfileOverrideManager;
+import org.admany.lc2h.worldgen.lostcities.LostCitiesStreetModePolicy;
+import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
@@ -30,6 +33,7 @@ public abstract class MixinDefaultDimensionInfoThreadLocal implements IDimension
     @Shadow private LostCityProfile profile;
     @Shadow private LostCityProfile profileOutside;
     @Shadow private WorldStyle style;
+    @Shadow @Final private StreetGenerationMode streetGenerationMode;
 
     @Unique private final ThreadLocal<WorldGenLevel> lc2h$worldLocal = new ThreadLocal<>();
     @Unique private volatile WorldGenLevel lc2h$worldFallback;
@@ -111,6 +115,11 @@ public abstract class MixinDefaultDimensionInfoThreadLocal implements IDimension
         } catch (Throwable ignored) {
             return style;
         }
+    }
+
+    @Overwrite
+    public StreetGenerationMode getStreetGenerationMode() {
+        return LostCitiesStreetModePolicy.resolve(streetGenerationMode);
     }
 
     @Overwrite

@@ -18,6 +18,7 @@ import net.minecraftforge.fml.common.Mod;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.concurrency.async.AsyncManager;
 import org.admany.lc2h.config.ConfigManager;
+import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.admany.lc2h.data.cache.FeatureCache;
 import org.admany.lc2h.runtime.Lc2hRuntimeModes;
 import org.admany.lc2h.util.server.ServerTickLoad;
@@ -50,7 +51,8 @@ public final class VineClusterCleaner {
         TWISTING_VINES,
         WEEPING_VINES,
         HANGING_ROOTS,
-        CHAIN
+        CHAIN,
+        CONFIGURED_VEGETATION
     }
 
     private static volatile boolean initialized = false;
@@ -61,7 +63,9 @@ public final class VineClusterCleaner {
     private static final int MAX_REMOVALS_PER_TICK = Math.max(16, Integer.getInteger("lc2h.vine.max_removals_per_tick", 128));
     private static final long MIN_RESCAN_INTERVAL_MS = 15_000L;
     private static final int VINE_SCAN_BATCH_SIZE = Math.max(512, Integer.getInteger("lc2h.vine.scan_batch_size", 2048));
-    private static final int VINE_SCAN_CACHE_VERSION = 3;
+    // Bump when the scan candidate set changes; old cache entries may have
+    // marked a chunk complete before configurable lichen/frost support.
+    private static final int VINE_SCAN_CACHE_VERSION = 4;
 
     private static final Map<ResourceKey<net.minecraft.world.level.Level>, Integer> CHUNK_CURSOR = new ConcurrentHashMap<>();
     private static final Map<ResourceKey<net.minecraft.world.level.Level>, Map<Long, Long>> LAST_SCAN = new ConcurrentHashMap<>();
@@ -673,6 +677,12 @@ public final class VineClusterCleaner {
         if (state == null) {
             return null;
         }
+        // Keep the periodic component cleaner in lockstep with the
+        // event-driven post processor. This covers glow lichen, Immersive
+        // Weathering frost, and any ids added through the config screen.
+        if (ChunkPostProcessor.isConfiguredFloatingVegetation(state)) {
+            return AttachmentFamily.CONFIGURED_VEGETATION;
+        }
         if (state.is(Blocks.VINE)) {
             return AttachmentFamily.VINE;
         }
@@ -703,6 +713,9 @@ public final class VineClusterCleaner {
                 pos.above(), pos.below()
             };
             case HANGING_ROOTS -> new BlockPos[]{pos.above()};
+            case CONFIGURED_VEGETATION -> new BlockPos[]{
+                pos.north(), pos.south(), pos.east(), pos.west(), pos.above(), pos.below()
+            };
         };
     }
 
@@ -712,6 +725,10 @@ public final class VineClusterCleaner {
             case CAVE_VINES, WEEPING_VINES, HANGING_ROOTS -> new Direction[]{Direction.UP};
             case TWISTING_VINES -> new Direction[]{Direction.DOWN};
             case CHAIN -> new Direction[]{Direction.UP, Direction.DOWN};
+            case CONFIGURED_VEGETATION -> new Direction[]{
+                Direction.UP, Direction.DOWN, Direction.NORTH, Direction.SOUTH,
+                Direction.EAST, Direction.WEST
+            };
         };
     }
 

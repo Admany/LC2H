@@ -3,6 +3,7 @@ package org.admany.lc2h.mixin.minecraft.worldgen;
 import mcjty.lostcities.setup.Registration;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import net.minecraft.core.BlockPos;
+import net.minecraft.util.RandomSource;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.WorldGenLevel;
@@ -67,8 +68,11 @@ public class MixinTreeFeatureNearCityBorder {
         if (origin == null || context.config() == null) {
             return;
         }
+        int captureRadius = biomesOPlentyTree
+            ? LC2H_BOP_CAPTURE_RADIUS_BLOCKS
+            : lc2h$estimateTreeFootprint(context);
         TreeCapturePolicy.Decision decision = TreeCapturePolicy.decideAt(
-            level.getLevel(), origin, biomesOPlentyTree ? LC2H_BOP_CAPTURE_RADIUS_BLOCKS : 0);
+            level.getLevel(), origin, captureRadius);
         if (decision == TreeCapturePolicy.Decision.REJECT) {
             cir.setReturnValue(false);
             return;
@@ -86,6 +90,37 @@ public class MixinTreeFeatureNearCityBorder {
         }
 
         // PASS_THROUGH intentionally leaves vanilla generation untouched.
+    }
+
+    /** Estimate the actual vanilla foliage footprint without consuming the feature's RNG. */
+    @Unique
+    private int lc2h$estimateTreeFootprint(FeaturePlaceContext<TreeConfiguration> context) {
+        TreeConfiguration config = context.config();
+        if (config == null || config.trunkPlacer == null || config.foliagePlacer == null) {
+            return 8;
+        }
+        BlockPos origin = context.origin();
+        long seed = context.level().getSeed()
+            ^ ((long) origin.getX() * 341873128712L)
+            ^ ((long) origin.getY() * 132897987541L)
+            ^ ((long) origin.getZ() * 42317861L);
+        try {
+            RandomSource heightRandom = RandomSource.create(seed);
+            int treeHeight = config.trunkPlacer.getTreeHeight(heightRandom);
+            int foliageHeight = config.foliagePlacer.foliageHeight(
+                RandomSource.create(seed ^ 0x9E3779B97F4A7C15L), treeHeight, config);
+            int radius = 2;
+            int samples = Math.max(1, Math.min(96, foliageHeight + 2));
+            for (int layer = 0; layer < samples; layer++) {
+                radius = Math.max(radius, config.foliagePlacer.foliageRadius(
+                    RandomSource.create(seed + layer * 0x632BE59BD9B4E019L), layer));
+            }
+            // A small safety margin covers trunk branches and hanging leaves;
+            // the user multiplier is applied once in TreeCapturePolicy.
+            return Math.max(8, Math.min(64, radius + 3));
+        } catch (Throwable ignored) {
+            return 8;
+        }
     }
 
     @Inject(method = "place", at = @At("RETURN"), cancellable = true)

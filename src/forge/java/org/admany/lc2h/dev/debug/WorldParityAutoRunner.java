@@ -21,6 +21,9 @@ import org.admany.lc2h.worldgen.apply.ShadowBlockMutationApplier;
 import org.admany.lc2h.worldgen.lostcities.DeferredTreeQueue;
 import org.admany.lc2h.worldgen.lostcities.DeferredTreeEventHandler;
 import org.admany.lc2h.worldgen.lostcities.LostCityProfileOverrideManager;
+import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
+import org.admany.lc2h.worldgen.lostcities.LostCitiesStreetModePolicy;
+import org.admany.lc2h.worldgen.terrain.NaturalHeightSampler;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -56,12 +59,20 @@ public final class WorldParityAutoRunner {
     private static final int SAMPLES = Math.max(1, Integer.getInteger("lc2h.worldparity.samples", 64));
     private static final String DIMENSIONS = System.getProperty("lc2h.worldparity.dimensions", "minecraft:overworld").trim();
     private static final String CENTERS = System.getProperty("lc2h.worldparity.centers", "0,0;-3,0").trim();
+    /** Optional absolute chunk coordinates to export in addition to the center matrix. */
+    private static final String TARGETS = System.getProperty("lc2h.worldparity.targets", "").trim();
     private static final String PROFILES = System.getProperty("lc2h.worldparity.profiles", "").trim();
     private static final String ROLE = System.getProperty("lc2h.worldparity.role", Lc2hRuntimeModes.baselineMode() ? "baseline" : "test").trim().toLowerCase();
     private static final String LANE_ID = System.getProperty("lc2h.worldparity.laneId", ROLE).trim();
     private static final String OUTPUT = System.getProperty("lc2h.worldparity.output", "logs/lc2h-worldparity-export.json").trim();
     private static final String COMPARE_AGAINST = System.getProperty("lc2h.worldparity.compareAgainst", "").trim();
     private static final String COMPARE_OUTPUT = System.getProperty("lc2h.worldparity.compareOutput", "logs/lc2h-worldparity-compare.json").trim();
+    private static final boolean ROLE_SCAN = Boolean.parseBoolean(
+        System.getProperty("lc2h.worldparity.roleScan", "false"));
+    private static final int ROLE_SCAN_RADIUS = Math.max(8,
+        Math.min(128, Integer.getInteger("lc2h.worldparity.roleScanRadius", 64)));
+    private static final int ROLE_SCAN_STEP = Math.max(1,
+        Math.min(16, Integer.getInteger("lc2h.worldparity.roleScanStep", 4)));
     private static final AtomicBoolean EXECUTED = new AtomicBoolean(false);
     private static volatile ActiveRun ACTIVE_RUN;
 
@@ -151,6 +162,7 @@ public final class WorldParityAutoRunner {
 
         List<ResourceKey<Level>> dimensions = parseDimensions();
         List<int[]> centers = parseCenters();
+        List<int[]> directTargets = parseTargetCoords();
         ArrayList<ExportTarget> targets = new ArrayList<>();
         ArrayList<ResourceKey<Level>> pendingDimensions = new ArrayList<>();
 
@@ -168,6 +180,10 @@ public final class WorldParityAutoRunner {
             }
             provider.setWorld(level);
             int areaSize = provider.getWorldStyle().getMultiSettings().areasize();
+            lines.add("streetMode dimension=" + dimension.location()
+                + " upstreamProfile=" + (provider.getProfile() == null ? "<null>" : provider.getProfile().STREET_GENERATION_MODE)
+                + " active=" + provider.getStreetGenerationMode()
+                + " policy=" + LostCitiesStreetModePolicy.modeName());
             for (int[] center : centers) {
                 ChunkCoord centerMulti = new ChunkCoord(dimension, center[0], center[1]);
                 ChunkCoord centerChunk = new ChunkCoord(
@@ -177,10 +193,71 @@ public final class WorldParityAutoRunner {
                 );
                 ArrayList<ChunkCoord> targetExportCoords =
                     new ArrayList<>(new LinkedHashSet<>(WorldParityHarness.buildMatrix(centerChunk, RADIUS, SAMPLES)));
+                appendDirectTargets(targetExportCoords, dimension, directTargets);
                 targets.add(new ExportTarget(level, provider, centerMulti, centerChunk, areaSize, center[0], center[1], RADIUS, targetExportCoords));
             }
         }
+        if (ROLE_SCAN && !targets.isEmpty()) {
+            appendRoleScan(lines, targets.get(0));
+        }
         return new ActiveRun(server, lines, targets, pendingDimensions, centers, null);
+    }
+
+    /**
+     * Optional server-only coordinate discovery for mountain A/B runs. It asks
+     * the same route-aware Lost Cities probe used by the terrain field and
+     * records elevated city cells; it never alters generation.
+     */
+    private static void appendRoleScan(ArrayList<String> lines, ExportTarget target) {
+        if (target == null || target.level() == null || target.provider() == null) {
+            return;
+        }
+        int centerX = target.centerChunk().chunkX();
+        int centerZ = target.centerChunk().chunkZ();
+        NaturalHeightSampler.LevelSampler heights = NaturalHeightSampler.forLevel(target.level());
+        int ground = 0;
+        try {
+            if (target.provider().getProfile() != null) {
+                ground = target.provider().getProfile().GROUNDLEVEL;
+            }
+        } catch (Throwable ignored) {
+        }
+        ArrayList<String> candidates = new ArrayList<>();
+        int scanned = 0;
+        int cityCount = 0;
+        for (int dz = -ROLE_SCAN_RADIUS; dz <= ROLE_SCAN_RADIUS; dz += ROLE_SCAN_STEP) {
+            for (int dx = -ROLE_SCAN_RADIUS; dx <= ROLE_SCAN_RADIUS; dx += ROLE_SCAN_STEP) {
+                int chunkX = centerX + dx;
+                int chunkZ = centerZ + dz;
+                scanned++;
+                ChunkRoleProbe.Probe probe = ChunkRoleProbe.getRouteAwareProbe(
+                    target.provider(), target.level().dimension(), chunkX, chunkZ);
+                if (!probe.isCity()) {
+                    continue;
+                }
+                cityCount++;
+                int height = heights == null ? ground : heights.chunkHeight(chunkX, chunkZ);
+                if (height < ground + 24) {
+                    continue;
+                }
+                if (candidates.size() < 32) {
+                    candidates.add(chunkX + "," + chunkZ
+                        + " level=" + probe.cityLevel()
+                        + " height=" + height
+                        + " rise=" + Math.max(0, height - ground));
+                }
+            }
+        }
+        lines.add("role-scan dim=" + target.level().dimension().location()
+            + " center=" + centerX + "," + centerZ
+            + " radius=" + ROLE_SCAN_RADIUS
+            + " step=" + ROLE_SCAN_STEP
+            + " scanned=" + scanned
+            + " cities=" + cityCount
+            + " elevatedCandidates=" + candidates.size());
+        for (String candidate : candidates) {
+            lines.add("role-scan candidate=" + candidate);
+        }
     }
 
     private static List<ResourceKey<Level>> parseDimensions() {
@@ -283,6 +360,41 @@ public final class WorldParityAutoRunner {
             result.add(new int[]{0, 0});
         }
         return result;
+    }
+
+    private static List<int[]> parseTargetCoords() {
+        ArrayList<int[]> result = new ArrayList<>();
+        if (TARGETS.isBlank()) {
+            return result;
+        }
+        for (String entry : TARGETS.split(";")) {
+            if (entry == null || entry.isBlank()) {
+                continue;
+            }
+            String[] parts = entry.trim().split(",");
+            if (parts.length != 2) {
+                continue;
+            }
+            try {
+                result.add(new int[]{Integer.parseInt(parts[0].trim()), Integer.parseInt(parts[1].trim())});
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return result;
+    }
+
+    private static void appendDirectTargets(ArrayList<ChunkCoord> coords,
+                                            ResourceKey<Level> dimension,
+                                            List<int[]> directTargets) {
+        if (coords == null || dimension == null || directTargets == null) {
+            return;
+        }
+        for (int[] target : directTargets) {
+            if (target == null || target.length != 2) {
+                continue;
+            }
+            coords.add(new ChunkCoord(dimension, target[0], target[1]));
+        }
     }
 
     private static SeedValidation readSeedValidation(MinecraftServer server) {
@@ -544,6 +656,7 @@ public final class WorldParityAutoRunner {
                     );
                     ArrayList<ChunkCoord> targetExportCoords =
                         new ArrayList<>(new LinkedHashSet<>(WorldParityHarness.buildMatrix(centerChunk, RADIUS, SAMPLES)));
+                    appendDirectTargets(targetExportCoords, dimension, parseTargetCoords());
                     targets.add(new ExportTarget(level, provider, centerMulti, centerChunk, areaSize, center[0], center[1], RADIUS, targetExportCoords));
                     added++;
                 }
@@ -668,6 +781,16 @@ public final class WorldParityAutoRunner {
                         coords.add(new ChunkPos(chunkX, chunkZ));
                     }
                 }
+                /* Direct A/B coordinates are part of the export contract too.
+                 * Prime them explicitly; otherwise a coordinate outside the
+                 * centre matrix can be exported before it reaches FULL and
+                 * the comparison silently measures a missing/partial chunk. */
+                for (int[] direct : parseTargetCoords()) {
+                    ChunkPos directPos = new ChunkPos(direct[0], direct[1]);
+                    if (!coords.contains(directPos)) {
+                        coords.add(directPos);
+                    }
+                }
                 String label = "worldparity role=" + ROLE
                     + " dim=" + target.level().dimension().location()
                     + " center=" + target.centerX() + "," + target.centerZ()
@@ -731,6 +854,53 @@ public final class WorldParityAutoRunner {
             }
             lines.add(prefix + " primeGate=" + WorldParityPrimeGate.diagnostics());
             lines.add(prefix + " trees=" + DeferredTreeEventHandler.capturedTreeDiagnostics(target.level()));
+            lines.add(prefix + " snow="
+                + org.admany.lc2h.util.chunk.ChunkPostProcessor.snowDiagnostics());
+            // Keep the terrain proof self-contained: these counters are the
+            // generation-time decision, not a post-hoc interpretation of the
+            // exported heightmaps.  This lets an A/B report prove whether the
+            // native density hook actually ran and whether any region had to
+            // fall back while the chunks were being generated.
+            lines.add(prefix + " terrainBlend="
+                + org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics.diagnostics());
+            lines.add(prefix + " shiftField="
+                + org.admany.lc2h.worldgen.terrain.CityShiftField.diagnostics());
+            org.admany.lc2h.worldgen.terrain.CityShiftField.Context shiftContext =
+                org.admany.lc2h.worldgen.terrain.CityShiftField.context(
+                    target.provider(),
+                    target.provider().getProfile(),
+                    org.admany.lc2h.worldgen.terrain.NaturalHeightSampler.forLevel(target.level()));
+            if (shiftContext != null && shiftContext.settings().enabled()) {
+                int shiftMinX = target.minChunkX() - shiftContext.settings().halo();
+                int shiftMaxX = target.maxChunkX() + shiftContext.settings().halo();
+                int shiftMinZ = target.minChunkZ() - shiftContext.settings().halo();
+                int shiftMaxZ = target.maxChunkZ() + shiftContext.settings().halo();
+                double maxShift = 0.0D;
+                int maxShiftX = shiftMinX;
+                int maxShiftZ = shiftMinZ;
+                for (int chunkZ = shiftMinZ; chunkZ <= shiftMaxZ; chunkZ++) {
+                    for (int chunkX = shiftMinX; chunkX <= shiftMaxX; chunkX++) {
+                        double shift = org.admany.lc2h.worldgen.terrain.CityShiftField
+                            .shiftAtChunk(shiftContext, chunkX, chunkZ);
+                        if (shift > maxShift) {
+                            maxShift = shift;
+                            maxShiftX = chunkX;
+                            maxShiftZ = chunkZ;
+                        }
+                    }
+                }
+                lines.add(prefix + " shiftWindow=max="
+                    + String.format(java.util.Locale.ROOT, "%.2f", maxShift)
+                    + " at=" + maxShiftX + "," + maxShiftZ
+                    + " window=" + shiftMinX + "," + shiftMinZ
+                    + "->" + shiftMaxX + "," + shiftMaxZ);
+            }
+            if ("post-prime".equals(stage) || "pre-export-settled".equals(stage)) {
+                ChunkRoleProbe.RailSafetySummary railSafety = ChunkRoleProbe.summarizeRailSafety(
+                    target.provider(), target.level().dimension(),
+                    target.minChunkX(), target.maxChunkX(), target.minChunkZ(), target.maxChunkZ());
+                lines.add(prefix + " railSafety=" + railSafety.summary());
+            }
         }
 
         private boolean settleStep() {

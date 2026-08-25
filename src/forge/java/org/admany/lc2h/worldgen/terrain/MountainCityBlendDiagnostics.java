@@ -16,6 +16,8 @@ public final class MountainCityBlendDiagnostics {
     private static final AtomicLong CENTER_IS_CITY = new AtomicLong();
     private static final AtomicLong APPLIED = new AtomicLong();
     private static final AtomicLong BLEND_CALLS = new AtomicLong();
+    private static final AtomicLong DENSITY_OFFSET_CALLS = new AtomicLong();
+    private static final AtomicLong NATURAL_CORRECTION_SKIPS = new AtomicLong();
 
     /** The decision recorded at generation time. A later warm-cache lookup is not
      * a substitute for this value. */
@@ -88,12 +90,22 @@ public final class MountainCityBlendDiagnostics {
         BLEND_CALLS.incrementAndGet();
     }
 
+    public static void densityOffsetCall() {
+        DENSITY_OFFSET_CALLS.incrementAndGet();
+    }
+
+    public static void naturalCorrectionSkip() {
+        NATURAL_CORRECTION_SKIPS.incrementAndGet();
+    }
+
     public static String diagnostics() {
         return "seen=" + SEEN.get()
             + ", noProvider=" + NO_PROVIDER.get()
             + ", noProfile=" + NO_PROFILE.get()
             + ", shiftedCentre=" + CENTER_IS_CITY.get()
             + ", applied=" + APPLIED.get()
-            + ", blendCalls=" + BLEND_CALLS.get();
+            + ", blendCalls=" + BLEND_CALLS.get()
+            + ", densityOffsetCalls=" + DENSITY_OFFSET_CALLS.get()
+            + ", naturalCorrectionSkips=" + NATURAL_CORRECTION_SKIPS.get();
     }
 }

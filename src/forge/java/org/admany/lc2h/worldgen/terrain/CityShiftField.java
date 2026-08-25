@@ -77,10 +77,11 @@ public final class CityShiftField {
     private static final Map<IDimensionInfo, RoleCache> ROLES =
         new ConcurrentHashMap<>();
 
-    /* A cold field is deliberately built away from the worldgen workers. The
-     * workers get the cheap scalar fallback while this bounded pool fills the
-     * immutable region cache. Keeping this pool small prevents it from simply
-     * moving the same stampede onto every CPU core. */
+    /* A cold field is built away from the worldgen workers. The caller still
+     * waits for the immutable result before sampling it: returning a partial
+     * scalar here was the source of the old one-chunk city/mountain cutoffs.
+     * Keeping this pool small prevents the exact build from becoming a second
+     * worldgen stampede. */
     private static final int ASYNC_BUILD_THREADS = Math.max(1, Math.min(2,
         Integer.getInteger("lc2h.terrain.shift.asyncThreads", 1)));
     private static final int ASYNC_BUILD_QUEUE = Math.max(1, Math.min(16,
@@ -111,7 +112,13 @@ public final class CityShiftField {
     private static final AtomicLong REGIONS_BUILT = new AtomicLong();
     private static final AtomicLong REGION_HITS = new AtomicLong();
     private static final AtomicLong DEMAND_CELLS = new AtomicLong();
+    private static final AtomicLong POSITIVE_DEMAND_CELLS = new AtomicLong();
+    private static final AtomicInteger MAX_DEMAND = new AtomicInteger();
+    private static final AtomicLong POSITIVE_OWNED_CELLS = new AtomicLong();
+    private static final AtomicInteger MAX_OWNED_SHIFT = new AtomicInteger();
     private static final AtomicLong HEIGHT_SAMPLES = new AtomicLong();
+    private static final AtomicLong EXACT_HEIGHT_SAMPLES = new AtomicLong();
+    private static final AtomicLong EXACT_HEIGHT_FAILURES = new AtomicLong();
     private static final AtomicLong EROSION_SAMPLES = new AtomicLong();
     private static final AtomicLong BUILD_NANOS = new AtomicLong();
     private static final AtomicLong SWEEPS = new AtomicLong();
@@ -129,6 +136,13 @@ public final class CityShiftField {
     private static final AtomicLong ASYNC_REJECTED = new AtomicLong();
     private static final AtomicLong ASYNC_FAILED = new AtomicLong();
     private static final Map<RegionKey, Long> ASYNC_RETRY_AFTER = new ConcurrentHashMap<>();
+
+    /* Live-config shape controls.  The previous solver used only maxShift and
+     * the erosion slope, allowing a city demand to run hundreds of blocks
+     * into a natural ridge.  A bounded run-out keeps the city edge smooth
+     * without turning the adjacent mountain into a wall. */
+    private static volatile int BLEND_WIDTH_BLOCKS = 36;
+    private static volatile double BLEND_SOFTNESS = 1.4D;
 
     private CityShiftField() {
     }
@@ -202,6 +216,20 @@ public final class CityShiftField {
         IntercityHighwayIndex.clear();
     }
 
+    /** Apply the config-screen blend shape without restarting the server. */
+    public static void withBlendShape(int widthBlocks, double softness) {
+        int width = Math.max(8, Math.min(MAX_HALO * 16, widthBlocks));
+        double curve = Double.isFinite(softness)
+            ? Math.max(0.35D, Math.min(3.0D, softness))
+            : 1.4D;
+        if (BLEND_WIDTH_BLOCKS == width && Double.compare(BLEND_SOFTNESS, curve) == 0) {
+            return;
+        }
+        BLEND_WIDTH_BLOCKS = width;
+        BLEND_SOFTNESS = curve;
+        clear();
+    }
+
     public static String diagnostics() {
         ShiftSettings settings = ShiftSettings.current();
         long built = REGIONS_BUILT.get();
@@ -209,7 +237,13 @@ public final class CityShiftField {
             + ", regionsBuilt=" + built
             + ", regionHits=" + REGION_HITS.get()
             + ", demandCells=" + DEMAND_CELLS.get()
+            + ", positiveDemandCells=" + POSITIVE_DEMAND_CELLS.get()
+            + ", maxDemand=" + MAX_DEMAND.get()
+            + ", positiveOwnedCells=" + POSITIVE_OWNED_CELLS.get()
+            + ", maxOwnedShift=" + MAX_OWNED_SHIFT.get()
             + ", heightSamples=" + HEIGHT_SAMPLES.get()
+            + ", exactHeightSamples=" + EXACT_HEIGHT_SAMPLES.get()
+            + ", exactHeightFailures=" + EXACT_HEIGHT_FAILURES.get()
             + ", erosionSamples=" + EROSION_SAMPLES.get()
             + ", avgSweeps=" + (built == 0 ? "n/a"
                 : String.format(java.util.Locale.ROOT, "%.1f", (double) SWEEPS.get() / built))
@@ -233,6 +267,8 @@ public final class CityShiftField {
             + ", asyncFailed=" + ASYNC_FAILED.get()
             + ", asyncActive=" + ASYNC_BUILD_EXECUTOR.getActiveCount()
             + ", asyncQueued=" + ASYNC_BUILD_EXECUTOR.getQueue().size()
+            + ", blendWidthBlocks=" + BLEND_WIDTH_BLOCKS
+            + ", blendSoftness=" + String.format(java.util.Locale.ROOT, "%.3f", BLEND_SOFTNESS)
             + ", " + IntercityHighwayIndex.diagnostics();
     }
 
@@ -267,12 +303,18 @@ public final class CityShiftField {
             ASYNC_SUBMITTED.incrementAndGet();
         } catch (RejectedExecutionException rejected) {
             ASYNC_REJECTED.incrementAndGet();
+            /* Never run the expensive height/role pass on a worldgen worker.
+             * Queue pressure is expected during a burst; let the cheap,
+             * deterministic scalar fallback cover this sample and retry the
+             * immutable region after the bounded builder drains. */
             ASYNC_RETRY_AFTER.put(key, System.nanoTime() + ASYNC_RETRY_DELAY_NANOS);
             REGION_FLIGHTS.remove(key, created);
             created.completeExceptionally(rejected);
         }
-        /* Never wait here. The caller immediately uses fallbackShift and the
-         * next chunk reuses the completed immutable region when it is ready. */
+        /* Never wait here. The worldgen worker immediately uses the bounded
+         * scalar fallback; later chunks reuse the completed immutable region.
+         * This keeps the concurrent path from parking behind Lost Cities'
+         * generation lock while preserving a single published field. */
         return awaitRegion(created);
     }
 
@@ -327,10 +369,6 @@ public final class CityShiftField {
 
     private static Region awaitRegion(CompletableFuture<Region> flight) {
         try {
-            /* A terrain worker asking for a region another worker is building
-             * must not park on a worldgen future. The caller applies a cheap
-             * scalar fallback for this sample and the completed region is
-             * reused by later chunks. */
             return flight.getNow(null);
         } catch (CompletionException | CancellationException ignored) {
             return null;
@@ -421,8 +459,10 @@ public final class CityShiftField {
             coarseNatural, coarseSide));
         float[] value = new float[cells];
         float[] sourceDemand = new float[cells];
+        float[] sourceDistance = new float[cells];
         boolean[] locked = new boolean[cells];
         Arrays.fill(value, Float.NEGATIVE_INFINITY);
+        Arrays.fill(sourceDistance, Float.POSITIVE_INFINITY);
         try {
             for (int gz = 0; gz < side; gz++) {
                 for (int gx = 0; gx < side; gx++) {
@@ -449,8 +489,13 @@ public final class CityShiftField {
                     int index = gz * side + gx;
                     value[index] = demand;
                     sourceDemand[index] = demand;
+                    sourceDistance[index] = 0.0F;
                     locked[index] = true;
                     DEMAND_CELLS.incrementAndGet();
+                    if (demand > 0) {
+                        POSITIVE_DEMAND_CELLS.incrementAndGet();
+                        MAX_DEMAND.accumulateAndGet(demand, Math::max);
+                    }
                 }
             }
         } finally {
@@ -463,7 +508,8 @@ public final class CityShiftField {
         long roleNanos = System.nanoTime() - phaseStarted;
 
         phaseStarted = System.nanoTime();
-        int sweeps = boundedGradientTransform(value, sourceDemand, locked, step, side);
+        int sweeps = boundedGradientTransform(value, sourceDemand, sourceDistance, locked, step, side,
+            BLEND_WIDTH_BLOCKS);
         SWEEPS.addAndGet(sweeps);
         if (sweeps >= MAX_SWEEPS) {
             UNCONVERGED.incrementAndGet();
@@ -483,6 +529,15 @@ public final class CityShiftField {
                     owned[localZ * REGION_SIDE + localX] = 0.0F;
                     continue;
                 }
+                double distance = sourceDistance[index];
+                if (Double.isFinite(distance) && BLEND_WIDTH_BLOCKS > 0) {
+                    double normalized = Mth.clamp(distance / BLEND_WIDTH_BLOCKS, 0.0D, 1.0D);
+                    normalized = Math.pow(normalized, BLEND_SOFTNESS);
+                    double fade = normalized * normalized * (3.0D - 2.0D * normalized);
+                    shift *= 1.0D - fade;
+                }
+                POSITIVE_OWNED_CELLS.incrementAndGet();
+                MAX_OWNED_SHIFT.accumulateAndGet((int) Math.ceil(shift), Math::max);
                 if (strength > 0.0D && !locked[index] && sourceDemand[index] > 1.0F) {
                     double t = Mth.clamp(shift / sourceDemand[index], 0.0D, 1.0D);
                     double alpha = strength * 4.0D * t * (1.0D - t);
@@ -499,14 +554,13 @@ public final class CityShiftField {
     }
 
     private static void yieldToWorldgen() {
-        while (LostCitiesGenerationLocks.activeHolders() > 0
-            || LostCitiesGenerationLocks.nanosSinceActivity() < WORLDGEN_QUIET_NANOS) {
-            try {
-                Thread.sleep(2L);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw new CancellationException("Shift field build interrupted");
-            }
+        /* The region future is now joined by the caller. Waiting here for a
+         * Lost Cities feature lock would deadlock when that feature asks the
+         * late floor bridge for the same region. The role/BuildingInfo caches
+         * are concurrent; give an active worker a scheduling hint without an
+         * unbounded quiet-period delay on every lattice sample. */
+        if (LostCitiesGenerationLocks.activeHolders() > 0) {
+            Thread.yield();
         }
     }
 
@@ -515,7 +569,26 @@ public final class CityShiftField {
                                         boolean[] locked,
                                         float[] step,
                                         int side) {
+        float[] sourceDistance = new float[value.length];
+        Arrays.fill(sourceDistance, Float.POSITIVE_INFINITY);
+        for (int i = 0; i < locked.length; i++) {
+            if (locked[i]) {
+                sourceDistance[i] = 0.0F;
+            }
+        }
+        return boundedGradientTransform(value, sourceDemand, sourceDistance, locked, step, side,
+            BLEND_WIDTH_BLOCKS);
+    }
+
+    static int boundedGradientTransform(float[] value,
+                                        float[] sourceDemand,
+                                        float[] sourceDistance,
+                                        boolean[] locked,
+                                        float[] step,
+                                        int side,
+                                        int blendWidthBlocks) {
         final float epsilon = 1.0E-4F;
+        final float maxDistance = Math.max(8.0F, blendWidthBlocks);
         for (int sweep = 1; sweep <= MAX_SWEEPS; sweep++) {
             boolean changed = false;
             boolean forward = (sweep & 1) == 1;
@@ -525,9 +598,15 @@ public final class CityShiftField {
             for (int z = start; z != end; z += delta) {
                 for (int x = start; x != end; x += delta) {
                     int i = z * side + x;
-                    if (locked[i]) {
-                        continue;
-                    }
+                    /* Source demands are lower bounds, not hard walls.  The
+                     * previous pass skipped every source cell here, so two
+                     * neighbouring city cells could retain unrelated
+                     * height-derived demands (for example 30 next to 0) even
+                     * though the transition solver had a slope budget.  Let
+                     * the same bounded envelope raise the lower source while
+                     * never lowering its own demand.  The locked bit remains
+                     * useful to keep relief correction off the authoritative
+                     * source cells below. */
                     float best = value[i];
                     float bestDemand = sourceDemand[i];
                     for (int dz = -1; dz <= 1; dz++) {
@@ -544,15 +623,32 @@ public final class CityShiftField {
                             if (value[n] == Float.NEGATIVE_INFINITY) {
                                 continue;
                             }
+                            float neighbourDistance = sourceDistance[n];
+                            if (!Float.isFinite(neighbourDistance)) {
+                                continue;
+                            }
+                            float distanceCost = (dx != 0 && dz != 0)
+                                ? (float) (16.0D * SQRT2)
+                                : 16.0F;
+                            float candidateDistance = neighbourDistance + distanceCost;
+                            if (candidateDistance > maxDistance + epsilon) {
+                                continue;
+                            }
                             float mean = 0.5F * (step[i] + step[n]);
                             float cost = (dx != 0 && dz != 0) ? (float) (mean * SQRT2) : mean;
                             float candidate = value[n] - cost;
                             if (candidate > best + epsilon) {
                                 best = candidate;
                                 bestDemand = sourceDemand[n];
+                                if (!locked[i]) {
+                                    sourceDistance[i] = candidateDistance;
+                                }
                             } else if (candidate > best - epsilon && sourceDemand[n] > bestDemand) {
                                 best = Math.max(best, candidate);
                                 bestDemand = sourceDemand[n];
+                                if (!locked[i]) {
+                                    sourceDistance[i] = Math.min(sourceDistance[i], candidateDistance);
+                                }
                             }
                         }
                     }
@@ -687,6 +783,9 @@ public final class CityShiftField {
             }
             int naturalHeight = Integer.MIN_VALUE;
             if (city) {
+                /* Keep the role lattice nonblocking. A cold exact heightmap
+                 * lookup recursively re-enters Lost Cities generation and can
+                 * leave the async builder stuck for tens of seconds. */
                 naturalHeight = roleHeight(context, chunkX, chunkZ);
                 boolean elevated = naturalHeight
                     >= profile.GROUNDLEVEL + MountainCityReservationPlanner.MIN_RISE;
