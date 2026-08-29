@@ -24,23 +24,12 @@ import java.util.function.Supplier;
  * Audited branch kernel for Lost Cities' natural height query.
  *
  * Lost Cities rebuilds its private NoiseChunkOpt graph for every sampled
- * column. Minecraft already keeps the same density graph compiled inside the
- * active ChunkGenerator. This kernel routes the LC-only height branch through
- * that resident graph after proving it against LC's exact result for the
- * current world lifecycle. A single mismatch shuts the fast branch off and
- * returns the exact LC value, so terrain meaning cannot silently drift :]
+ * column. This kernel can reuse Minecraft's active graph after an audit; any
+ * mismatch disables the shortcut for the current world.
  */
 public final class LostCitiesHeightBranchKernel {
     private static final Logger LOGGER = LogUtils.getLogger();
-    /*
-     * The resident ChunkGenerator shortcut is only an optimisation.  It is
-     * not the Lost Cities heightmap implementation: live audits have found
-     * coordinates where its base height differs from generateHeightmap().
-     * A wrong boundary height is amplified by Lost Cities' terrain correction
-     * into an open underground slab, so correctness must win by default.
-     * Keep the switch available for isolated experiments, but ship the exact
-     * path unless an operator explicitly opts in.
-     */
+    /* The shortcut is opt-in. Keep the exact Lost Cities path by default. */
     private static final boolean ENABLED = Boolean.parseBoolean(
         System.getProperty("lc2h.heightBranch.enabled", "false")
     );
@@ -93,9 +82,7 @@ public final class LostCitiesHeightBranchKernel {
             if (reservation < REQUIRED_AUDITS) {
                 initialAudit = true;
             } else {
-                // Audit work is proof, not a chunk dependency. Cold worldgen
-                // keeps using the equivalent resident branch while the tiny
-                // proof set runs at low priority instead of parking workers.
+                // Audits run at low priority and do not gate chunk generation.
                 state.branchHits.incrementAndGet();
                 return branch;
             }
@@ -108,7 +95,7 @@ public final class LostCitiesHeightBranchKernel {
         try {
             AUDITOR.execute(() -> audit(scope, state, plan, branch, exactCalculation));
         } catch (RuntimeException ignored) {
-            // A saturated audit queue must never become chunk backpressure.
+            // A full audit queue must not delay chunk generation.
         }
         state.branchHits.incrementAndGet();
         return branch;
@@ -137,9 +124,7 @@ public final class LostCitiesHeightBranchKernel {
         NaturalHeightSampler.LevelSampler sampler = NaturalHeightSampler.forLevel(world);
         int height;
         if (sampler != null) {
-            // The city shaper and LC height branch ask Minecraft for the same
-            // centre column. Share the exact single flight instead of opening
-            // the density graph twice for one chunk :]
+            // Share the sampled centre column with the city shaper.
             height = sampler.chunkHeight(plan.sampler().chunkX(), plan.sampler().chunkZ());
         } else {
             ServerChunkCache source = world.getLevel().getChunkSource();

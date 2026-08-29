@@ -31,6 +31,7 @@ import org.admany.lc2h.dev.diagnostics.BuildingInfoDiagnostics;
 import org.admany.lc2h.worldgen.async.planner.AsyncMultiChunkPlanner;
 import org.admany.lc2h.worldgen.terrain.MountainCityReservationPlanner;
 import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
+import org.admany.lc2h.worldgen.lostcities.LostCitiesGuiPreviewGuard;
 import org.admany.lc2h.worldgen.lostcities.MultiBuildingFootprintRegistry;
 import org.admany.lc2h.worldgen.lostcities.MultiChunkBoundaryRegistry;
 import org.admany.lc2h.worldgen.lostcities.PlannerHotPath;
@@ -911,6 +912,9 @@ public abstract class MixinBuildingInfo {
     /** Uses the concurrent GUI characteristics cache without a global lock. */
     @Overwrite
     public static LostChunkCharacteristics getChunkCharacteristicsGui(ChunkCoord key, IDimensionInfo provider) {
+        if (key == null || provider == null) {
+            return new LostChunkCharacteristics();
+        }
         BuildingInfoCacheScope scope = lc2h$scope(provider);
         LostChunkCharacteristics cached = scope.cityInfo.get(key);
         if (cached != null) {
@@ -926,6 +930,11 @@ public abstract class MixinBuildingInfo {
         int chunkX = key.chunkX();
         int chunkZ = key.chunkZ();
         LostCityProfile profile = getProfile(key, provider);
+        if (LostCitiesGuiPreviewGuard.shouldDefer(provider, profile, key, "city")) {
+            // Limit cold preview lookups to a bounded batch. Do not cache the
+            // temporary empty result.
+            return new LostChunkCharacteristics();
+        }
         String cityInfoDiskKey = scopedCacheKey(LC2H_CITY_INFO_DISK_NAMESPACE + "_gui", key, provider, profile);
         if (!PlannerHotPath.isActive()) {
             LostChunkCharacteristics disk = LostCitiesCacheBridge.getDisk(LC2H_CITY_INFO_DISK_NAMESPACE + "_gui", cityInfoDiskKey, LostChunkCharacteristics.class);

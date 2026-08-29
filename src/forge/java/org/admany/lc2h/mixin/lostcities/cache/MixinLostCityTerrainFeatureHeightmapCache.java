@@ -35,14 +35,7 @@ public abstract class MixinLostCityTerrainFeatureHeightmapCache {
     private static final LostCitiesCacheBudgetManager.CacheGroup LC2H_HEIGHTMAP_BUDGET =
         LostCitiesCacheBudgetManager.register("lc_heightmap", 2048, 256, ignored -> false);
 
-    /**
-     * Lost Cities 7.5 calculates a cache miss while holding the feature monitor. Vanilla height sampling can
-     * take seconds, so unrelated chunks end up queued behind one worker. Keep the exact sampling rules, but
-     * run one calculation per sampled coordinate outside every cache and feature lock :]
-     *
-     * @author Admany
-     * @reason Exact async single flight heightmaps without the global LostCityTerrainFeature monitor
-     */
+    /** Calculate a heightmap outside Lost Cities' feature monitor. */
     @Overwrite
     public ChunkHeightmap getHeightmap(ChunkCoord chunk, @Nonnull WorldGenLevel world) {
         ChunkHeightmap local = cachedHeightmaps.get(chunk);

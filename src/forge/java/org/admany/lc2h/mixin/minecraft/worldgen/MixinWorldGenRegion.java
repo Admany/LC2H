@@ -40,6 +40,12 @@ public class MixinWorldGenRegion {
                 return;
             }
             WorldGenRegion region = (WorldGenRegion)(Object)this;
+            // Do not let a late cross-chunk clear erase a protected tree block.
+            if (state != null && state.isAir()
+                && ChunkPostProcessor.shouldPreventTreeAirOverwrite(region, pos, state)) {
+                cir.setReturnValue(false);
+                return;
+            }
             if (SeamOwnershipJournal.deferCrossChunkWrite(region, pos, state, flags)) {
                 cir.setReturnValue(false);
                 return;

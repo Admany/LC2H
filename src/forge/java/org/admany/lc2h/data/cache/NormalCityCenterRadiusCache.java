@@ -94,13 +94,8 @@ public final class NormalCityCenterRadiusCache {
     private static long tileKey(int chunkX, int chunkZ) {
         int tileX = Math.floorDiv(chunkX, TILE_SIDE);
         int tileZ = Math.floorDiv(chunkZ, TILE_SIDE);
-        /*
-         * Long.hashCode folds both halves together. Raw packed x/z keys make
-         * every diagonal land in the same ConcurrentHashMap bucket, which is
-         * exactly why cold city planning ended up inside TreeBin scans. Mix
-         * the packed coordinate with a bijection so identity stays exact but
-         * the map gets a properly distributed hash :]
-         */
+        /* Mix packed coordinates so neighbouring tiles distribute across the
+         * ConcurrentHashMap buckets. */
         return PackedCoordinateKey.of(tileX, tileZ);
     }
 

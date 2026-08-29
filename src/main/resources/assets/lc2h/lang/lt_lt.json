@@ -1,4 +1,4 @@
-﻿{
+{
     "lc2h.chat.prefix": "[LC2H] ",
     "lc2h.ui.warning": "ĮSPĖJIMAS:",
     "lc2h.ui.enabled": "Įjungta",
@@ -46,8 +46,8 @@
     "lc2h.config.option.debug_logging.desc": "Įjungia papildomus derinimo log'us (gali būti triukšminga).",
     "lc2h.config.option.ui_accent_color.title": "Sąsajos akcento spalva (Hex)",
     "lc2h.config.option.ui_accent_color.desc": "Akcento spalva LC2H konfigūracijos sąsajoje (hex, pavyzdys: 3A86FF).",
-    "lc2h.config.option.city_blend_enabled.title": "Įjungti miesto suliejimą [EKSPERIMENTINIS]",
-    "lc2h.config.option.city_blend_enabled.desc": "Sulieja miesto kraštus su aplinkiniais žemės paviršiais, kad sumažintų aštrius kraštus.",
+    "lc2h.config.option.city_blend_enabled.title": "Reljefo išlyginimas",
+    "lc2h.config.option.city_blend_enabled.desc": "Išlygina kalvas ir kalnus prie miestų, kad jie atrodytų natūraliai ir nesibaigtų milžiniškomis lygiomis sienomis. Įjungta pagal numatymą, bet galima išjungti.",
     "lc2h.config.option.city_blend_clear_trees.title": "Išvalyti medžius prie miesto ribos",
     "lc2h.config.option.city_blend_clear_trees.desc": "Išvalo medžius prie miesto ribos švaresniam perėjimui.",
     "lc2h.config.option.city_blend_tree_seam_fix.title": "Prevent Half-Trees At City Seam",

@@ -18,10 +18,7 @@ public final class TreeCapturePolicy {
     private static final LongAdder REJECTED_UNDERGROUND_RAIL_ROOT = new LongAdder();
     private static final LongAdder CAPTURED_BOUNDARY = new LongAdder();
     private static final LongAdder TOTAL_TIME_NS = new LongAdder();
-    /* Vanilla tree canopies are handled by the feature's captured block list;
-     * the pre-feature policy only needs to protect an actual seam.  A broad
-     * 16-block scan classified ordinary forest roots as seam trees and left
-     * the world with trunks/branches but no leaves after replay. */
+    /* The pre-feature check only protects trees that reach an LC seam. */
     private static final int DEFAULT_TREE_FOOTPRINT_RADIUS_BLOCKS = Math.max(4,
         Math.min(16, Integer.getInteger("lc2h.treeSafety.defaultFootprintBlocks", 8)));
 
@@ -46,14 +43,7 @@ public final class TreeCapturePolicy {
         return decideAt(level, origin, 0);
     }
 
-    /**
-     * Resolve the one decision that can be made safely before a feature runs:
-     * a tree rooted in an LC-owned chunk must not generate.  A tree rooted in a
-     * normal chunk is left to its owning feature.  We deliberately do not
-     * capture a broad "halo" here: at this point the feature has not disclosed
-     * its final footprint, and replaying every nearby tree caused normal
-     * vegetation to be deferred, cut, or stranded during city generation.
-     */
+    /** Decide whether a tree needs seam capture before its feature runs. */
     public static Decision decideAt(ServerLevel level, BlockPos origin, int minimumCaptureRadiusBlocks) {
         long startedNs = System.nanoTime();
         try {
@@ -98,11 +88,7 @@ public final class TreeCapturePolicy {
             return Decision.REJECT;
         }
 
-        // Capture a bounded footprint around the root. The previous 1-4 block
-        // edge test allowed an ordinary tree canopy to cross a building
-        // cutoff after its root had already passed through. The radius is
-        // still small for vanilla trees and keeps the larger BOP radius only
-        // for BOP's known wide canopies.
+        // Capture only when the estimated footprint reaches an LC-owned chunk.
         int footprintRadius = minimumCaptureRadiusBlocks > 0
             ? Math.min(64, minimumCaptureRadiusBlocks)
             : DEFAULT_TREE_FOOTPRINT_RADIUS_BLOCKS;

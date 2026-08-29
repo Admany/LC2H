@@ -1,6 +1,7 @@
 package org.admany.lc2h.worldgen.lostcities;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
@@ -27,11 +28,12 @@ import org.admany.lc2h.worldgen.apply.ShadowBlockMutationApplier;
 import mcjty.lostcities.setup.Registration;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
+import net.minecraftforge.registries.ForgeRegistries;
 
 import java.util.HashSet;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Optional;
@@ -46,17 +48,18 @@ public final class DeferredTreeEventHandler {
     private static final int MAX_READY_ENQUEUES_PER_CHUNK_LOAD = 8;
     private static final int MAX_READY_SWEEP_PROMOTIONS_PER_TICK = Math.max(8,
         Integer.getInteger("lc2h.treeReplay.maxReadySweepPromotionsPerTick", 32));
+    // Keep replay work bounded per tick.
     private static final int MAX_REPLAYS_PER_SERVER_TICK = Math.max(1,
-        Integer.getInteger("lc2h.treeReplay.maxReplaysPerTick", 2));
+        Integer.getInteger("lc2h.treeReplay.maxReplaysPerTick", 6));
     private static final int MAX_REPLAY_BLOCKS_PER_SERVER_TICK = Math.max(128,
-        Integer.getInteger("lc2h.treeReplay.maxBlocksPerTick", 1024));
-    // A single captured BOP tree can contain thousands of blocks.  Keep each
-    // server-thread apply unit comfortably below the shadow drain budget so a
-    // tree can never monopolise a tick just because it crossed a chunk edge.
+        Integer.getInteger("lc2h.treeReplay.maxBlocksPerTick", 4096));
+    // Split large captured trees into small server-thread batches.
     private static final int MAX_CAPTURED_TREE_PLAN_BLOCKS = Math.max(32,
-        Integer.getInteger("lc2h.treeReplay.maxPlanBlocks", 96));
-    private static final int MAX_CAPTURED_TREE_BLOCKS = 4096;
-    private static final int MAX_CAPTURED_TREE_HEIGHT = 96;
+        Integer.getInteger("lc2h.treeReplay.maxPlanBlocks", 384));
+    private static final int MAX_CAPTURED_TREE_BLOCKS = Math.max(4096,
+        Integer.getInteger("lc2h.treeReplay.maxCapturedTreeBlocks", 16_384));
+    private static final int MAX_CAPTURED_TREE_HEIGHT = Math.max(96,
+        Integer.getInteger("lc2h.treeReplay.maxCapturedTreeHeight", 192));
     private static final boolean ENABLE_LEGACY_TREE_REPLAY_FALLBACK =
         Boolean.parseBoolean(System.getProperty("lc2h.treeReplay.legacyFallback", "false"));
     private static final AtomicInteger CHUNK_LOAD_REPLAY_SUPPRESSIONS = new AtomicInteger(0);
@@ -217,7 +220,7 @@ public final class DeferredTreeEventHandler {
         }
         if (!level.isLoaded(pending.pos())) {
             // Retry later if this position unloaded between readiness check and replay.
-            DeferredTreeQueue.requeue(pending);
+            DeferredTreeQueue.requeueAndRelease(pending);
             return 0;
         }
 
@@ -281,34 +284,24 @@ public final class DeferredTreeEventHandler {
             TreeCompatTracker.recordFallback(TreeCompatTracker.FallbackReason.ROOT_REJECTED);
             return 0;
         }
-        if (hasConflictingTreeAtTarget(level, pending, replayPlan)) {
+        if (!hasLoadedConflictWindow(level, pending, replayPlan)) {
+            // Wait until every touched chunk is loaded before replaying a tree.
+            DeferredTreeQueue.requeueAndRelease(pending);
+            TreeCompatTracker.recordFallback(TreeCompatTracker.FallbackReason.UNLOADED_DESTINATION);
+            return 0;
+        }
+        if (hasConflictingTreeAtTarget(level, pending, replayPlan)
+            || hasProtectedCityConflict(level, pending)) {
             DeferredTreeChunkRetainer.release(pending);
             CAPTURED_TREES_DROPPED_OVERLAP.incrementAndGet();
             TreeCompatTracker.recordFallback(TreeCompatTracker.FallbackReason.OVERLAP_REJECTED);
             return 0;
         }
-        // Enqueue only blocks whose destination chunk is loaded right now.
-        //
-        // This used to be an all-or-nothing precheck that requeued the WHOLE
-        // tree if any single block was in an unloaded chunk. Once full
-        // canopies were kept, trees span more chunks, so at a worldgen
-        // frontier that condition is often permanently true: the plan was
-        // re-queued forever (missingChunkRetries climbing into the tens of
-        // thousands with entries stuck for minutes) and the tree never
-        // landed at all - the same visual truncation, one stage later.
-        // Placing the loaded part immediately puts the tree in the world.
-        // an unloaded fringe block is not worth stalling the whole tree.
+        // The applier budgets each destination chunk, so a replay can span ticks.
         LinkedHashMap<ChunkCoord, ChunkShadowMutationPlan.Builder> plans = new LinkedHashMap<>();
-        List<DeferredTreeQueue.CapturedBlock> unloadedBlocks = new ArrayList<>();
         int queued = 0;
-        int unloadedSkipped = 0;
         for (DeferredTreeQueue.CapturedBlock block : pending.blocks()) {
             if (block == null || block.pos() == null || block.state() == null) {
-                continue;
-            }
-            if (level.getChunkSource().getChunkNow(block.pos().getX() >> 4, block.pos().getZ() >> 4) == null) {
-                unloadedBlocks.add(block);
-                unloadedSkipped++;
                 continue;
             }
             if (shouldApplyCapturedBlock(level, block.pos(), block.state(), replayPlan)) {
@@ -318,14 +311,6 @@ public final class DeferredTreeEventHandler {
                     .add(block.pos(), block.state(), TREE_CAPTURE_SET_FLAGS, true);
                 queued++;
             }
-        }
-        if (unloadedSkipped > 0) {
-            TreeCompatTracker.recordFallback(TreeCompatTracker.FallbackReason.UNLOADED_DESTINATION);
-            // Do not silently discard the fringe. Requeue only the blocks
-            // whose destination raced out of the loaded window; the already
-            // queued part can apply immediately while this subset waits for
-            // its chunk to return.
-            DeferredTreeQueue.requeue(pending.capturedSubset(unloadedBlocks));
         }
 
         if (queued == 0) {
@@ -337,12 +322,7 @@ public final class DeferredTreeEventHandler {
         TreeCompatTracker.recordApplied(pending.source());
         for (ChunkShadowMutationPlan.Builder builder : plans.values()) {
             try {
-                // Do not retain a captured tree as one cross-chunk mutation
-                // transaction.  That bypassed the applier's per-tick budget
-                // and made a single replay synchronously write every leaf and
-                // log it captured.  Tree support is checked per entry, so safe
-                // bounded chunk slices preserve deterministic placement while
-                // allowing unloaded boundary decorations to retry normally.
+                // Queue bounded slices so one large tree cannot monopolize a tick.
                 ChunkShadowMutationPlan plan = builder.build().withoutTransaction();
                 for (int offset = 0; offset < plan.size(); offset += MAX_CAPTURED_TREE_PLAN_BLOCKS) {
                     ShadowBlockMutationApplier.enqueueDeferred(plan.slice(offset, MAX_CAPTURED_TREE_PLAN_BLOCKS));
@@ -369,16 +349,14 @@ public final class DeferredTreeEventHandler {
         if (level == null || pending == null || pending.pos() == null || replayPlan == null) {
             return false;
         }
-        BlockPos root = pending.pos();
-        int minChunkX = (root.getX() - 3) >> 4;
-        int maxChunkX = (root.getX() + 3) >> 4;
-        int minChunkZ = (root.getZ() - 3) >> 4;
-        int maxChunkZ = (root.getZ() + 3) >> 4;
-        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
-            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
-                if (level.getChunkSource().getChunkNow(chunkX, chunkZ) == null) {
-                    return false;
-                }
+        // Recheck the small touched-chunk set before walking every captured block.
+        long[] touchedChunks = pending.touchedChunks();
+        if (touchedChunks == null || touchedChunks.length == 0) {
+            return false;
+        }
+        for (long chunkKey : touchedChunks) {
+            if (level.getChunkSource().getChunkNow(ChunkPos.getX(chunkKey), ChunkPos.getZ(chunkKey)) == null) {
+                return false;
             }
         }
         return true;
@@ -392,15 +370,10 @@ public final class DeferredTreeEventHandler {
             return false;
         }
 
-        boolean plannedLog = planned.is(BlockTags.LOGS);
-        boolean plannedLeaves = planned.is(BlockTags.LEAVES);
-        // Logs and leaves come straight from the capture of the real feature
-        // run, so they ARE the tree by definition - re-deriving membership
-        // from a guessed radius truncated wide canopies (a large BOP spruce
-        // has leaves further from any trunk column than the old 6/4 window
-        // allowed), which is what made replayed trees look chopped. Only
-        // non-tree incidentals still need a proximity sanity check, since
-        // those can legitimately be unrelated blocks caught by the capture.
+        boolean plannedLog = isTreeLogLike(planned);
+        boolean plannedLeaves = isTreeLeafLike(planned);
+        // Captured logs and leaves are already part of the feature. Only other
+        // blocks need a proximity check to a captured log.
         if (!plannedLog && !plannedLeaves && !replayPlan.nearLog(pos, 6, 4)) {
             return false;
         }
@@ -413,26 +386,88 @@ public final class DeferredTreeEventHandler {
             return true;
         }
 
-        boolean existingTreeish = existing.is(BlockTags.LOGS) || existing.is(BlockTags.LEAVES);
+        boolean existingTreeish = isTreeBlockLike(existing);
         if (existingTreeish) {
             if (plannedLog) {
-                return existing.is(BlockTags.LEAVES);
+                return isTreeLeafLike(existing);
             }
             if (plannedLeaves) {
-                return existing.is(BlockTags.LEAVES);
+                return isTreeLeafLike(existing);
             }
             return false;
         }
 
-        // Solid, non-tree terrain sits here. A live (non-deferred) tree
-        // placement never checks this - vanilla TreeFeature happily punches
-        // a trunk through a hillside on a slope - so refusing to overwrite
-        // it here truncated trunks wherever a captured tree's home chunk
-        // (never touched by Lost Cities) simply had ordinary terrain in the
-        // way. The only real reason to refuse is protecting an LC building
-        // that was built, after capture, in a neighboring city chunk the
-        // tree's canopy spilled into - so only enforce it there.
+        // Preserve ordinary terrain in the source chunk. Only protect blocks
+        // owned by a Lost Cities structure.
         return !isLostCityOwnedChunk(level, pos);
+    }
+
+    /** Match common wood and foliage names for mods without vanilla tags. */
+    private static boolean isTreeLogLike(BlockState state) {
+        if (state == null) {
+            return false;
+        }
+        if (state.is(BlockTags.LOGS)) {
+            return true;
+        }
+        String path = registryPath(state);
+        return path.contains("log")
+            || path.contains("trunk")
+            || path.contains("stem")
+            || path.contains("branch")
+            || path.contains("bark")
+            || path.endsWith("_wood")
+            || path.equals("wood");
+    }
+
+    private static boolean isTreeLeafLike(BlockState state) {
+        if (state == null) {
+            return false;
+        }
+        if (state.is(BlockTags.LEAVES)) {
+            return true;
+        }
+        String path = registryPath(state);
+        return path.contains("leaves")
+            || path.contains("leaf")
+            || path.contains("foliage")
+            || path.contains("needles")
+            || path.contains("frond");
+    }
+
+    private static boolean isTreeBlockLike(BlockState state) {
+        return isTreeLogLike(state) || isTreeLeafLike(state);
+    }
+
+    private static String registryPath(BlockState state) {
+        try {
+            ResourceLocation key = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+            return key == null ? "" : key.getPath().toLowerCase(java.util.Locale.ROOT);
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static boolean hasProtectedCityConflict(ServerLevel level,
+                                                     DeferredTreeQueue.PendingTree pending) {
+        if (level == null || pending == null || pending.blocks() == null) {
+            return false;
+        }
+        for (DeferredTreeQueue.CapturedBlock block : pending.blocks()) {
+            if (block == null || block.pos() == null || block.state() == null
+                || !isTreeLogLike(block.state())) {
+                continue;
+            }
+            BlockState existing = getLoadedState(level, block.pos());
+            if (existing == null || existing.equals(block.state())
+                || existing.isAir() || existing.canBeReplaced() || isTreeBlockLike(existing)) {
+                continue;
+            }
+            if (isLostCityOwnedChunk(level, block.pos())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean isLostCityOwnedChunk(ServerLevel level, BlockPos pos) {
@@ -468,7 +503,7 @@ public final class DeferredTreeEventHandler {
         if (below == null || below.isAir() || below.canBeReplaced()) {
             return false;
         }
-        if (below.is(BlockTags.LOGS) || below.is(BlockTags.LEAVES)) {
+        if (isTreeBlockLike(below)) {
             return false;
         }
         return below.is(BlockTags.DIRT) || below.isCollisionShapeFullBlock(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
@@ -556,21 +591,16 @@ public final class DeferredTreeEventHandler {
         if (level == null || pending == null || pending.pos() == null || replayPlan == null) {
             return false;
         }
-        if (!hasLoadedConflictWindow(level, pending, replayPlan)) {
-            DeferredTreeQueue.requeue(pending);
-            TreeCompatTracker.recordFallback(TreeCompatTracker.FallbackReason.UNLOADED_DESTINATION);
-            return false;
-        }
         for (DeferredTreeQueue.CapturedBlock block : pending.blocks()) {
             if (block == null || block.pos() == null || block.state() == null) {
                 continue;
             }
-            if (!block.state().is(BlockTags.LOGS)) {
+            if (!isTreeLogLike(block.state())) {
                 continue;
             }
             BlockState existing = getLoadedState(level, block.pos());
             if (existing != null
-                && existing.is(BlockTags.LOGS)
+                && isTreeLogLike(existing)
                 && !replayPlan.containsLog(block.pos())) {
                 return true;
             }
@@ -590,7 +620,7 @@ public final class DeferredTreeEventHandler {
                         continue;
                     }
                     BlockState existing = getLoadedState(level, cursor);
-                    if (existing != null && existing.is(BlockTags.LOGS)) {
+                    if (existing != null && isTreeLogLike(existing)) {
                         return true;
                     }
                 }
@@ -645,7 +675,7 @@ public final class DeferredTreeEventHandler {
                 }
                 captured.add(block.pos().asLong());
                 maxY = Math.max(maxY, block.pos().getY());
-                if (block.state().is(BlockTags.LOGS)) {
+                if (isTreeLogLike(block.state())) {
                     logs.add(block.pos().asLong());
                     logCount++;
                     minLogY = Math.min(minLogY, block.pos().getY());

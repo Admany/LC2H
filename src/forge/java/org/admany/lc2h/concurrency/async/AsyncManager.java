@@ -257,7 +257,7 @@ public class AsyncManager {
 
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent event) {
-        // Remember a live server instance for fast path main thread scheduling, reducing reliance on tick END draining, aka no bottleneck there :].
+        // Keep the live server reference so queued work can use the main-thread path.
         serverRef = event.getServer();
 
         if (event.phase != TickEvent.Phase.END) {

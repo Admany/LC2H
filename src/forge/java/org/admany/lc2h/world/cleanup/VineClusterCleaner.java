@@ -5,12 +5,16 @@ import mcjty.lostcities.worldgen.IDimensionInfo;
 import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.SectionPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.level.ChunkEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
@@ -21,6 +25,7 @@ import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.admany.lc2h.data.cache.FeatureCache;
 import org.admany.lc2h.runtime.Lc2hRuntimeModes;
+import org.admany.lc2h.util.server.ServerRescheduler;
 import org.admany.lc2h.util.server.ServerTickLoad;
 import org.admany.quantified.api.QuantifiedAPI;
 import org.admany.lc2h.concurrency.async.Priority;
@@ -46,6 +51,7 @@ import java.util.concurrent.atomic.LongAdder;
 @Mod.EventBusSubscriber(modid = LC2H.MODID)
 public final class VineClusterCleaner {
     private enum AttachmentFamily {
+        NONE,
         VINE,
         CAVE_VINES,
         TWISTING_VINES,
@@ -58,14 +64,17 @@ public final class VineClusterCleaner {
     private static volatile boolean initialized = false;
     private static volatile boolean shutdown = false;
 
-    private static final int COMPONENT_LIMIT = 2048;
+    /* Bound a single connected component without marking a partial walk clean. */
+    private static final int COMPONENT_LIMIT = Math.max(2048,
+        Integer.getInteger("lc2h.vine.component_limit", 16_384));
     private static final int MAX_CHUNKS_PER_SCAN = 64;
     private static final int MAX_REMOVALS_PER_TICK = Math.max(16, Integer.getInteger("lc2h.vine.max_removals_per_tick", 128));
     private static final long MIN_RESCAN_INTERVAL_MS = 15_000L;
+    /* Initial queue capacity. The limit above controls the actual walk. */
     private static final int VINE_SCAN_BATCH_SIZE = Math.max(512, Integer.getInteger("lc2h.vine.scan_batch_size", 2048));
     // Bump when the scan candidate set changes; old cache entries may have
     // marked a chunk complete before configurable lichen/frost support.
-    private static final int VINE_SCAN_CACHE_VERSION = 4;
+    private static final int VINE_SCAN_CACHE_VERSION = 5;
 
     private static final Map<ResourceKey<net.minecraft.world.level.Level>, Integer> CHUNK_CURSOR = new ConcurrentHashMap<>();
     private static final Map<ResourceKey<net.minecraft.world.level.Level>, Map<Long, Long>> LAST_SCAN = new ConcurrentHashMap<>();
@@ -74,11 +83,25 @@ public final class VineClusterCleaner {
     private static final long SNAPSHOT_TTL_NS = TimeUnit.SECONDS.toNanos(Long.getLong("lc2h.vine.snapshot_ttl_seconds", 5L));
     private static final int MAX_IN_FLIGHT = Math.max(1, Integer.getInteger("lc2h.vine.max_in_flight", 16));
     private static final AtomicInteger IN_FLIGHT = new AtomicInteger(0);
+    private record ScanKey(ResourceKey<net.minecraft.world.level.Level> dimension, long chunkKey) {
+    }
+    private static final Set<ScanKey> IN_FLIGHT_CHUNKS = ConcurrentHashMap.newKeySet();
+    private static final ConcurrentHashMap<Block, AttachmentFamily> ATTACHMENT_FAMILY_CACHE = new ConcurrentHashMap<>();
+    private static volatile Set<String> ATTACHMENT_CACHE_CONFIG_IDS = Set.of();
     private static final AtomicBoolean SCAN_REQUESTED = new AtomicBoolean(false);
+    private static final AtomicBoolean SCAN_DISPATCHED = new AtomicBoolean(false);
     private static final LongAdder SCANS_SUBMITTED = new LongAdder();
     private static final LongAdder SCANS_COMPLETED = new LongAdder();
     private static final LongAdder SCAN_TIME_NS = new LongAdder();
+    private static final LongAdder SCAN_DISPATCHES = new LongAdder();
+    private static final LongAdder SCAN_PAUSES = new LongAdder();
+    private static final LongAdder SCAN_LEVELS = new LongAdder();
+    private static final LongAdder SCAN_LEVELS_WITH_INFO = new LongAdder();
+    private static final LongAdder SCAN_NO_DIM_INFO = new LongAdder();
+    private static final LongAdder SCAN_CHUNK_ATTEMPTS = new LongAdder();
+    private static final LongAdder SCAN_RELEVANT_CHUNKS = new LongAdder();
     private static volatile MinecraftServer LAST_SERVER;
+    private static volatile ScheduledExecutorService FALLBACK_SCHEDULER;
 
     private static final int REMOVAL_Y_OFFSET = 1024;
 
@@ -188,6 +211,7 @@ public final class VineClusterCleaner {
             t.setPriority(Thread.MIN_PRIORITY);
             return t;
         });
+        FALLBACK_SCHEDULER = fallbackScheduler;
         fallbackScheduler.scheduleAtFixedRate(() -> runTurboScan(server), SCAN_PERIOD_SECONDS, SCAN_PERIOD_SECONDS, TimeUnit.SECONDS);
         if (org.admany.lc2h.config.ConfigManager.ENABLE_DEBUG_LOGGING) {
             LC2H.LOGGER.info("[LC2H] VineClusterCleaner initialized with fallback scheduler (every {}s, auto-managed)", SCAN_PERIOD_SECONDS);
@@ -210,9 +234,6 @@ public final class VineClusterCleaner {
         }
 
         MinecraftServer server = level.getServer();
-        if (server != null && ServerTickLoad.shouldPauseNonCritical(server)) {
-            return;
-        }
 
         if (!initialized) {
             if (server != null) {
@@ -235,13 +256,9 @@ public final class VineClusterCleaner {
             return;
         }
 
-        String skipKey = vineSkipKey(level.dimension(), chunkPos.x, chunkPos.z);
-        if (FeatureCache.get(skipKey) != null) {
-            return;
-        }
-
         if (!isCleanupRelevantChunk(dimInfo, level.dimension(), chunkPos.x, chunkPos.z)) {
-            FeatureCache.put(skipKey, Boolean.TRUE);
+            // Do not cache a negative role result; the chunk may become a seam
+            // after Lost Cities finishes warming its caches.
             return;
         }
 
@@ -263,14 +280,40 @@ public final class VineClusterCleaner {
         }
         LAST_SERVER = server;
         SCAN_REQUESTED.set(true);
+        // Schedule a server tick as a fallback when the event hand-off is late.
+        dispatchScan(server);
+    }
+
+    private static void dispatchScan(MinecraftServer server) {
+        if (server == null || shutdown || !isAutomaticCleanupEnabled()
+            || !SCAN_DISPATCHED.compareAndSet(false, true)) {
+            return;
+        }
+        if (!SCAN_REQUESTED.compareAndSet(true, false)) {
+            SCAN_DISPATCHED.set(false);
+            return;
+        }
+        SCAN_DISPATCHES.increment();
+        try {
+            ServerRescheduler.runOnServer(() -> {
+                try {
+                    runTurboScanOnServerThread(server);
+                } catch (Throwable t) {
+                    LC2H.LOGGER.error("[LC2H] Failed to submit VineClusterCleaner scan", t);
+                } finally {
+                    SCAN_DISPATCHED.set(false);
+                }
+            });
+        } catch (Throwable t) {
+            SCAN_DISPATCHED.set(false);
+            SCAN_REQUESTED.set(true);
+            LC2H.LOGGER.error("[LC2H] Failed to dispatch VineClusterCleaner scan", t);
+        }
     }
 
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent event) {
         if (!isAutomaticCleanupEnabled() || shutdown || event.phase != TickEvent.Phase.END) {
-            return;
-        }
-        if (!SCAN_REQUESTED.compareAndSet(true, false)) {
             return;
         }
         MinecraftServer server = event.getServer();
@@ -280,11 +323,8 @@ public final class VineClusterCleaner {
         if (server == null) {
             return;
         }
-        try {
-            runTurboScanOnServerThread(server);
-        } catch (Throwable t) {
-            LC2H.LOGGER.error("[LC2H] Failed to submit VineClusterCleaner scan", t);
-        }
+        // dispatchScan owns the request state.
+        dispatchScan(server);
     }
 
     private static boolean startQuantifiedLoop(MinecraftServer server) {
@@ -324,19 +364,19 @@ public final class VineClusterCleaner {
                 return;
             }
 
-            // We never start a scan if the tick is already tight.
+            // Select a bounded set of loaded chunks before scanning off-thread.
             if (ServerTickLoad.shouldPauseNonCritical(server)) {
-                return;
+                SCAN_PAUSES.increment();
             }
 
             for (ServerLevel level : server.getAllLevels()) {
+                SCAN_LEVELS.increment();
                 IDimensionInfo dimInfo = getDimensionInfo(level);
                 if (dimInfo == null) {
+                    SCAN_NO_DIM_INFO.increment();
                     continue;
                 }
-                if (ServerTickLoad.shouldPauseNonCritical(server)) {
-                    break;
-                }
+                SCAN_LEVELS_WITH_INFO.increment();
                 long[] loaded = snapshotLoadedChunkKeys(level);
                 int size = loaded.length;
                 if (size <= 0) continue;
@@ -359,9 +399,6 @@ public final class VineClusterCleaner {
                 long now = System.currentTimeMillis();
 
                 while (attempts < size && processed < maxToProcess) {
-                    if (ServerTickLoad.shouldPauseNonCritical(server)) {
-                        break;
-                    }
                     long packedPos = loaded[cursor];
                     cursor++;
                     if (cursor >= size) cursor = 0;
@@ -375,6 +412,7 @@ public final class VineClusterCleaner {
 
                     int cx = ChunkPos.getX(packedPos);
                     int cz = ChunkPos.getZ(packedPos);
+                    SCAN_CHUNK_ATTEMPTS.increment();
                     LevelChunk chunk = level.getChunkSource().getChunkNow(cx, cz);
                     if (chunk == null) {
                         continue;
@@ -385,14 +423,10 @@ public final class VineClusterCleaner {
                         if (FeatureCache.get(cacheKey) != null) {
                             continue;
                         }
-                        String skipKey = vineSkipKey(level.dimension(), cx, cz);
-                        if (FeatureCache.get(skipKey) != null) {
-                            continue;
-                        }
                         if (!isCleanupRelevantChunk(dimInfo, level.dimension(), cx, cz)) {
-                            FeatureCache.put(skipKey, Boolean.TRUE);
                             continue;
                         }
+                        SCAN_RELEVANT_CHUNKS.increment();
                         if (scanChunkForVinesAsync(level, chunk)) {
                             processed++;
                             lastScanForLevel.put(chunkKey, now);
@@ -435,12 +469,20 @@ public final class VineClusterCleaner {
         if (!isAutomaticCleanupEnabled()) {
             return false;
         }
+        if (level == null || chunk == null) {
+            return false;
+        }
+        ScanKey scanKey = new ScanKey(level.dimension(), chunk.getPos().toLong());
+        // Avoid duplicate scans for the same chunk.
+        if (!IN_FLIGHT_CHUNKS.add(scanKey)) {
+            return false;
+        }
         if (!tryEnterScan()) {
+            IN_FLIGHT_CHUNKS.remove(scanKey);
             return false;
         }
 
         try {
-            SCANS_SUBMITTED.increment();
             AsyncManager.submitSupplier(
                 "vine_cleanup",
                 () -> {
@@ -453,17 +495,18 @@ public final class VineClusterCleaner {
                         SCAN_TIME_NS.add(System.nanoTime() - startedNs);
                         SCANS_COMPLETED.increment();
                         exitScan();
+                        IN_FLIGHT_CHUNKS.remove(scanKey);
                     }
                     return null;
                 },
                 Priority.LOW
             );
+            SCANS_SUBMITTED.increment();
             return true;
         } catch (Throwable ignored) {
         }
 
         try {
-            SCANS_SUBMITTED.increment();
             AsyncManager.submitSupplier(
                 "vine_cleanup_fallback",
                 () -> {
@@ -474,14 +517,17 @@ public final class VineClusterCleaner {
                         SCAN_TIME_NS.add(System.nanoTime() - startedNs);
                         SCANS_COMPLETED.increment();
                         exitScan();
+                        IN_FLIGHT_CHUNKS.remove(scanKey);
                     }
                     return null;
                 },
                 org.admany.lc2h.concurrency.async.Priority.LOW
             );
+            SCANS_SUBMITTED.increment();
             return true;
         } catch (Throwable t) {
             exitScan();
+            IN_FLIGHT_CHUNKS.remove(scanKey);
             return false;
         }
     }
@@ -498,14 +544,8 @@ public final class VineClusterCleaner {
                 return; 
             }
 
-            String skipKey = vineSkipKey(level.dimension(), chunkPos.x, chunkPos.z);
-            if (FeatureCache.get(skipKey) != null) {
-                return;
-            }
-
             IDimensionInfo dimInfo = getDimensionInfo(level);
-            if (dimInfo == null || !isCityChunk(dimInfo, level.dimension(), chunkPos.x, chunkPos.z)) {
-                FeatureCache.put(skipKey, Boolean.TRUE);
+            if (dimInfo == null || !isCleanupRelevantChunk(dimInfo, level.dimension(), chunkPos.x, chunkPos.z)) {
                 return;
             }
 
@@ -514,15 +554,22 @@ public final class VineClusterCleaner {
             int minY = level.getMinBuildHeight();
             int maxY = level.getMaxBuildHeight();
 
-            Set<BlockPos> vineStarts = collectVineStarts(chunk, baseX, baseZ, minY, maxY);
+            VineScanCandidates candidates = collectVineStarts(chunk, baseX, baseZ, minY, maxY);
+            Set<BlockPos> vineStarts = candidates.starts();
             if (vineStarts.isEmpty()) {
-                FeatureCache.put(cacheKey, Boolean.TRUE);
+                if (candidates.complete()) {
+                    FeatureCache.put(cacheKey, Boolean.TRUE);
+                }
                 return;
             }
 
-            processVineComponents(level, vineStarts);
-
-            FeatureCache.put(cacheKey, Boolean.TRUE);
+            // Only cache a completed walk. A partial read must be retried.
+            if (candidates.complete() && processVineComponents(level, vineStarts)) {
+                FeatureCache.put(cacheKey, Boolean.TRUE);
+            } else {
+                LC2H.LOGGER.debug("[LC2H] VineClusterCleaner retained incomplete scan for {},{}; it will retry",
+                    chunkPos.x, chunkPos.z);
+            }
 
         } catch (Throwable t) {
             LC2H.LOGGER.error("[LC2H] VineClusterCleaner scanChunk failed", t);
@@ -542,41 +589,66 @@ public final class VineClusterCleaner {
         IN_FLIGHT.decrementAndGet();
     }
 
-    private static Set<BlockPos> collectVineStarts(LevelChunk chunk, int baseX, int baseZ, int minY, int maxY) {
-        Set<BlockPos> vineStarts = new HashSet<>();
-        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
-        int boundedMaxY = Math.max(minY, maxY - 1);
+    private record VineScanCandidates(Set<BlockPos> starts, boolean complete) {
+    }
 
-        for (int x = 0; x < 16; x++) {
-            for (int z = 0; z < 16; z++) {
-                for (int y = minY; y <= boundedMaxY; y++) {
-                    cursor.set(baseX + x, y, baseZ + z);
-                    try {
-                        if (attachmentFamily(chunk.getBlockState(cursor)) != null) {
-                            vineStarts.add(cursor.immutable());
-                            if (vineStarts.size() >= VINE_SCAN_BATCH_SIZE) {
-                                return vineStarts;
-                            }
+    private static VineScanCandidates collectVineStarts(LevelChunk chunk, int baseX, int baseZ, int minY, int maxY) {
+        Set<BlockPos> vineStarts = new HashSet<>(VINE_SCAN_BATCH_SIZE);
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        LevelChunkSection[] sections = chunk.getSections();
+        int minSectionY = SectionPos.blockToSectionCoord(minY);
+        boolean complete = true;
+
+        // Skip sections whose palette has no configured vegetation blocks.
+        for (int sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+            LevelChunkSection section = sections[sectionIndex];
+            if (section == null || section.hasOnlyAir()
+                || !section.getStates().maybeHas(state -> attachmentFamily(state) != null)) {
+                continue;
+            }
+            int sectionBaseY = SectionPos.sectionToBlockCoord(minSectionY + sectionIndex);
+            for (int localX = 0; localX < 16; localX++) {
+                for (int localZ = 0; localZ < 16; localZ++) {
+                    for (int localY = 0; localY < 16; localY++) {
+                        int y = sectionBaseY + localY;
+                        if (y < minY || y > maxY) {
+                            continue;
                         }
-                    } catch (Throwable ignored) {}
+                        try {
+                            BlockState state = section.getStates().get(localX, localY, localZ);
+                            if (attachmentFamily(state) != null) {
+                                cursor.set(baseX + localX, y, baseZ + localZ);
+                                vineStarts.add(cursor.immutable());
+                            }
+                        } catch (Throwable ignored) {
+                            // Retry if the section changes while unloading.
+                            complete = false;
+                        }
+                    }
                 }
             }
         }
 
-        return vineStarts;
+        return new VineScanCandidates(vineStarts, complete);
     }
 
-    private static void processVineComponents(ServerLevel level, Set<BlockPos> vineStarts) {
+    private static boolean processVineComponents(ServerLevel level, Set<BlockPos> vineStarts) {
         Set<BlockPos> visited = new HashSet<>();
         ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        boolean complete = true;
 
         for (BlockPos start : vineStarts) {
             if (!visited.add(start)) continue;
 
             net.minecraft.world.level.block.state.BlockState startState;
             try {
-                startState = level.getBlockState(start);
+                startState = getLoadedState(level, start);
+                if (startState == null) {
+                    complete = false;
+                    continue;
+                }
             } catch (Throwable ignored) {
+                complete = false;
                 continue;
             }
             AttachmentFamily family = attachmentFamily(startState);
@@ -595,11 +667,20 @@ public final class VineClusterCleaner {
                 BlockPos current = queue.removeFirst();
                 net.minecraft.world.level.block.state.BlockState currentState;
                 try {
-                    currentState = level.getBlockState(current);
+                    currentState = getLoadedState(level, current);
+                    if (currentState == null) {
+                        complete = false;
+                        continue;
+                    }
                 } catch (Throwable ignored) {
+                    complete = false;
                     continue;
                 }
                 if (attachmentFamily(currentState) != family) {
+                    continue;
+                }
+                if (!supportNeighborsLoaded(level, current, family)) {
+                    complete = false;
                     continue;
                 }
                 try {
@@ -607,28 +688,40 @@ public final class VineClusterCleaner {
                         anyExternallySupportedVine = true;
                     }
                 } catch (Throwable ignored) {
+                    complete = false;
                 }
                 BlockPos[] neighbors = connectedNeighbors(current, family);
 
                 for (BlockPos neighbor : neighbors) {
                     try {
-                        net.minecraft.world.level.block.state.BlockState neighborState = level.getBlockState(neighbor);
+                        net.minecraft.world.level.block.state.BlockState neighborState = getLoadedState(level, neighbor);
+                        if (neighborState == null) {
+                            complete = false;
+                            continue;
+                        }
                         if (attachmentFamily(neighborState) == family) {
                             if (visited.add(neighbor)) {
                                 queue.add(neighbor);
                                 component.add(neighbor);
                             }
                         }
-                    } catch (Throwable ignored) {}
+                    } catch (Throwable ignored) {
+                        complete = false;
+                    }
                 }
             }
 
-            if (component.size() > COMPONENT_LIMIT) continue;
+            if (component.size() > COMPONENT_LIMIT) {
+                // Retry a partial walk instead of marking it clean.
+                complete = false;
+                continue;
+            }
 
             if (!anyExternallySupportedVine) {
                 removeVineComponent(level, component);
             }
         }
+        return complete;
     }
 
     private static boolean hasExternalAttachmentSupport(ServerLevel level,
@@ -656,8 +749,12 @@ public final class VineClusterCleaner {
             BlockPos neighborPos = pos.relative(direction);
             net.minecraft.world.level.block.state.BlockState neighborState;
             try {
-                neighborState = level.getBlockState(neighborPos);
+                neighborState = getLoadedState(level, neighborPos);
             } catch (Throwable ignored) {
+                continue;
+            }
+
+            if (neighborState == null) {
                 continue;
             }
 
@@ -673,10 +770,49 @@ public final class VineClusterCleaner {
         return false;
     }
 
-    private static AttachmentFamily attachmentFamily(net.minecraft.world.level.block.state.BlockState state) {
+    private static boolean supportNeighborsLoaded(ServerLevel level, BlockPos pos, AttachmentFamily family) {
+        if (level == null || pos == null || family == null) {
+            return false;
+        }
+        for (Direction direction : supportDirections(family)) {
+            if (getLoadedState(level, pos.relative(direction)) == null) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Read a resident block without loading or generating a neighbour. */
+    private static BlockState getLoadedState(ServerLevel level, BlockPos pos) {
+        if (level == null || pos == null) {
+            return null;
+        }
+        LevelChunk chunk = level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
+        return chunk == null ? null : chunk.getBlockState(pos);
+    }
+
+    private static AttachmentFamily attachmentFamily(BlockState state) {
         if (state == null) {
             return null;
         }
+        Set<String> configuredIds = ConfigManager.floatingVegetationIds();
+        if (configuredIds != ATTACHMENT_CACHE_CONFIG_IDS) {
+            synchronized (ATTACHMENT_FAMILY_CACHE) {
+                if (configuredIds != ATTACHMENT_CACHE_CONFIG_IDS) {
+                    ATTACHMENT_FAMILY_CACHE.clear();
+                    ATTACHMENT_CACHE_CONFIG_IDS = configuredIds;
+                }
+            }
+        }
+        Block block = state.getBlock();
+        AttachmentFamily family = ATTACHMENT_FAMILY_CACHE.computeIfAbsent(block, ignored -> {
+            AttachmentFamily classified = classifyAttachmentBlock(state);
+            return classified == null ? AttachmentFamily.NONE : classified;
+        });
+        return family == AttachmentFamily.NONE ? null : family;
+    }
+
+    private static AttachmentFamily classifyAttachmentBlock(BlockState state) {
         // Keep the periodic component cleaner in lockstep with the
         // event-driven post processor. This covers glow lichen, Immersive
         // Weathering frost, and any ids added through the config screen.
@@ -706,6 +842,7 @@ public final class VineClusterCleaner {
 
     private static BlockPos[] connectedNeighbors(BlockPos pos, AttachmentFamily family) {
         return switch (family) {
+            case NONE -> new BlockPos[0];
             case VINE -> new BlockPos[]{
                 pos.north(), pos.south(), pos.east(), pos.west(), pos.above(), pos.below()
             };
@@ -721,6 +858,7 @@ public final class VineClusterCleaner {
 
     private static Direction[] supportDirections(AttachmentFamily family) {
         return switch (family) {
+            case NONE -> new Direction[0];
             case VINE -> new Direction[]{Direction.UP, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST};
             case CAVE_VINES, WEEPING_VINES, HANGING_ROOTS -> new Direction[]{Direction.UP};
             case TWISTING_VINES -> new Direction[]{Direction.DOWN};
@@ -867,11 +1005,21 @@ public final class VineClusterCleaner {
     public static void shutdown() {
         shutdown = true;
         initialized = false;
+        ScheduledExecutorService fallback = FALLBACK_SCHEDULER;
+        FALLBACK_SCHEDULER = null;
+        if (fallback != null) {
+            fallback.shutdownNow();
+        }
         REMOVAL_QUEUE.clear();
         REMOVAL_DRAIN_SCHEDULED.set(false);
+        SCAN_REQUESTED.set(false);
+        SCAN_DISPATCHED.set(false);
         CHUNK_CURSOR.clear();
         LAST_SCAN.clear();
         LOADED_CHUNKS.clear();
+        IN_FLIGHT_CHUNKS.clear();
+        ATTACHMENT_FAMILY_CACHE.clear();
+        ATTACHMENT_CACHE_CONFIG_IDS = Set.of();
     }
 
     public static boolean isAutomaticCleanupEnabled() {
@@ -891,10 +1039,19 @@ public final class VineClusterCleaner {
         return "automatic=" + isAutomaticCleanupEnabled()
             + " initialized=" + initialized
             + " requested=" + SCAN_REQUESTED.get()
+            + " dispatched=" + SCAN_DISPATCHED.get()
+            + " dispatches=" + SCAN_DISPATCHES.sum()
+            + " pauses=" + SCAN_PAUSES.sum()
             + " inFlight=" + IN_FLIGHT.get()
             + " indexedChunks=" + indexedChunks
+            + " levels=" + SCAN_LEVELS.sum()
+            + " levelsWithInfo=" + SCAN_LEVELS_WITH_INFO.sum()
+            + " noDimInfo=" + SCAN_NO_DIM_INFO.sum()
+            + " chunkAttempts=" + SCAN_CHUNK_ATTEMPTS.sum()
+            + " relevantChunks=" + SCAN_RELEVANT_CHUNKS.sum()
             + " submitted=" + submitted
             + " completed=" + completed
+            + " inFlightChunks=" + IN_FLIGHT_CHUNKS.size()
             + " avgMs=" + String.format(java.util.Locale.ROOT, "%.3f", averageMs);
     }
 
@@ -929,10 +1086,6 @@ public final class VineClusterCleaner {
 
     private static String vineScanKey(ResourceKey<net.minecraft.world.level.Level> dim, int cx, int cz) {
         return "vine_scan_v" + VINE_SCAN_CACHE_VERSION + "_" + dimKey(dim) + "_" + cx + "_" + cz;
-    }
-
-    private static String vineSkipKey(ResourceKey<net.minecraft.world.level.Level> dim, int cx, int cz) {
-        return "vine_scan_skip_v" + VINE_SCAN_CACHE_VERSION + "_" + dimKey(dim) + "_" + cx + "_" + cz;
     }
 
     private static String dimKey(ResourceKey<net.minecraft.world.level.Level> dim) {

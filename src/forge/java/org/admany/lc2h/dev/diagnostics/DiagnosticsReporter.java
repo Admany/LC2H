@@ -75,6 +75,8 @@ public final class DiagnosticsReporter {
         LC2H.LOGGER.info("[LC2H] TerrainDensity: {} | floorBridge={}",
             org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics.diagnostics(),
             org.admany.lc2h.worldgen.terrain.CityTerrainPlanBridge.diagnostics());
+        LC2H.LOGGER.info("[LC2H] LostCitiesPostTodoSafety={}",
+            org.admany.lc2h.worldgen.lostcities.LostCityPostTodoSafety.diagnostics());
         LC2H.LOGGER.info("[LC2H] MountainCityReservation: {}",
             org.admany.lc2h.worldgen.terrain.MountainCityReservationPlanner.diagnostics());
         LC2H.LOGGER.info("[LC2H] PerfSnapshot {} BiomeInfoRuntimeCache={}", label,

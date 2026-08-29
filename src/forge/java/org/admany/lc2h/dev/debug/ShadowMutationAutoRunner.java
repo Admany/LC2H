@@ -8,9 +8,13 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
 import org.admany.lc2h.LC2H;
+import org.admany.lc2h.concurrency.async.AsyncManager;
+import org.admany.lc2h.concurrency.async.Priority;
 import org.admany.lc2h.dev.diagnostics.CriticalMixinHookValidator;
 import org.admany.lc2h.worldgen.apply.ShadowBlockMutationApplier;
 import org.admany.lc2h.worldgen.lostcities.TreeCompatTracker;
+import org.admany.lc2h.world.cleanup.VineClusterCleaner;
+import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.admany.lc2h.util.ResourceLocations;
 
 import java.util.List;
@@ -25,6 +29,8 @@ public final class ShadowMutationAutoRunner {
     private static final int AUTO_Z = Integer.getInteger("lc2h.shadowtest.z", 0);
     private static final String AUTO_DIMENSION = System.getProperty("lc2h.shadowtest.dimension", "minecraft:overworld").trim();
     private static final boolean AUTO_STOP = Boolean.getBoolean("lc2h.shadowtest.auto.stop");
+    private static final int AUTO_STOP_DELAY_TICKS = Math.max(0,
+        Integer.getInteger("lc2h.shadowtest.auto.stop.delay_ticks", 0));
     private static final AtomicBoolean EXECUTED = new AtomicBoolean(false);
 
     private ShadowMutationAutoRunner() {
@@ -62,6 +68,8 @@ public final class ShadowMutationAutoRunner {
         long elapsedMs = Math.round((System.nanoTime() - startedNs) / 1_000_000.0D);
         LC2H.LOGGER.info("[LC2H] Shadow autorun complete: success={} elapsedMs={}", success, elapsedMs);
         LC2H.LOGGER.info("[LC2H] ShadowApply: {}", ShadowBlockMutationApplier.diagnostics());
+        LC2H.LOGGER.info("[LC2H] VineCleaner: {}", VineClusterCleaner.diagnostics());
+        LC2H.LOGGER.info("[LC2H] FloatingCleanup: {}", ChunkPostProcessor.floatingDiagnostics());
         for (String line : TreeCompatTracker.summaryLines()) {
             LC2H.LOGGER.info("[LC2H] {}", line);
         }
@@ -69,7 +77,17 @@ public final class ShadowMutationAutoRunner {
             LC2H.LOGGER.info("[LC2H] {}", line);
         }
         if (AUTO_STOP) {
-            server.halt(false);
+            if (AUTO_STOP_DELAY_TICKS <= 0) {
+                server.halt(false);
+            } else {
+                long delayMs = AUTO_STOP_DELAY_TICKS * 50L;
+                AsyncManager.runLater("shadow-auto-stop", () -> server.execute(() -> {
+                    LC2H.LOGGER.info("[LC2H] Shadow delayed diagnostics: ShadowApply: {}", ShadowBlockMutationApplier.diagnostics());
+                    LC2H.LOGGER.info("[LC2H] Shadow delayed diagnostics: VineCleaner: {}", VineClusterCleaner.diagnostics());
+                    LC2H.LOGGER.info("[LC2H] Shadow delayed diagnostics: FloatingCleanup: {}", ChunkPostProcessor.floatingDiagnostics());
+                    server.halt(false);
+                }), delayMs, Priority.LOW);
+            }
         }
     }
 

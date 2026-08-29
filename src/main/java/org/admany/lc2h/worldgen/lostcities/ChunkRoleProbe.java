@@ -31,21 +31,10 @@ public final class ChunkRoleProbe {
         Integer.getInteger("lc2h.chunkRoleProbe.pruneEvery", 512));
 
     private static final ConcurrentHashMap<ChunkCoord, Entry> CACHE = new ConcurrentHashMap<>();
-    /**
-     * Terrain blending runs before normal Lost Cities feature placement. At
-     * that point characteristics snapshots can still be replaced after a
-     * multichunk plan integrates, so they are not authoritative inputs for a
-     * density decision. Keep a provider-scoped cache of the raw Lost Cities
-     * predicates instead. It is cleared with the rest of the lifecycle state.
-     */
+    /** Provider-scoped cache of raw Lost Cities terrain predicates. */
     private static final ConcurrentHashMap<IDimensionInfo, ConcurrentHashMap<ChunkCoord, Probe>>
         TERRAIN_CACHE = new ConcurrentHashMap<>();
-    /**
-     * Structure placement must never synchronously rebuild the city factor.
-     * Cold stable probes are therefore prepared on a tiny daemon executor and
-     * published for the next structure query. The executor is intentionally
-     * bounded so a large structure scan cannot create another worker stampede.
-     */
+    /** Prepare cold stable probes off the structure-placement worker. */
     private static final AtomicInteger STABLE_PREWARM_THREAD_IDS = new AtomicInteger();
     private static final ThreadPoolExecutor STABLE_PREWARM_EXECUTOR =
         new ThreadPoolExecutor(
@@ -91,9 +80,10 @@ public final class ChunkRoleProbe {
     ) {
         public boolean isUnsafe() {
             // Underground rail tunnels do not own the surface. Treat only
-            // surface rail/stations as tree-unsafe; otherwise a tunnel in an
-            // otherwise normal chunk vetoes the trees above it.
-            return isCity || hasHighway
+            // surface rail/stations as tree-unsafe; the same applies to
+            // highways.  A tunnel in an otherwise normal chunk must not veto
+            // the trees above it.
+            return isCity || hasSurfaceHighway()
                 || (TREE_SURFACE_RAIL_ONLY ? hasSurfaceRailway : hasRailway);
         }
 
@@ -291,11 +281,7 @@ public final class ChunkRoleProbe {
         CompletableFuture<Probe> existing = flights.putIfAbsent(coord, created);
         if (existing != null) {
             try {
-                /* A role probe is queried from the worldgen hot path. Waiting
-                 * here turns one cold city-factor calculation into a global
-                 * worker stall. The flight owner publishes the immutable
-                 * result; contending workers use the conservative empty probe
-                 * and continue with their normal fallback. */
+                /* Do not wait on a cold probe from worldgen. */
                 Probe ready = existing.getNow(null);
                 if (ready != null) {
                     return ready;
@@ -385,14 +371,7 @@ public final class ChunkRoleProbe {
         }
     }
 
-    /**
-     * Returns a previously resolved stable terrain probe without doing any
-     * Lost Cities work.  The density path populates this cache before the
-     * shift field is normally built, so consumers that only need to reuse the
-     * raw city/highway decision can avoid running the same expensive queries a
-     * second time.  A null result deliberately means "compute normally" and
-     * never changes the authoritative fallback path.
-     */
+    /** Return a previously resolved terrain probe without doing Lost Cities work. */
     public static Probe peekStableTerrainProbe(IDimensionInfo dimInfo,
                                                ResourceKey<Level> dim,
                                                int chunkX,
@@ -677,14 +656,7 @@ public final class ChunkRoleProbe {
             }
 
             int cityLevel = isCity ? BuildingInfo.getCityLevel(coord, dimInfo) : 0;
-            /*
-             * Stable terrain probes are consumed from the density and shift
-             * paths.  They must never wake the intercity planner: that
-             * planner recursively evaluates Lost Cities' full heightmap and
-             * serializes on its own caches.  A route is published separately
-             * by the route-aware path; a cold stable probe simply reports no
-             * route until that immutable index is warm.
-             */
+            /* Do not wake the intercity planner from a terrain probe. */
             int highwayLevel = stableHighwayLevel(dimInfo, profile, coord);
             boolean hasHighway = highwayLevel >= 0;
             boolean highwayTunnel = hasHighway && isHighwayTunnel(dimInfo, coord, profile,
@@ -714,8 +686,9 @@ public final class ChunkRoleProbe {
         if (dimInfo.getHighwayGenerationMode() == HighwayGenerationMode.INTERCITY_NETWORK_V1) {
             return IntercityHighwayIndex.peekLevel(dimInfo, profile, coord, null);
         }
-        return Math.max(Highway.getXHighwayLevel(coord, dimInfo, profile),
-            Highway.getZHighwayLevel(coord, dimInfo, profile));
+        /* Legacy route lookup can take the same locks in reverse order. Leave
+         * it to the route-aware path. */
+        return -1;
     }
 
     /** Mirrors Lost Cities' BuildingInfo#isTunnel(level) decision without

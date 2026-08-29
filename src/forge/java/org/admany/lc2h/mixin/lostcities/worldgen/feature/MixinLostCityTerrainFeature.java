@@ -47,14 +47,7 @@ public class MixinLostCityTerrainFeature {
     @Unique
     private static final boolean LC2H_SKIP_INTERIOR_TERRAIN_CORRECTION =
         Boolean.parseBoolean(System.getProperty("lc2h.terrain.skipInteriorCorrection", "false"));
-    /**
-     * Lost Cities' legacy correction is meant to keep a building's ground
-     * envelope clear. On a natural, non-city chunk it can instead move whole
-     * columns toward neighbouring desired building heights, producing the
-     * narrow conical/terraced mountains seen in LC2H worlds. Let Minecraft's
-     * native density/surface pass own those chunks; real buildings, roads,
-     * multichunk cutoffs and direct structure-avoidance regions stay native.
-     */
+    /** Keep legacy terrain correction off for natural chunks. */
     @Unique
     private static final boolean LC2H_PRESERVE_NATURAL_MOUNTAINS =
         Boolean.parseBoolean(System.getProperty("lc2h.terrain.preserveNaturalMountains", "true"));
@@ -80,34 +73,26 @@ public class MixinLostCityTerrainFeature {
         }
         try {
             BuildingInfo info = BuildingInfo.getBuildingInfo(coord, provider);
-            /* `hasBuilding` is also set for a non-city chunk that is the
-             * outside/cutoff half of a neighbouring building. Treating that
-             * bit as a veto here was the reason the native correction still
-             * ran on the natural side of a city wall. The only cases that
-             * must stay on Lost Cities' authoritative path are an actual city
-             * column, a direct-avoidance reservation, or an outside building
-             * column whose block envelope really crosses this chunk. */
-            if (info == null || info.isCity || info.hasDirectStructureAvoidance()
-                || (info.outsideChunk && info.hasBuilding)) {
+            // Chunk-wide city flags do not describe individual terrain columns.
+            if (info == null || info.hasDirectStructureAvoidance()) {
                 return false;
             }
-            /* BuildingInfo already contains the authoritative reservations
-             * needed by this correction.  Calling the route-aware probe here
-             * performs another Lost Cities graph walk while the terrain
-             * feature is holding its generation lock, which was a major
-             * source of stalls and made otherwise natural chunks diverge.
-             * Keep the native correction for roads, rails and highways; only
-             * an unreserved natural column is eligible for preservation. */
-            return info.highwayXLevel < 0
-                && info.highwayZLevel < 0
-                && !info.xRailCorridor
-                && !info.zRailCorridor;
+            if (info.highwayXLevel >= 0
+                || info.highwayZLevel >= 0
+                || info.xRailCorridor
+                || info.zRailCorridor) {
+                return false;
+            }
+            // The density blender owns unbuilt terrain; keep correction for
+            // explicit structures and infrastructure only.
+            return true;
         } catch (Throwable ignored) {
             // A failed role probe must not suppress Lost Cities' own safety
             // correction. The native path remains the conservative fallback.
             return false;
         }
     }
+
     @Unique
     private static final ThreadLocal<Long> LC2H_DAMAGE_SEED = new ThreadLocal<>();
 
@@ -154,7 +139,7 @@ public class MixinLostCityTerrainFeature {
     @Inject(method = "correctTerrainShape", at = @At("HEAD"), cancellable = true, remap = false)
     private void lc2h$skipInteriorTerrainCorrection(WorldGenLevel world, ChunkCoord coord, ChunkHeightmap heightmap, CallbackInfo ci) {
         if (lc2h$preserveNaturalTerrain(coord)) {
-            org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics.naturalCorrectionSkip();
+            org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics.mountainCorrectionSkip();
             PreCaptureTargetTraceRegistry.recordControlFlowAltered(
                 "correctTerrainShape.cancel",
                 coord,
@@ -195,22 +180,10 @@ public class MixinLostCityTerrainFeature {
         if (naturalHeights != null) {
             naturalHeights.publishResidentChunk(chunk);
             /*
-             * heightSampleSize groups nearby LC chunks around one sampler.
-             * That sampler is normally already resident in this WorldGenRegion,
-             * so publish it now and avoid rebuilding Minecraft's density graph.
+             * Do not look up a second chunk while holding Lost Cities' terrain
+             * stripe lock. Use the current resident chunk and let neighbours
+             * publish their own samples.
              */
-            int size = Math.max(1, (Integer) mcjty.lostcities.setup.Config.HEIGHT_SAMPLE_SIZE.get());
-            if (size > 2) {
-                int top = chunk.getPos().x / size * size;
-                int left = chunk.getPos().z / size * size;
-                int directionX = chunk.getPos().x < 0 ? -1 : 1;
-                int directionZ = chunk.getPos().z < 0 ? -1 : 1;
-                int sampleX = top + (size / 2) * directionX;
-                int sampleZ = left + (size / 2) * directionZ;
-                if (region.hasChunk(sampleX, sampleZ)) {
-                    naturalHeights.publishResidentChunk(region.getChunk(sampleX, sampleZ));
-                }
-            }
         }
         ChunkCoord coord = new ChunkCoord(self.provider.getType(), chunk.getPos().x, chunk.getPos().z);
 	        long now = System.currentTimeMillis();
@@ -249,10 +222,8 @@ public class MixinLostCityTerrainFeature {
             org.admany.lc2h.LC2H.LOGGER.debug("[LC2H] LostCityTerrainFeature.generate begin coord={} thread={}", coord, Thread.currentThread().getName());
 	        }
 
-        // NOTE: The stripe lock is already acquired by MixinLostCityFeature.lc2h$wrapGenerateWithStripeLock
-        // via withChunkStripeLock (try-finally, exception-safe). Acquiring it again here via
-        // acquireChunkStripeLock + @RETURN release was causing a lock leak: on exception exit,
-        // @RETURN doesn't fire but the outer withChunkStripeLock finally does, leaving hold count=1.
+        // The outer generate wrapper owns the stripe lock. Do not acquire it
+        // again here or an exception can leave the hold count behind.
 
         ChunkGenTracker.recordGenerateStart(coord);
 
@@ -263,12 +234,7 @@ public class MixinLostCityTerrainFeature {
         }
     }
 
-    /**
-     * This call is after Lost Cities has installed the current chunk primer,
-     * and before doNormalChunk reaches correctTerrainShape. Capture only an
-     * immutable snapshot here. Generation never waits for a GPU result
-     * thread and the original heightmap result is returned unchanged.
-     */
+    /** Capture the upstream heightmap before Lost Cities' terrain pass. */
     @Redirect(
         method = "generate(Lnet/minecraft/server/level/WorldGenRegion;Lnet/minecraft/world/level/chunk/ChunkAccess;)V",
         at = @At(value = "INVOKE", target = "Lmcjty/lostcities/worldgen/LostCityTerrainFeature;getHeightmap(Lmcjty/lostcities/varia/ChunkCoord;Lnet/minecraft/world/level/WorldGenLevel;)Lmcjty/lostcities/worldgen/ChunkHeightmap;"),

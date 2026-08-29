@@ -516,7 +516,8 @@ public final class WorldParityHarness {
         snapshot.maxBuildY = level.getMaxBuildHeight() - 1;
         snapshot.totalBlocks = (long) (snapshot.maxBuildY - snapshot.minBuildY + 1) * 16L * 16L;
         settleChunkForParityCapture(level, coord);
-        LevelChunk chunk = level.getChunkSource().getChunkNow(coord.chunkX(), coord.chunkZ());
+        // Read the primed FULL chunk; getChunkNow only exposes ticking chunks.
+        LevelChunk chunk = level.getChunk(coord.chunkX(), coord.chunkZ());
         snapshot.present = chunk != null;
         if (chunk == null) {
             snapshot.status = "missing";
@@ -524,7 +525,7 @@ public final class WorldParityHarness {
         }
         warmChunkSnapshotInputs(level, provider, coord, chunk);
         settleChunkForParityCapture(level, coord);
-        chunk = level.getChunkSource().getChunkNow(coord.chunkX(), coord.chunkZ());
+        chunk = level.getChunk(coord.chunkX(), coord.chunkZ());
         snapshot.present = chunk != null;
         if (chunk == null) {
             snapshot.status = "missing_after_settle";

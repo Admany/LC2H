@@ -203,11 +203,7 @@ public final class WorldParityAutoRunner {
         return new ActiveRun(server, lines, targets, pendingDimensions, centers, null);
     }
 
-    /**
-     * Optional server-only coordinate discovery for mountain A/B runs. It asks
-     * the same route-aware Lost Cities probe used by the terrain field and
-     * records elevated city cells; it never alters generation.
-     */
+    /** Find elevated city cells for the server-side A/B report. */
     private static void appendRoleScan(ArrayList<String> lines, ExportTarget target) {
         if (target == null || target.level() == null || target.provider() == null) {
             return;
@@ -230,7 +226,8 @@ public final class WorldParityAutoRunner {
                 int chunkX = centerX + dx;
                 int chunkZ = centerZ + dz;
                 scanned++;
-                ChunkRoleProbe.Probe probe = ChunkRoleProbe.getRouteAwareProbe(
+                // Keep the city probe separate from the terrain build.
+                ChunkRoleProbe.Probe probe = ChunkRoleProbe.getStableTerrainProbe(
                     target.provider(), target.level().dimension(), chunkX, chunkZ);
                 if (!probe.isCity()) {
                     continue;
@@ -781,10 +778,7 @@ public final class WorldParityAutoRunner {
                         coords.add(new ChunkPos(chunkX, chunkZ));
                     }
                 }
-                /* Direct A/B coordinates are part of the export contract too.
-                 * Prime them explicitly; otherwise a coordinate outside the
-                 * centre matrix can be exported before it reaches FULL and
-                 * the comparison silently measures a missing/partial chunk. */
+                // Prime requested coordinates as well as the matrix.
                 for (int[] direct : parseTargetCoords()) {
                     ChunkPos directPos = new ChunkPos(direct[0], direct[1]);
                     if (!coords.contains(directPos)) {
@@ -856,11 +850,7 @@ public final class WorldParityAutoRunner {
             lines.add(prefix + " trees=" + DeferredTreeEventHandler.capturedTreeDiagnostics(target.level()));
             lines.add(prefix + " snow="
                 + org.admany.lc2h.util.chunk.ChunkPostProcessor.snowDiagnostics());
-            // Keep the terrain proof self-contained: these counters are the
-            // generation-time decision, not a post-hoc interpretation of the
-            // exported heightmaps.  This lets an A/B report prove whether the
-            // native density hook actually ran and whether any region had to
-            // fall back while the chunks were being generated.
+            // Include generation-time decisions alongside the heightmaps.
             lines.add(prefix + " terrainBlend="
                 + org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics.diagnostics());
             lines.add(prefix + " shiftField="
@@ -894,6 +884,37 @@ public final class WorldParityAutoRunner {
                     + " at=" + maxShiftX + "," + maxShiftZ
                     + " window=" + shiftMinX + "," + shiftMinZ
                     + "->" + shiftMaxX + "," + shiftMaxZ);
+            }
+            // Include per-coordinate probes for edge comparisons.
+            if (("post-prime".equals(stage) || "pre-export-settled".equals(stage))
+                && target.exportCoords() != null) {
+                for (ChunkCoord coord : target.exportCoords()) {
+                    int blockX = (coord.chunkX() << 4) + 8;
+                    int blockZ = (coord.chunkZ() << 4) + 8;
+                    for (String detail : org.admany.lc2h.worldgen.terrain.CityBlendDebugger.explain(
+                        target.level(), new net.minecraft.core.BlockPos(blockX, target.level().getMinBuildHeight(), blockZ))) {
+                        lines.add(prefix + " terrainProbe chunk=" + coord.chunkX() + "," + coord.chunkZ() + " " + detail);
+                    }
+                    // Add a compact role and shift map around each target.
+                    if (shiftContext != null && shiftContext.settings().enabled()) {
+                        for (int dz = -4; dz <= 4; dz++) {
+                            StringBuilder row = new StringBuilder();
+                            for (int dx = -4; dx <= 4; dx++) {
+                                int probeX = coord.chunkX() + dx;
+                                int probeZ = coord.chunkZ() + dz;
+                                ChunkRoleProbe.Probe role = ChunkRoleProbe.getStableTerrainProbe(
+                                    target.provider(), target.level().dimension(), probeX, probeZ);
+                                double shift = org.admany.lc2h.worldgen.terrain.CityShiftField
+                                    .shiftAtChunk(shiftContext, probeX, probeZ);
+                                char source = role.isCity() ? 'C' : (role.hasHighway() ? 'H' : '.');
+                                if (row.length() > 0) row.append(' ');
+                                row.append(source).append(String.format(java.util.Locale.ROOT, "%04.1f", shift));
+                            }
+                            lines.add(prefix + " terrainProbeMap center=" + coord.chunkX() + "," + coord.chunkZ()
+                                + " z=" + (coord.chunkZ() + dz) + " " + row);
+                        }
+                    }
+                }
             }
             if ("post-prime".equals(stage) || "pre-export-settled".equals(stage)) {
                 ChunkRoleProbe.RailSafetySummary railSafety = ChunkRoleProbe.summarizeRailSafety(

@@ -6,9 +6,12 @@ import net.minecraft.world.level.levelgen.NoiseChunk;
 import net.minecraft.world.level.levelgen.NoiseRouter;
 import net.minecraft.world.level.levelgen.blending.Blender;
 import org.admany.lc2h.worldgen.terrain.CityDensityTransform;
+import org.admany.lc2h.worldgen.terrain.CityDensityTransformBinding;
+import org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics;
 import org.admany.lc2h.worldgen.terrain.ShiftedDensityFunction;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Mutable;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
@@ -18,30 +21,31 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.util.List;
 
-/**
- * Applies LC2H's city/mountain transition inside Minecraft's density context.
- *
- * <p>The shifted coordinate is deliberately scoped to NoiseChunk's density
- * cache population. Aquifer consumes the resulting density later, but must see
- * the real block coordinate because its internal arrays are indexed against
- * the unshifted noise-cell bounds. Globally changing {@link #blockY()} breaks
- * that invariant and can index one element past the aquifer cache.</p>
- *
- * <p>The context-Y transform is retained only as an explicit legacy A/B arm.
- * The production path leaves this coordinate and the preliminary surface
- * cache untouched; {@code Blender#blendDensity} applies the bounded surface
- * correction without invalidating Minecraft's cell interpolation.</p>
- */
+/** Applies the city/mountain transform while NoiseChunk fills its cache. */
 @Mixin(NoiseChunk.class)
-public abstract class MixinNoiseChunkCityDensityTransform {
+public abstract class MixinNoiseChunkCityDensityTransform implements CityDensityTransformBinding {
 
     @Unique
     private static final boolean LC2H_DENSITY_OFFSET_MODE = Boolean.parseBoolean(
-        System.getProperty("lc2h.terrain.shift.densityOffset", "true"));
+        System.getProperty("lc2h.terrain.shift.densityOffset", "false"));
 
     @Shadow
     @Final
+    @Mutable
     private Blender blender;
+
+    // These constructor coordinates identify the owning chunk for diagnostics.
+    @Shadow
+    @Final
+    private int firstCellX;
+
+    @Shadow
+    @Final
+    private int firstCellZ;
+
+    @Shadow
+    @Final
+    private int cellWidth;
 
     /**
      * A depth counter rather than a boolean keeps the scope correct if Mojang
@@ -49,6 +53,18 @@ public abstract class MixinNoiseChunkCityDensityTransform {
      */
     @Unique
     private int lc2h$densitySamplingDepth;
+
+    @Unique
+    private boolean lc2h$noiseTransformRecorded;
+
+    @Override
+    public void lc2h$bindDensityTransform(Blender blender) {
+        if (blender == null) {
+            return;
+        }
+        this.blender = blender;
+        this.lc2h$noiseTransformRecorded = false;
+    }
 
     @Inject(method = "fillSlice", at = @At("HEAD"))
     private void lc2h$beginSliceDensitySampling(boolean firstSlice, int startCellX, CallbackInfo ci) {
@@ -79,6 +95,15 @@ public abstract class MixinNoiseChunkCityDensityTransform {
         double shift = lc2h$shiftAt(self.blockX(), self.blockZ());
         if (shift <= 0.0D) {
             return;
+        }
+        if (!this.lc2h$noiseTransformRecorded
+            && this.blender instanceof CityDensityTransform transform) {
+            this.lc2h$noiseTransformRecorded = true;
+            MountainCityBlendDiagnostics.noiseTransform(
+                transform.lc2h$dimension(),
+                Math.floorDiv(this.firstCellX * this.cellWidth, 16),
+                Math.floorDiv(this.firstCellZ * this.cellWidth, 16),
+                shift);
         }
         cir.setReturnValue(cir.getReturnValueI() + (int) Math.round(shift));
     }

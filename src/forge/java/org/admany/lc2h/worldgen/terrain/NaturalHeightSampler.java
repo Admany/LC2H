@@ -202,7 +202,7 @@ public final class NaturalHeightSampler {
         /**
          * Noise and surface generation have already built this heightmap by
          * the time Lost Cities enters its feature. Reuse that result instead
-         * of asking Minecraft to rebuild a full one-column NoiseChunk :]
+         * of asking Minecraft to rebuild a full one-column NoiseChunk.
          */
         public void publishResidentChunk(ChunkAccess chunk) {
             if (chunk == null) {
@@ -230,13 +230,7 @@ public final class NaturalHeightSampler {
             }
         }
 
-        /**
-         * Returns a resident height or a caller supplied approximation without
-         * ever joining another sampler.  Worldgen hot paths use this when a
-         * neighbouring worker is already evaluating the vanilla density graph.
-         * The exact sampler remains available to the bounded background owner
-         * through {@link #chunkHeight(int, int)}.
-         */
+        /** Return a resident height or the supplied fallback without waiting. */
         public int chunkHeightNonBlocking(int chunkX, int chunkZ, int fallback) {
             long key = PackedCoordinateKey.of(chunkX, chunkZ);
             Integer cached = this.heights.get(key);
@@ -249,24 +243,13 @@ public final class NaturalHeightSampler {
                 HEIGHT_NON_BLOCKING_FALLBACKS.incrementAndGet();
                 return fallback;
             }
-            /*
-             * This method is used from terrain/role hot paths.  Starting a
-             * fresh generator sample here made the method synchronous in the
-             * most common cold-cache case despite its name, reopening the
-             * NoiseBasedChunkGenerator graph on a worldgen worker.  Exact
-             * samples are owned by chunkHeight() and are published into this
-             * cache.  Until one is resident, return the caller's conservative
-             * fallback and let the next pass consume the immutable sample.
-             */
+            /* Do not start a generator sample here. The next pass will use the
+             * value published by chunkHeight(). */
             HEIGHT_NON_BLOCKING_FALLBACKS.incrementAndGet();
             return fallback;
         }
 
-        /**
-         * Returns a sampled height only when it is already resident. This is
-         * deliberately a cache peek: world generation callers must not join a
-         * cold height flight while another worker is sampling vanilla noise.
-         */
+        /** Return a sampled height only when it is already resident. */
         public Integer cachedChunkHeight(int chunkX, int chunkZ) {
             long key = PackedCoordinateKey.of(chunkX, chunkZ);
             Integer cached = this.heights.get(key);

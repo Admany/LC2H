@@ -3,6 +3,9 @@ package org.admany.lc2h.worldgen.terrain;
 import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.LostCityTerrainFeature;
+import mcjty.lostcities.varia.ChunkCoord;
+import mcjty.lostcities.worldgen.lost.BuildingInfo;
+import mcjty.lostcities.worldgen.lost.City;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
@@ -41,6 +44,21 @@ public final class CityBlendDebugger {
         out.add("=== AT GENERATION TIME: " + (recorded == null
             ? "NOT RECORDED (generated before this build, or the blender never saw this chunk)"
             : recorded) + " ===");
+        MountainCityBlendDiagnostics.ChunkTraceSnapshot targetTrace =
+            MountainCityBlendDiagnostics.chunkTrace(level.dimension(), chunkX, chunkZ);
+        if (targetTrace == null) {
+            out.add("TARGET TRACE: no target gate record retained (the region-centre outcome above is not proof for this chunk)");
+        } else {
+            out.add("TARGET TRACE: gateSeen=" + targetTrace.gateSeen()
+                + " deferred=" + targetTrace.gateDeferred()
+                + " resumed=" + targetTrace.gateResumed()
+                + " readyRebuild=" + targetTrace.gateReadyRebuilds()
+                + " noRegion=" + targetTrace.gateNoRegion()
+                + " failures=" + targetTrace.gateFailures()
+                + " fieldShift=" + fmt(targetTrace.targetShift())
+                + " nativeTransform=" + targetTrace.noiseTransformCalls()
+                + (targetTrace.lastGateDecision() == null ? "" : " last=" + targetTrace.lastGateDecision()));
+        }
 
         IDimensionInfo provider = DimensionInfoAccessor.getForLevel(level);
         if (provider == null || provider.getType() == null) {
@@ -73,6 +91,29 @@ public final class CityBlendDebugger {
         }
 
         ChunkRoleProbe.Probe role = ChunkRoleProbe.getStableTerrainProbe(provider, dim, chunkX, chunkZ);
+        StringBuilder cityFactors = new StringBuilder("cityFactors(center+N/E/S/W)=");
+        int[] factorDx = {0, 1, 0, -1, 0};
+        int[] factorDz = {0, 0, 1, 0, -1};
+        for (int i = 0; i < factorDx.length; i++) {
+            int probeX = chunkX + factorDx[i];
+            int probeZ = chunkZ + factorDz[i];
+            try {
+                ChunkCoord probeCoord = new ChunkCoord(dim, probeX, probeZ);
+                float factor = City.getCityFactor(probeCoord, provider, profile);
+                boolean raw = BuildingInfo.isCityRaw(probeCoord, provider, profile);
+                if (i > 0) {
+                    cityFactors.append(' ');
+                }
+                cityFactors.append(probeX).append(',').append(probeZ)
+                    .append('=').append(fmt(factor)).append('/').append(raw ? 'C' : '.');
+            } catch (Throwable failure) {
+                if (i > 0) {
+                    cityFactors.append(' ');
+                }
+                cityFactors.append(probeX).append(',').append(probeZ).append("=<error>");
+            }
+        }
+        out.add(cityFactors.toString());
         MountainCityReservationPlanner.CellPlan reservation =
             MountainCityReservationPlanner.plan(provider, dim, chunkX, chunkZ, profile);
         out.add("thisChunk: isCity=" + role.isCity() + " cityLevel=" + role.cityLevel()
@@ -92,6 +133,11 @@ public final class CityBlendDebugger {
         out.add("AUTHORITY: native density is resampled at y+shift; no flat blending plane is created.");
         out.add("heights: naturalHere=" + natural + " naturalChunkCentre=" + naturalChunk
             + " cityFloorForThisLevel=" + cityFloor);
+        Integer plannedNatural = CityShiftField.plannedNaturalSurface(context, chunkX, chunkZ);
+        Integer plannedReference = CityShiftField.plannedReferenceSurface(context, chunkX, chunkZ);
+        out.add("regionSurfaces: plannedNatural=" + (plannedNatural == null ? "<missing>" : plannedNatural)
+            + " plannedReference=" + (plannedReference == null ? "<missing>" : plannedReference)
+            + " (the gradient solver uses plannedNatural, not the direct column sample)");
         out.add("shift: interpolated=" + fmt(shift)
             + " chunkControl=" + fmt(controlShift)
             + " -> predictedSurface=" + fmt(natural - shift));

@@ -119,7 +119,9 @@ public abstract class MixinDefaultDimensionInfoThreadLocal implements IDimension
 
     @Overwrite
     public StreetGenerationMode getStreetGenerationMode() {
-        return LostCitiesStreetModePolicy.resolve(streetGenerationMode);
+        LostCityProfile effectiveProfile = getProfile();
+        String profileName = effectiveProfile == null ? null : effectiveProfile.getName();
+        return LostCitiesStreetModePolicy.resolve(streetGenerationMode, profileName);
     }
 
     @Overwrite

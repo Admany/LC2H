@@ -1,7 +1,6 @@
 package org.admany.lc2h.worldgen.terrain;
 
 import com.mojang.logging.LogUtils;
-import mcjty.lostcities.config.HighwayGenerationMode;
 import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
@@ -9,7 +8,6 @@ import mcjty.lostcities.worldgen.LostCityTerrainFeature;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import mcjty.lostcities.worldgen.lost.City;
 import mcjty.lostcities.worldgen.lost.CitySphere;
-import mcjty.lostcities.worldgen.lost.Highway;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.Level;
@@ -20,7 +18,9 @@ import org.admany.lc2h.worldgen.lostcities.LostCitiesGenerationLocks;
 import org.admany.lc2h.util.PackedCoordinateKey;
 
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CompletableFuture;
@@ -45,13 +45,8 @@ public final class CityShiftField {
 
     private static final double SQRT2 = Math.sqrt(2.0D);
 
-    /* A sixteen chunk lattice keeps the expensive vanilla height pass bounded
-     * while still giving the gradient transform enough samples to make a
-     * continuous city edge. Per role heights are interpolated from this
-     * lattice instead of reopening the density graph for every city cell.
-     * Eight remains available for compatibility/perf investigations through
-     * the property, but the larger default prevents a cold region from
-     * monopolising the CPU during startup. */
+    /* Sample the natural height on a coarse lattice and interpolate between
+     * samples so each region has a bounded amount of work. */
     private static final int COARSE_STRIDE = Math.max(4, Math.min(32,
         Integer.getInteger("lc2h.terrain.shift.coarseStride", 16)));
 
@@ -77,15 +72,12 @@ public final class CityShiftField {
     private static final Map<IDimensionInfo, RoleCache> ROLES =
         new ConcurrentHashMap<>();
 
-    /* A cold field is built away from the worldgen workers. The caller still
-     * waits for the immutable result before sampling it: returning a partial
-     * scalar here was the source of the old one-chunk city/mountain cutoffs.
-     * Keeping this pool small prevents the exact build from becoming a second
-     * worldgen stampede. */
+    /* Build fields on a small side pool so worldgen workers do not do the
+     * full regional height pass themselves. */
     private static final int ASYNC_BUILD_THREADS = Math.max(1, Math.min(2,
         Integer.getInteger("lc2h.terrain.shift.asyncThreads", 1)));
-    private static final int ASYNC_BUILD_QUEUE = Math.max(1, Math.min(16,
-        Integer.getInteger("lc2h.terrain.shift.asyncQueue", 4)));
+    private static final int ASYNC_BUILD_QUEUE = Math.max(4, Math.min(64,
+        Integer.getInteger("lc2h.terrain.shift.asyncQueue", 32)));
     private static final long ASYNC_RETRY_DELAY_NANOS = TimeUnit.SECONDS.toNanos(1L);
     private static final long WORLDGEN_QUIET_NANOS = TimeUnit.MILLISECONDS.toNanos(Math.max(50L,
         Long.getLong("lc2h.terrain.shift.worldgenQuietMs", 350L)));
@@ -115,10 +107,14 @@ public final class CityShiftField {
     private static final AtomicLong POSITIVE_DEMAND_CELLS = new AtomicLong();
     private static final AtomicInteger MAX_DEMAND = new AtomicInteger();
     private static final AtomicLong POSITIVE_OWNED_CELLS = new AtomicLong();
+    private static final AtomicLong RECEIVER_HEIGHT_CORRECTIONS = new AtomicLong();
     private static final AtomicInteger MAX_OWNED_SHIFT = new AtomicInteger();
     private static final AtomicLong HEIGHT_SAMPLES = new AtomicLong();
     private static final AtomicLong EXACT_HEIGHT_SAMPLES = new AtomicLong();
     private static final AtomicLong EXACT_HEIGHT_FAILURES = new AtomicLong();
+    private static final AtomicLong EDGE_RECOVERY_CANDIDATES = new AtomicLong();
+    private static final AtomicLong EDGE_RECOVERY_SAMPLES = new AtomicLong();
+    private static final AtomicLong EDGE_RECOVERY_APPLIED = new AtomicLong();
     private static final AtomicLong EROSION_SAMPLES = new AtomicLong();
     private static final AtomicLong BUILD_NANOS = new AtomicLong();
     private static final AtomicLong SWEEPS = new AtomicLong();
@@ -131,10 +127,16 @@ public final class CityShiftField {
     private static final AtomicLong ROLE_CACHE_PUBLISHES = new AtomicLong();
     private static final AtomicLong ROLE_DUPLICATE_SUPPRESSED = new AtomicLong();
     private static final AtomicLong ROLE_HEIGHT_ESTIMATES = new AtomicLong();
+    private static final AtomicLong RAW_CITY_FACTOR_FALLBACKS = new AtomicLong();
+    private static final AtomicLong CITY_LEVEL_DIRECT_LOOKUPS = new AtomicLong();
+    private static final AtomicLong CITY_LEVEL_HEIGHT_FALLBACKS = new AtomicLong();
     private static final AtomicLong ASYNC_SUBMITTED = new AtomicLong();
     private static final AtomicLong ASYNC_COMPLETED = new AtomicLong();
     private static final AtomicLong ASYNC_REJECTED = new AtomicLong();
     private static final AtomicLong ASYNC_FAILED = new AtomicLong();
+    private static final AtomicLong PREWARM_REQUESTS = new AtomicLong();
+    private static final AtomicLong PREWARM_READY = new AtomicLong();
+    private static final AtomicLong PREWARM_NO_WAIT = new AtomicLong();
     private static final Map<RegionKey, Long> ASYNC_RETRY_AFTER = new ConcurrentHashMap<>();
 
     /* Live-config shape controls.  The previous solver used only maxShift and
@@ -216,6 +218,251 @@ public final class CityShiftField {
         IntercityHighwayIndex.clear();
     }
 
+    /** Start a regional field build before the NOISE status. */
+    public static void prewarm(Context context, int chunkX, int chunkZ) {
+        if (context == null || !context.settings().enabled()) {
+            return;
+        }
+        PREWARM_REQUESTS.incrementAndGet();
+        Region ready = region(context,
+            Math.floorDiv(chunkX, REGION_SIDE), Math.floorDiv(chunkZ, REGION_SIDE));
+        if (ready != null) {
+            PREWARM_READY.incrementAndGet();
+        } else {
+            PREWARM_NO_WAIT.incrementAndGet();
+        }
+    }
+
+    /** Return the NOISE-stage dependency for the chunk's field regions. */
+    public static CompletableFuture<Void> readyForChunk(Context context, int chunkX, int chunkZ) {
+        if (context == null || !context.settings().enabled()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        Set<Long> regions = new HashSet<>();
+        for (int dz = -2; dz <= 2; dz++) {
+            for (int dx = -2; dx <= 2; dx++) {
+                int regionX = Math.floorDiv(chunkX + dx, REGION_SIDE);
+                int regionZ = Math.floorDiv(chunkZ + dz, REGION_SIDE);
+                regions.add(((long) regionX << 32) ^ (regionZ & 0xffffffffL));
+            }
+        }
+        CompletableFuture<?>[] futures = new CompletableFuture<?>[regions.size()];
+        int index = 0;
+        for (long packed : regions) {
+            int regionX = (int) (packed >> 32);
+            int regionZ = (int) packed;
+            futures[index++] = readyRegion(context, regionX, regionZ);
+        }
+        return CompletableFuture.allOf(futures);
+    }
+
+    private static CompletableFuture<Region> readyRegion(Context context, int regionX, int regionZ) {
+        RegionKey key = new RegionKey(context.provider(), context.dimension(), regionX, regionZ,
+            context.profile().GROUNDLEVEL, context.settings().version());
+        Region cached = CACHE.get(key);
+        if (cached != null) {
+            return CompletableFuture.completedFuture(cached);
+        }
+        region(context, regionX, regionZ);
+        cached = CACHE.get(key);
+        if (cached != null) {
+            return CompletableFuture.completedFuture(cached);
+        }
+        CompletableFuture<Region> flight = REGION_FLIGHTS.get(key);
+        if (flight != null) {
+            return awaitRegionReady(context, regionX, regionZ, key, flight);
+        }
+        /* Keep the dependency pending when the builder is not available. A
+         * delayed retry prevents an edge chunk from running without a field. */
+        return retryRegionReady(context, regionX, regionZ, key);
+    }
+
+    private static CompletableFuture<Region> awaitRegionReady(Context context,
+                                                               int regionX,
+                                                               int regionZ,
+                                                               RegionKey key,
+                                                               CompletableFuture<Region> flight) {
+        CompletableFuture<Region> result = new CompletableFuture<>();
+        flight.whenComplete((built, failure) -> {
+            if (built != null && failure == null) {
+                result.complete(built);
+            } else {
+                scheduleRegionRetry(context, regionX, regionZ, key, result);
+            }
+        });
+        return result;
+    }
+
+    private static CompletableFuture<Region> retryRegionReady(Context context,
+                                                               int regionX,
+                                                               int regionZ,
+                                                               RegionKey key) {
+        CompletableFuture<Region> result = new CompletableFuture<>();
+        scheduleRegionRetry(context, regionX, regionZ, key, result);
+        return result;
+    }
+
+    private static void scheduleRegionRetry(Context context,
+                                            int regionX,
+                                            int regionZ,
+                                            RegionKey key,
+                                            CompletableFuture<Region> result) {
+        if (result.isDone()) {
+            return;
+        }
+        Long retryAt = ASYNC_RETRY_AFTER.get(key);
+        long delay = retryAt == null
+            ? ASYNC_RETRY_DELAY_NANOS
+            : Math.max(1L, retryAt - System.nanoTime());
+        CompletableFuture.delayedExecutor(delay, TimeUnit.NANOSECONDS).execute(() -> {
+            if (result.isDone()) {
+                return;
+            }
+            try {
+                Region cached = CACHE.get(key);
+                if (cached != null) {
+                    result.complete(cached);
+                    return;
+                }
+                region(context, regionX, regionZ);
+                cached = CACHE.get(key);
+                if (cached != null) {
+                    result.complete(cached);
+                    return;
+                }
+                CompletableFuture<Region> flight = REGION_FLIGHTS.get(key);
+                if (flight != null) {
+                    flight.whenComplete((built, failure) -> {
+                        if (built != null && failure == null) {
+                            result.complete(built);
+                        } else {
+                            scheduleRegionRetry(context, regionX, regionZ, key, result);
+                        }
+                    });
+                } else {
+                    scheduleRegionRetry(context, regionX, regionZ, key, result);
+                }
+            } catch (Throwable ignored) {
+                scheduleRegionRetry(context, regionX, regionZ, key, result);
+            }
+        });
+    }
+
+    /** Return the natural surface stored with a published field. */
+    public static Integer plannedNaturalSurface(Context context, int chunkX, int chunkZ) {
+        Region region = cachedRegion(context, chunkX, chunkZ);
+        if (region == null) {
+            return null;
+        }
+        return Math.round(region.natural[Math.floorMod(chunkZ, REGION_SIDE) * REGION_SIDE
+            + Math.floorMod(chunkX, REGION_SIDE)]);
+    }
+
+    /** Return the smoothed native surface stored with a published field. */
+    public static Integer plannedReferenceSurface(Context context, int chunkX, int chunkZ) {
+        Region region = cachedRegion(context, chunkX, chunkZ);
+        if (region == null) {
+            return null;
+        }
+        return Math.round(region.reference[Math.floorMod(chunkZ, REGION_SIDE) * REGION_SIDE
+            + Math.floorMod(chunkX, REGION_SIDE)]);
+    }
+
+    /** Build-time values retained by chunkdebug. */
+    public record DebugCell(boolean lockedSource,
+                            int roleType,
+                            int roleLevel,
+                            int sourceFloor,
+                            double sourceDemand,
+                            double sourceDistance,
+                            double fadeDistance,
+                            double naturalSurface,
+                            double latticeStep,
+                            double preRecoveryShift,
+                            boolean zeroDemandCityEdge,
+                            boolean exactReceiverEdge,
+                            boolean recoverySampled,
+                            boolean recoveryCandidateSeen,
+                            boolean recoveryApplied,
+                            double recoveryCandidate,
+                            int recoveryFloor,
+                            int recoveryNatural,
+                            double propagatedShift,
+                            double finalShift) {
+    }
+
+    /** Return the published cell values used by chunkdebug. */
+    public static DebugCell debugCell(Context context, int chunkX, int chunkZ) {
+        Region region = cachedRegion(context, chunkX, chunkZ);
+        if (region == null) {
+            return null;
+        }
+        int index = Math.floorMod(chunkZ, REGION_SIDE) * REGION_SIDE
+            + Math.floorMod(chunkX, REGION_SIDE);
+        int role = region.role[index];
+        byte flags = region.recoveryFlags[index];
+        return new DebugCell(
+            region.locked[index],
+            role & 3,
+            role >> 2,
+            region.sourceFloor[index],
+            region.sourceDemand[index],
+            region.sourceDistance[index],
+            region.fadeDistance[index],
+            region.natural[index],
+            region.step[index],
+            region.preRecoveryShift[index],
+            (flags & 1) != 0,
+            (flags & 2) != 0,
+            (flags & 4) != 0,
+            (flags & 8) != 0,
+            (flags & 16) != 0,
+            region.recoveryCandidate[index],
+            region.recoveryFloor[index],
+            region.recoveryNatural[index],
+            region.propagatedShift[index],
+            region.shift[index]);
+    }
+
+    /** Return a published shift without starting a field build. */
+    public static double cachedShiftAtChunk(Context context, int chunkX, int chunkZ) {
+        Region region = cachedRegion(context, chunkX, chunkZ);
+        if (region == null) {
+            return 0.0D;
+        }
+        return region.shift[Math.floorMod(chunkZ, REGION_SIDE) * REGION_SIDE
+            + Math.floorMod(chunkX, REGION_SIDE)];
+    }
+
+    /** Check published field coverage for a Blender region. */
+    public static boolean hasCachedPositiveShiftNear(Context context,
+                                                      int chunkX,
+                                                      int chunkZ,
+                                                      int radius) {
+        if (context == null || !context.settings().enabled()) {
+            return false;
+        }
+        int scan = Math.max(1, Math.min(MAX_HALO + 2, radius));
+        for (int dz = -scan; dz <= scan; dz++) {
+            for (int dx = -scan; dx <= scan; dx++) {
+                if (cachedShiftAtChunk(context, chunkX + dx, chunkZ + dz) > 0.0D) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static Region cachedRegion(Context context, int chunkX, int chunkZ) {
+        if (context == null || !context.settings().enabled()) {
+            return null;
+        }
+        RegionKey key = new RegionKey(context.provider(), context.dimension(),
+            Math.floorDiv(chunkX, REGION_SIDE), Math.floorDiv(chunkZ, REGION_SIDE),
+            context.profile().GROUNDLEVEL, context.settings().version());
+        return CACHE.get(key);
+    }
+
     /** Apply the config-screen blend shape without restarting the server. */
     public static void withBlendShape(int widthBlocks, double softness) {
         int width = Math.max(8, Math.min(MAX_HALO * 16, widthBlocks));
@@ -240,10 +487,14 @@ public final class CityShiftField {
             + ", positiveDemandCells=" + POSITIVE_DEMAND_CELLS.get()
             + ", maxDemand=" + MAX_DEMAND.get()
             + ", positiveOwnedCells=" + POSITIVE_OWNED_CELLS.get()
+            + ", receiverHeightCorrections=" + RECEIVER_HEIGHT_CORRECTIONS.get()
             + ", maxOwnedShift=" + MAX_OWNED_SHIFT.get()
             + ", heightSamples=" + HEIGHT_SAMPLES.get()
             + ", exactHeightSamples=" + EXACT_HEIGHT_SAMPLES.get()
             + ", exactHeightFailures=" + EXACT_HEIGHT_FAILURES.get()
+            + ", edgeRecovery[candidates=" + EDGE_RECOVERY_CANDIDATES.get()
+            + " samples=" + EDGE_RECOVERY_SAMPLES.get()
+            + " applied=" + EDGE_RECOVERY_APPLIED.get() + "]"
             + ", erosionSamples=" + EROSION_SAMPLES.get()
             + ", avgSweeps=" + (built == 0 ? "n/a"
                 : String.format(java.util.Locale.ROOT, "%.1f", (double) SWEEPS.get() / built))
@@ -255,6 +506,9 @@ public final class CityShiftField {
             + ", stableRoleHits=" + STABLE_ROLE_HITS.get()
             + ", stableRoleFallbacks=" + STABLE_ROLE_FALLBACKS.get()
             + ", roleHeightEstimates=" + ROLE_HEIGHT_ESTIMATES.get()
+            + ", rawCityFactorFallbacks=" + RAW_CITY_FACTOR_FALLBACKS.get()
+            + ", cityLevelDirectLookups=" + CITY_LEVEL_DIRECT_LOOKUPS.get()
+            + ", cityLevelHeightFallbacks=" + CITY_LEVEL_HEIGHT_FALLBACKS.get()
             + ", regionFlightWaits=" + REGION_FLIGHT_WAITS.get()
             + ", regionFallbacks=" + REGION_FALLBACKS.get()
             + ", roleFlightWaits=" + ROLE_FLIGHT_WAITS.get()
@@ -265,6 +519,9 @@ public final class CityShiftField {
             + ", asyncCompleted=" + ASYNC_COMPLETED.get()
             + ", asyncRejected=" + ASYNC_REJECTED.get()
             + ", asyncFailed=" + ASYNC_FAILED.get()
+            + ", prewarm[requests=" + PREWARM_REQUESTS.get()
+            + " ready=" + PREWARM_READY.get()
+            + " noWait=" + PREWARM_NO_WAIT.get() + "]"
             + ", asyncActive=" + ASYNC_BUILD_EXECUTOR.getActiveCount()
             + ", asyncQueued=" + ASYNC_BUILD_EXECUTOR.getQueue().size()
             + ", blendWidthBlocks=" + BLEND_WIDTH_BLOCKS
@@ -303,18 +560,13 @@ public final class CityShiftField {
             ASYNC_SUBMITTED.incrementAndGet();
         } catch (RejectedExecutionException rejected) {
             ASYNC_REJECTED.incrementAndGet();
-            /* Never run the expensive height/role pass on a worldgen worker.
-             * Queue pressure is expected during a burst; let the cheap,
-             * deterministic scalar fallback cover this sample and retry the
-             * immutable region after the bounded builder drains. */
+            /* Keep the expensive pass off worldgen workers. Retry after queue
+             * pressure eases. */
             ASYNC_RETRY_AFTER.put(key, System.nanoTime() + ASYNC_RETRY_DELAY_NANOS);
             REGION_FLIGHTS.remove(key, created);
             created.completeExceptionally(rejected);
         }
-        /* Never wait here. The worldgen worker immediately uses the bounded
-         * scalar fallback; later chunks reuse the completed immutable region.
-         * This keeps the concurrent path from parking behind Lost Cities'
-         * generation lock while preserving a single published field. */
+        /* Return the scalar fallback while the region is built. */
         return awaitRegion(created);
     }
 
@@ -361,6 +613,9 @@ public final class CityShiftField {
             created.cancel(false);
         } catch (Throwable failure) {
             ASYNC_FAILED.incrementAndGet();
+            /* Retry after a transient builder failure so the chunk does not
+             * fall back to an unmodified edge. */
+            ASYNC_RETRY_AFTER.put(key, System.nanoTime() + ASYNC_RETRY_DELAY_NANOS);
             created.completeExceptionally(failure);
         } finally {
             REGION_FLIGHTS.remove(key, created);
@@ -381,9 +636,7 @@ public final class CityShiftField {
         if (probe == null || (!probe.isCity() && probe.highwayLevel() < 0)) {
             return 0.0D;
         }
-        /* A pending region must never make a worldgen worker sample or join
-         * vanilla noise. Use a resident height if one exists and let the
-         * asynchronous region publish the authoritative value later. */
+        /* Use a resident height while the regional field is pending. */
         Integer cachedNatural = context.terrain().cachedChunkHeight(chunkX, chunkZ);
         if (cachedNatural == null) {
             REGION_FALLBACKS.incrementAndGet();
@@ -446,70 +699,91 @@ public final class CityShiftField {
         float[] reference = blur(coarseNatural, coarseSide, REFERENCE_BLUR_COARSE);
 
         float[] step = new float[cells];
+        float[] naturalSurface = new float[cells];
         for (int gz = 0; gz < side; gz++) {
             for (int gx = 0; gx < side; gx++) {
-                step[gz * side + gx] = (float) bilinear(coarseStep, coarseSide, gx, gz);
+                int index = gz * side + gx;
+                step[index] = (float) bilinear(coarseStep, coarseSide, gx, gz);
+                naturalSurface[index] = (float) bilinear(coarseNatural, coarseSide, gx, gz);
             }
         }
         long coarseNanos = System.nanoTime() - phaseStarted;
 
         phaseStarted = System.nanoTime();
-        HeightEstimate previousEstimate = HEIGHT_ESTIMATE.get();
-        HEIGHT_ESTIMATE.set(new HeightEstimate(context, originX, originZ,
-            coarseNatural, coarseSide));
         float[] value = new float[cells];
         float[] sourceDemand = new float[cells];
         float[] sourceDistance = new float[cells];
+        int[] sourceFloor = new int[cells];
+        int[] roleByCell = new int[cells];
         boolean[] locked = new boolean[cells];
         Arrays.fill(value, Float.NEGATIVE_INFINITY);
         Arrays.fill(sourceDistance, Float.POSITIVE_INFINITY);
-        try {
-            for (int gz = 0; gz < side; gz++) {
-                for (int gx = 0; gx < side; gx++) {
-                    if ((gx % ROLE_YIELD_INTERVAL) == 0) {
-                        yieldToWorldgen();
-                    }
-                    int chunkX = originX + gx;
-                    int chunkZ = originZ + gz;
-                    long roleValue = packedRole(context, chunkX, chunkZ);
-                    int role = roleCode(roleValue);
-                    if (!demandsShift(role)) {
-                        continue;
-                    }
-                    int floor = context.profile().GROUNDLEVEL
-                        + roleLevel(role) * LostCityTerrainFeature.FLOORHEIGHT;
-                    int natural = naturalHeight(roleValue);
-                    if (natural == Integer.MIN_VALUE) {
-                        // A role can come from an older cache before the sampler
-                        // is ready. Keep the exact safe fallback for that window.
-                        HEIGHT_SAMPLES.incrementAndGet();
-                        natural = context.terrain().chunkHeight(chunkX, chunkZ);
-                    }
-                    int demand = Math.max(0, Math.min(settings.maxShift(), natural - floor));
-                    int index = gz * side + gx;
-                    value[index] = demand;
-                    sourceDemand[index] = demand;
-                    sourceDistance[index] = 0.0F;
-                    locked[index] = true;
-                    DEMAND_CELLS.incrementAndGet();
-                    if (demand > 0) {
-                        POSITIVE_DEMAND_CELLS.incrementAndGet();
-                        MAX_DEMAND.accumulateAndGet(demand, Math::max);
-                    }
+        Arrays.fill(sourceFloor, Integer.MIN_VALUE);
+        for (int gz = 0; gz < side; gz++) {
+            for (int gx = 0; gx < side; gx++) {
+                if ((gx % ROLE_YIELD_INTERVAL) == 0) {
+                    yieldToWorldgen();
                 }
-            }
-        } finally {
-            if (previousEstimate == null) {
-                HEIGHT_ESTIMATE.remove();
-            } else {
-                HEIGHT_ESTIMATE.set(previousEstimate);
+                int chunkX = originX + gx;
+                int chunkZ = originZ + gz;
+                int index = gz * side + gx;
+                long roleValue = packedRole(context, chunkX, chunkZ);
+                int role = roleCode(roleValue);
+                roleByCell[index] = role;
+                if (!demandsShift(role)) {
+                    continue;
+                }
+                int floor = context.profile().GROUNDLEVEL
+                    + roleLevel(role) * LostCityTerrainFeature.FLOORHEIGHT;
+                int natural = naturalHeight(roleValue);
+                if (natural == Integer.MIN_VALUE) {
+                    // A cached role can arrive before its height. Sample it now.
+                    HEIGHT_SAMPLES.incrementAndGet();
+                    natural = context.terrain().chunkHeight(chunkX, chunkZ);
+                }
+                /* Keep exact heights for city sources so nearby ridges use the
+                 * real boundary instead of the coarse average. */
+                naturalSurface[index] = natural;
+                int demand = Math.max(0, Math.min(settings.maxShift(), natural - floor));
+                value[index] = demand;
+                sourceDemand[index] = demand;
+                sourceDistance[index] = 0.0F;
+                sourceFloor[index] = floor;
+                locked[index] = true;
+                DEMAND_CELLS.incrementAndGet();
+                if (demand > 0) {
+                    POSITIVE_DEMAND_CELLS.incrementAndGet();
+                    MAX_DEMAND.accumulateAndGet(demand, Math::max);
+                }
             }
         }
         long roleNanos = System.nanoTime() - phaseStarted;
+        /* Keep propagation distance separate from the visual fade distance. */
+        float[] fadeDistance = nearestLockedDistance(locked, side, BLEND_WIDTH_BLOCKS);
+
+        /* Refresh the first non-city ring with exact heights before the
+         * gradient pass so narrow ridges are represented. */
+        refineCityEdgeNaturalSurface(context, originX, originZ, side, locked, naturalSurface);
 
         phaseStarted = System.nanoTime();
-        int sweeps = boundedGradientTransform(value, sourceDemand, sourceDistance, locked, step, side,
-            BLEND_WIDTH_BLOCKS);
+        int sweeps = boundedGradientTransform(value, sourceDemand, sourceDistance, locked, step,
+            naturalSurface, side, BLEND_WIDTH_BLOCKS);
+        float[] preRecoveryShift = Arrays.copyOf(value, cells);
+        float[] recoveryCandidate = new float[cells];
+        int[] recoveryFloor = new int[cells];
+        int[] recoveryNatural = new int[cells];
+        byte[] recoveryFlags = new byte[cells];
+        Arrays.fill(recoveryCandidate, Float.NEGATIVE_INFINITY);
+        Arrays.fill(recoveryFloor, Integer.MIN_VALUE);
+        Arrays.fill(recoveryNatural, Integer.MIN_VALUE);
+        // Recover zero-demand edge cells from their exact base height. This is
+        // limited to the configured blend radius.
+        if (recoverSharpCityEdges(context, originX, originZ, side, value, sourceDemand,
+            sourceDistance, sourceFloor, locked, step, settings, recoveryCandidate,
+            recoveryFloor, recoveryNatural, recoveryFlags)) {
+            sweeps += boundedGradientTransform(value, sourceDemand, sourceDistance, locked, step,
+                naturalSurface, side, BLEND_WIDTH_BLOCKS);
+        }
         SWEEPS.addAndGet(sweeps);
         if (sweeps >= MAX_SWEEPS) {
             UNCONVERGED.incrementAndGet();
@@ -518,18 +792,51 @@ public final class CityShiftField {
 
         phaseStarted = System.nanoTime();
         float[] owned = new float[REGION_SIDE * REGION_SIDE];
+        float[] ownedNatural = new float[owned.length];
+        float[] ownedReference = new float[owned.length];
+        float[] ownedStep = new float[owned.length];
+        float[] ownedSourceDemand = new float[owned.length];
+        float[] ownedSourceDistance = new float[owned.length];
+        float[] ownedFadeDistance = new float[owned.length];
+        float[] ownedPreRecoveryShift = new float[owned.length];
+        float[] ownedRecoveryCandidate = new float[owned.length];
+        float[] ownedPropagatedShift = new float[owned.length];
+        int[] ownedRole = new int[owned.length];
+        int[] ownedSourceFloor = new int[owned.length];
+        int[] ownedRecoveryFloor = new int[owned.length];
+        int[] ownedRecoveryNatural = new int[owned.length];
+        boolean[] ownedLocked = new boolean[owned.length];
+        byte[] ownedRecoveryFlags = new byte[owned.length];
         double strength = settings.reliefStrength();
         for (int localZ = 0; localZ < REGION_SIDE; localZ++) {
             for (int localX = 0; localX < REGION_SIDE; localX++) {
                 int gx = localX + halo;
                 int gz = localZ + halo;
                 int index = gz * side + gx;
+                int ownedIndex = localZ * REGION_SIDE + localX;
+                double natural = naturalSurface[index];
+                double smooth = bilinear(reference, coarseSide, gx, gz);
+                ownedNatural[ownedIndex] = (float) natural;
+                ownedReference[ownedIndex] = (float) smooth;
+                ownedStep[ownedIndex] = step[index];
+                ownedSourceDemand[ownedIndex] = sourceDemand[index];
+                ownedSourceDistance[ownedIndex] = sourceDistance[index];
+                ownedFadeDistance[ownedIndex] = fadeDistance[index];
+                ownedPreRecoveryShift[ownedIndex] = preRecoveryShift[index];
+                ownedRecoveryCandidate[ownedIndex] = recoveryCandidate[index];
+                ownedPropagatedShift[ownedIndex] = value[index];
+                ownedRole[ownedIndex] = roleByCell[index];
+                ownedSourceFloor[ownedIndex] = sourceFloor[index];
+                ownedRecoveryFloor[ownedIndex] = recoveryFloor[index];
+                ownedRecoveryNatural[ownedIndex] = recoveryNatural[index];
+                ownedLocked[ownedIndex] = locked[index];
+                ownedRecoveryFlags[ownedIndex] = recoveryFlags[index];
                 double shift = value[index];
                 if (shift <= 0.0D) {
-                    owned[localZ * REGION_SIDE + localX] = 0.0F;
+                    owned[ownedIndex] = 0.0F;
                     continue;
                 }
-                double distance = sourceDistance[index];
+                double distance = fadeDistance[index];
                 if (Double.isFinite(distance) && BLEND_WIDTH_BLOCKS > 0) {
                     double normalized = Mth.clamp(distance / BLEND_WIDTH_BLOCKS, 0.0D, 1.0D);
                     normalized = Math.pow(normalized, BLEND_SOFTNESS);
@@ -541,26 +848,329 @@ public final class CityShiftField {
                 if (strength > 0.0D && !locked[index] && sourceDemand[index] > 1.0F) {
                     double t = Mth.clamp(shift / sourceDemand[index], 0.0D, 1.0D);
                     double alpha = strength * 4.0D * t * (1.0D - t);
-                    double natural = bilinear(coarseNatural, coarseSide, gx, gz);
-                    double smooth = bilinear(reference, coarseSide, gx, gz);
-
                     shift += alpha * Math.max(0.0D, natural - smooth);
                 }
-                owned[localZ * REGION_SIDE + localX] = (float) shift;
+                owned[ownedIndex] = (float) shift;
             }
         }
         long finishNanos = System.nanoTime() - phaseStarted;
-        return new Region(owned, coarseNanos, roleNanos, gradientNanos, finishNanos);
+        return new Region(owned, ownedNatural, ownedReference, ownedStep,
+            ownedSourceDemand, ownedSourceDistance, ownedFadeDistance, ownedPreRecoveryShift,
+            ownedRecoveryCandidate, ownedPropagatedShift, ownedLocked,
+            ownedRole, ownedSourceFloor, ownedRecoveryFloor, ownedRecoveryNatural,
+            ownedRecoveryFlags,
+            coarseNanos, roleNanos, gradientNanos, finishNanos);
     }
 
     private static void yieldToWorldgen() {
-        /* The region future is now joined by the caller. Waiting here for a
-         * Lost Cities feature lock would deadlock when that feature asks the
-         * late floor bridge for the same region. The role/BuildingInfo caches
-         * are concurrent; give an active worker a scheduling hint without an
-         * unbounded quiet-period delay on every lattice sample. */
+        /* Avoid waiting on Lost Cities locks while sampling a field. */
         if (LostCitiesGenerationLocks.activeHolders() > 0) {
             Thread.yield();
+        }
+    }
+
+    private static boolean recoverSharpCityEdges(Context context,
+                                                  int originX,
+                                                  int originZ,
+                                                  int side,
+                                                  float[] value,
+                                                  float[] sourceDemand,
+                                                  float[] sourceDistance,
+                                                  int[] sourceFloor,
+                                                  boolean[] locked,
+                                                  float[] step,
+                                                  ShiftSettings settings,
+                                                  float[] recoveryCandidate,
+                                                  int[] recoveryFloor,
+                                                  int[] recoveryNatural,
+                                                  byte[] recoveryFlags) {
+        if (BLEND_WIDTH_BLOCKS <= 0) {
+            return false;
+        }
+        // The first ring seeds the existing gradient pass; do not sample the
+        // whole skirt at full resolution.
+        int radius = 1;
+        boolean changed = false;
+        for (int z = 0; z < side; z++) {
+            for (int x = 0; x < side; x++) {
+                int index = z * side + x;
+                boolean zeroDemandCityEdge = locked[index]
+                    && value[index] <= 1.0E-4F
+                    && sourceFloor[index] != Integer.MIN_VALUE
+                    && hasUnlockedNeighbour(locked, x, z, side);
+                boolean exactReceiverEdge = !locked[index]
+                    && (hasLockedNeighbour(locked, x, z, side)
+                        || hasRawCityNeighbour(context, originX, originZ, x, z, side));
+                if (zeroDemandCityEdge) {
+                    recoveryFlags[index] |= 1;
+                }
+                if (exactReceiverEdge) {
+                    recoveryFlags[index] |= 2;
+                }
+                if ((!zeroDemandCityEdge && !exactReceiverEdge && locked[index])
+                    || (value[index] > 1.0E-4F && !exactReceiverEdge)) {
+                    continue;
+                }
+                float best = value[index];
+                float bestDistance = Float.POSITIVE_INFINITY;
+                int exactNatural = Integer.MIN_VALUE;
+                boolean exactSampled = false;
+                if (zeroDemandCityEdge) {
+                    exactNatural = exactEdgeHeight(context, originX + x, originZ + z);
+                    exactSampled = true;
+                    recoveryFlags[index] |= 4;
+                    recoveryNatural[index] = exactNatural;
+                    if (exactNatural != Integer.MIN_VALUE) {
+                        best = (float) Math.min(settings.maxShift(),
+                            Math.max(0.0D, exactNatural - sourceFloor[index]));
+                        bestDistance = 0.0F;
+                    }
+                }
+                for (int dz = -radius; dz <= radius; dz++) {
+                    for (int dx = -radius; dx <= radius; dx++) {
+                        if (dx == 0 && dz == 0) {
+                            continue;
+                        }
+                        int nx = x + dx;
+                        int nz = z + dz;
+                        if (nx < 0 || nz < 0 || nx >= side || nz >= side) {
+                            continue;
+                        }
+                        int neighbour = nz * side + nx;
+                        int floor = sourceFloor[neighbour];
+                        if (floor == Integer.MIN_VALUE) {
+                            floor = rawCityFloor(context, originX + nx, originZ + nz);
+                        }
+                        if (floor == Integer.MIN_VALUE) {
+                            continue;
+                        }
+                        float distance = (float) (16.0D * Math.hypot(dx, dz));
+                        if (distance > BLEND_WIDTH_BLOCKS + 1.0E-4F) {
+                            continue;
+                        }
+                        EDGE_RECOVERY_CANDIDATES.incrementAndGet();
+                        if (!exactSampled) {
+                            try {
+                                EDGE_RECOVERY_SAMPLES.incrementAndGet();
+                                exactNatural = context.terrain().chunkHeight(originX + x, originZ + z);
+                                exactSampled = true;
+                                recoveryFlags[index] |= 4;
+                                recoveryNatural[index] = exactNatural;
+                            } catch (Throwable ignored) {
+                                EXACT_HEIGHT_FAILURES.incrementAndGet();
+                                exactSampled = true;
+                                recoveryFlags[index] |= 4;
+                            }
+                        }
+                        if (exactNatural == Integer.MIN_VALUE) {
+                            continue;
+                        }
+                        float slopeCost = 0.5F * (step[index] + step[neighbour])
+                            * (distance / 16.0F);
+                        float candidate = (float) Math.min(settings.maxShift(),
+                            Math.max(0.0D, exactNatural - floor - slopeCost));
+                        recoveryFlags[index] |= 8;
+                        if (candidate > recoveryCandidate[index]) {
+                            recoveryCandidate[index] = candidate;
+                            recoveryFloor[index] = floor;
+                            recoveryNatural[index] = exactNatural;
+                        }
+                        if (candidate > best + 1.0E-4F) {
+                            best = candidate;
+                            bestDistance = distance;
+                        }
+                    }
+                }
+                if (best > value[index] + 1.0E-4F) {
+                    value[index] = best;
+                    sourceDistance[index] = bestDistance;
+                    if (zeroDemandCityEdge || exactReceiverEdge) {
+                        sourceDemand[index] = best;
+                        if (best > 0.0F) {
+                            POSITIVE_DEMAND_CELLS.incrementAndGet();
+                            MAX_DEMAND.accumulateAndGet((int) Math.ceil(best), Math::max);
+                        }
+                    }
+                    EDGE_RECOVERY_APPLIED.incrementAndGet();
+                    recoveryFlags[index] |= 16;
+                    changed = true;
+                }
+            }
+        }
+        return changed;
+    }
+
+    private static void refineCityEdgeNaturalSurface(Context context,
+                                                      int originX,
+                                                      int originZ,
+                                                      int side,
+                                                      boolean[] locked,
+                                                      float[] naturalSurface) {
+        if (context == null || BLEND_WIDTH_BLOCKS <= 0) {
+            return;
+        }
+        for (int z = 0; z < side; z++) {
+            for (int x = 0; x < side; x++) {
+                int index = z * side + x;
+                if (locked[index] || !hasLockedNeighbour(locked, x, z, side)) {
+                    continue;
+                }
+                int exact = exactEdgeHeight(context, originX + x, originZ + z);
+                if (exact != Integer.MIN_VALUE) {
+                    naturalSurface[index] = exact;
+                }
+            }
+        }
+    }
+
+    private static boolean hasLockedNeighbour(boolean[] locked, int x, int z, int side) {
+        for (int dz = -1; dz <= 1; dz++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+                int nx = x + dx;
+                int nz = z + dz;
+                if (nx >= 0 && nz >= 0 && nx < side && nz < side
+                    && locked[nz * side + nx]) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static float[] nearestLockedDistance(boolean[] locked,
+                                                  int side,
+                                                  int maxDistanceBlocks) {
+        float[] distance = new float[locked.length];
+        Arrays.fill(distance, Float.POSITIVE_INFINITY);
+        int radius = Math.max(1, (int) Math.ceil(maxDistanceBlocks / 16.0D));
+        for (int z = 0; z < side; z++) {
+            for (int x = 0; x < side; x++) {
+                int index = z * side + x;
+                if (locked[index]) {
+                    distance[index] = 0.0F;
+                    continue;
+                }
+                float best = Float.POSITIVE_INFINITY;
+                for (int dz = -radius; dz <= radius; dz++) {
+                    for (int dx = -radius; dx <= radius; dx++) {
+                        int nx = x + dx;
+                        int nz = z + dz;
+                        if (nx < 0 || nz < 0 || nx >= side || nz >= side
+                            || !locked[nz * side + nx]) {
+                            continue;
+                        }
+                        float candidate = (float) (16.0D * Math.hypot(dx, dz));
+                        if (candidate <= maxDistanceBlocks + 1.0E-4F) {
+                            best = Math.min(best, candidate);
+                        }
+                    }
+                }
+                distance[index] = best;
+            }
+        }
+        return distance;
+    }
+
+    private static boolean hasRawCityNeighbour(Context context,
+                                                int originX,
+                                                int originZ,
+                                                int x,
+                                                int z,
+                                                int side) {
+        for (int dz = -1; dz <= 1; dz++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+                int nx = x + dx;
+                int nz = z + dz;
+                if (nx >= 0 && nz >= 0 && nx < side && nz < side
+                    && rawCityFloor(context, originX + nx, originZ + nz)
+                        != Integer.MIN_VALUE) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static int rawCityFloor(Context context, int chunkX, int chunkZ) {
+        if (context == null) {
+            return Integer.MIN_VALUE;
+        }
+        try {
+            ChunkCoord coord = new ChunkCoord(context.dimension(), chunkX, chunkZ);
+            if (!rawCityPredicate(context, coord)) {
+                return Integer.MIN_VALUE;
+            }
+            ChunkRoleProbe.Probe stable = ChunkRoleProbe.peekStableTerrainProbe(
+                context.provider(), context.dimension(), chunkX, chunkZ);
+            int level = stable != null ? stable.cityLevel() : 0;
+            return context.profile().GROUNDLEVEL
+                + level * LostCityTerrainFeature.FLOORHEIGHT;
+        } catch (Throwable ignored) {
+            return Integer.MIN_VALUE;
+        }
+    }
+
+    /** Resolve the raw Lost Cities city predicate for the field. */
+    private static boolean rawCityPredicate(Context context, ChunkCoord coord) {
+        if (context == null || coord == null) {
+            return false;
+        }
+        LostCityProfile profile = context.profile();
+        IDimensionInfo provider = context.provider();
+        try {
+            if (profile.isFloating() && BuildingInfo.isVoidChunk(coord, provider)) {
+                return false;
+            }
+            boolean city = PlannerHotPath.run(() ->
+                BuildingInfo.isCityRaw(coord, provider, profile));
+            if (city) {
+                return true;
+            }
+            if ((profile.isSpace() || profile.isSpheres())
+                && (CitySphere.onCitySphereBorder(coord, provider)
+                || CitySphere.hasMonorailStation(coord, provider))) {
+                return false;
+            }
+            boolean factorCity = City.getCityFactor(coord, provider, profile) > profile.CITY_THRESHOLD;
+            if (factorCity) {
+                RAW_CITY_FACTOR_FALLBACKS.incrementAndGet();
+            }
+            return factorCity;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean hasUnlockedNeighbour(boolean[] locked, int x, int z, int side) {
+        for (int dz = -1; dz <= 1; dz++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+                int nx = x + dx;
+                int nz = z + dz;
+                if (nx >= 0 && nz >= 0 && nx < side && nz < side
+                    && !locked[nz * side + nx]) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static int exactEdgeHeight(Context context, int chunkX, int chunkZ) {
+        try {
+            EDGE_RECOVERY_SAMPLES.incrementAndGet();
+            return context.terrain().chunkHeight(chunkX, chunkZ);
+        } catch (Throwable ignored) {
+            EXACT_HEIGHT_FAILURES.incrementAndGet();
+            return Integer.MIN_VALUE;
         }
     }
 
@@ -587,8 +1197,21 @@ public final class CityShiftField {
                                         float[] step,
                                         int side,
                                         int blendWidthBlocks) {
+        return boundedGradientTransform(value, sourceDemand, sourceDistance, locked, step,
+            new float[value.length], side, blendWidthBlocks);
+    }
+
+    static int boundedGradientTransform(float[] value,
+                                        float[] sourceDemand,
+                                        float[] sourceDistance,
+                                        boolean[] locked,
+                                        float[] step,
+                                        float[] naturalSurface,
+                                        int side,
+                                        int blendWidthBlocks) {
         final float epsilon = 1.0E-4F;
         final float maxDistance = Math.max(8.0F, blendWidthBlocks);
+        long receiverHeightCorrections = 0L;
         for (int sweep = 1; sweep <= MAX_SWEEPS; sweep++) {
             boolean changed = false;
             boolean forward = (sweep & 1) == 1;
@@ -598,15 +1221,8 @@ public final class CityShiftField {
             for (int z = start; z != end; z += delta) {
                 for (int x = start; x != end; x += delta) {
                     int i = z * side + x;
-                    /* Source demands are lower bounds, not hard walls.  The
-                     * previous pass skipped every source cell here, so two
-                     * neighbouring city cells could retain unrelated
-                     * height-derived demands (for example 30 next to 0) even
-                     * though the transition solver had a slope budget.  Let
-                     * the same bounded envelope raise the lower source while
-                     * never lowering its own demand.  The locked bit remains
-                     * useful to keep relief correction off the authoritative
-                     * source cells below. */
+                    /* Source demand is a lower bound. Let the envelope raise a
+                     * neighbouring source without lowering its own demand. */
                     float best = value[i];
                     float bestDemand = sourceDemand[i];
                     for (int dz = -1; dz <= 1; dz++) {
@@ -636,8 +1252,14 @@ public final class CityShiftField {
                             }
                             float mean = 0.5F * (step[i] + step[n]);
                             float cost = (dx != 0 && dz != 0) ? (float) (mean * SQRT2) : mean;
-                            float candidate = value[n] - cost;
+                            /* Propagate the allowed surface through the
+                             * height difference between neighbouring cells. */
+                            float receiverRise = naturalSurface[i] - naturalSurface[n];
+                            float candidate = value[n] + receiverRise - cost;
                             if (candidate > best + epsilon) {
+                                if (receiverRise > epsilon) {
+                                    receiverHeightCorrections++;
+                                }
                                 best = candidate;
                                 bestDemand = sourceDemand[n];
                                 if (!locked[i]) {
@@ -660,9 +1282,11 @@ public final class CityShiftField {
                 }
             }
             if (!changed) {
+                RECEIVER_HEIGHT_CORRECTIONS.addAndGet(receiverHeightCorrections);
                 return sweep;
             }
         }
+        RECEIVER_HEIGHT_CORRECTIONS.addAndGet(receiverHeightCorrections);
         return MAX_SWEEPS;
     }
 
@@ -760,88 +1384,56 @@ public final class CityShiftField {
             }
 
         /* Reuse the immutable role from the density lattice when it is ready.
-         * That avoids another City.getCityFactor and highway noise lookup per cell.
-         * If it is not ready, use the exact old calculation. */
+         * The async field handles terrain only. Roads and rails stay on the
+         * Lost Cities placement path to avoid route-cache lock cycles. */
             ChunkRoleProbe.Probe stable = ChunkRoleProbe.peekStableTerrainProbe(
                 provider, context.dimension(), chunkX, chunkZ);
             boolean city;
-            int cachedHighwayLevel = -1;
             if (stable != null) {
                 STABLE_ROLE_HITS.incrementAndGet();
                 city = stable.isCity();
-                cachedHighwayLevel = stable.highwayLevel();
             } else {
-                /* The stable probe also resolves highway tunnels and can
-                 * reopen Lost Cities' full heightmap path. The shift builder
-                 * already owns a coarse natural lattice and only needs the
-                 * city predicate here. Reuse the cached/memoized City factor
-                 * directly and let the normal highway lookup handle routes;
-                 * this removes a second expensive probe stack per cell. */
+                /* Use the raw Lost Cities predicate when the stable role cache
+                 * has no entry. */
                 STABLE_ROLE_FALLBACKS.incrementAndGet();
-                city = PlannerHotPath.run(() ->
-                    City.getCityFactor(coord, provider, profile) > profile.CITY_THRESHOLD);
+                city = rawCityPredicate(context, coord);
             }
             int naturalHeight = Integer.MIN_VALUE;
             if (city) {
-                /* Keep the role lattice nonblocking. A cold exact heightmap
-                 * lookup recursively re-enters Lost Cities generation and can
-                 * leave the async builder stuck for tens of seconds. */
+                /* Keep cold height lookups on the regional builder. */
                 naturalHeight = roleHeight(context, chunkX, chunkZ);
                 boolean elevated = naturalHeight
                     >= profile.GROUNDLEVEL + MountainCityReservationPlanner.MIN_RISE;
-                /* The reservation planner is intentionally not entered from
-                 * the density role cache. Its cold build samples a full
-                 * Lost Cities heightmap envelope and doing that while a role
-                 * flight is held makes every neighbouring worldgen worker
-                 * queue behind the same monitor. Structure placement still
-                 * asks the authoritative planner directly. During terrain
-                 * planning we only consume a plan that is already published.
-                 */
+                /* Do not start a reservation build from the role cache. Use a
+                 * published reservation when one is available. */
                 if (elevated
                     && MountainCityReservationPlanner.peekRemovesBuildingCell(
                         provider, coord, profile)) {
                     city = false;
                 }
             }
-            int highwayLevel = -1;
             if (!city) {
-                highwayLevel = stable != null
-                    ? cachedHighwayLevel
-                    : highwayLevel(provider, profile, coord, chunkX, chunkZ);
-            }
-            if (!city && highwayLevel < 0) {
                 return noRoleValue();
             }
 
-        // Sphere border checks are expensive. Only run them for cells that could
-        // become a city or surface highway.
+            // Sphere border checks are only needed for city cells.
             if ((profile.isSpace() || profile.isSpheres())
                 && (CitySphere.onCitySphereBorder(coord, provider)
                 || CitySphere.hasMonorailStation(coord, provider))) {
                 return noRoleValue();
             }
             if (city) {
-                /* This is an advisory terrain lattice, not the owner of the
-                 * final Lost Cities floor. Calling BuildingInfo.getCityLevel
-                 * here rebuilds a full density heightmap on both shift
-                 * workers. Use the stable published level when possible and
-                 * otherwise derive the same height band from this region's
-                 * already sampled natural height. The real chunk path still
-                 * computes and caches the authoritative level. */
+                /* Use the cached level when available. For a cold role, query
+                 * the profile's floor band without rebuilding the full field. */
                 int level = stable != null
                     ? stable.cityLevel()
-                    : cityLevelFromHeight(naturalHeight, profile);
+                    : cityLevelForColdRole(context, coord, naturalHeight);
                 return roleValue(packRole(ROLE_CITY, level), naturalHeight);
             }
 
-            int routeY = profile.GROUNDLEVEL
-                + highwayLevel * LostCityTerrainFeature.FLOORHEIGHT + 3;
-            naturalHeight = roleHeight(context, chunkX, chunkZ);
-            boolean tunnel = naturalHeight > routeY;
-            if (tunnel) {
-                return noRoleValue();
-            }
-            return roleValue(packRole(ROLE_HIGHWAY, Math.max(0, highwayLevel)), naturalHeight);
+            // Defensive fallback if the role predicate changes.
+            return noRoleValue();
+
         } catch (Throwable ignored) {
             return noRoleValue();
         }
@@ -859,67 +1451,26 @@ public final class CityShiftField {
         return 8;
     }
 
-    private static int highwayLevel(IDimensionInfo provider,
-                                    LostCityProfile profile,
-                                    ChunkCoord coord,
-                                    int chunkX,
-                                    int chunkZ) {
-        // The legacy highway path rejects non-corridor cells before its noise lookup.
-        // Keep the intercity path nonblocking in density evaluation. Its planner
-        // is serialized and may recursively sample Lost Cities' full heightmap.
-        if (provider.getHighwayGenerationMode() != HighwayGenerationMode.LEGACY) {
-            if (provider.getHighwayGenerationMode() == HighwayGenerationMode.INTERCITY_NETWORK_V1) {
-                return IntercityHighwayIndex.peekLevel(provider, profile, coord, null);
-            }
-            return Math.max(
-                Highway.getXHighwayLevel(coord, provider, profile),
-                Highway.getZHighwayLevel(coord, provider, profile));
+    /** Resolve a cold role's Lost Cities floor band. */
+    private static int cityLevelForColdRole(Context context,
+                                            ChunkCoord coord,
+                                            int naturalHeight) {
+        try {
+            CITY_LEVEL_DIRECT_LOOKUPS.incrementAndGet();
+            int level = PlannerHotPath.run(() ->
+                BuildingInfo.getCityLevel(coord, context.provider()));
+            return Math.max(0, Math.min(8, level));
+        } catch (Throwable ignored) {
+            CITY_LEVEL_HEIGHT_FALLBACKS.incrementAndGet();
+            return cityLevelFromHeight(naturalHeight, context.profile());
         }
-        int mask = profile.HIGHWAY_DISTANCE_MASK;
-        if (mask <= 0) {
-            return -1;
-        }
-        int xLevel = (chunkZ & mask) == 0
-            ? Highway.getXHighwayLevel(coord, provider, profile) : -1;
-        int zLevel = (chunkX & mask) == 0
-            ? Highway.getZHighwayLevel(coord, provider, profile) : -1;
-        return Math.max(xLevel, zLevel);
     }
-
-    private static final ThreadLocal<HeightEstimate> HEIGHT_ESTIMATE = new ThreadLocal<>();
 
     private static int roleHeight(Context context, int chunkX, int chunkZ) {
-        HeightEstimate estimate = HEIGHT_ESTIMATE.get();
-        if (estimate != null && estimate.matches(context, chunkX, chunkZ)) {
-            ROLE_HEIGHT_ESTIMATES.incrementAndGet();
-            return estimate.height(chunkX, chunkZ);
-        }
-        /* A role lookup can race another bounded shift builder.  Do not join
-         * that sampler from the worldgen path.  The exact owner publishes the
-         * height into the cache and the next region reuses it; this lookup gets
-         * a conservative floor estimate for the current immutable plan. */
+        /* City demand uses the exact natural height. This method runs only on
+         * the regional builder and reuses the height sampler cache. */
         HEIGHT_SAMPLES.incrementAndGet();
-        return context.terrain().chunkHeightNonBlocking(
-            chunkX, chunkZ, context.profile().GROUNDLEVEL);
-    }
-
-    private record HeightEstimate(Context context,
-                                  int originX,
-                                  int originZ,
-                                  float[] coarseNatural,
-                                  int coarseSide) {
-        boolean matches(Context candidate, int chunkX, int chunkZ) {
-            return context == candidate
-                && chunkX >= originX
-                && chunkZ >= originZ
-                && chunkX < originX + (coarseSide - 2) * COARSE_STRIDE + COARSE_STRIDE
-                && chunkZ < originZ + (coarseSide - 2) * COARSE_STRIDE + COARSE_STRIDE;
-        }
-
-        int height(int chunkX, int chunkZ) {
-            return (int) Math.round(bilinear(coarseNatural, coarseSide,
-                chunkX - originX, chunkZ - originZ));
-        }
+        return context.terrain().chunkHeight(chunkX, chunkZ);
     }
 
     private static final class RoleCache {
@@ -957,11 +1508,8 @@ public final class CityShiftField {
                     }
                 } catch (CompletionException | CancellationException ignored) {
                 }
-                /* Another region owns this cell. Never re-enter Lost Cities'
-                 * density graph here. A second computation is exactly what
-                 * caused overlapping halo regions to multiply the cold role
-                 * cost. The owner publishes the immutable role and later
-                 * regions reuse it. */
+                /* Another region owns this cell. Reuse its eventual result
+                 * instead of entering Lost Cities a second time. */
                 ROLE_DUPLICATE_SUPPRESSED.incrementAndGet();
                 return noRoleValue();
             }
@@ -972,16 +1520,9 @@ public final class CityShiftField {
                     // throw during startup, so do not repeat that exception per region.
                     resolved = noRoleValue();
                 }
-                /* Keep the role decision even when its height came from the
-                 * current region lattice. The role is stable; only the
-                 * height estimate is local to this build. Publishing the role
-                 * with a sentinel height lets overlapping regions reuse the
-                 * expensive Lost Cities city/highway decision and interpolate
-                 * their own height without stale terrain data. */
-                long published = HEIGHT_ESTIMATE.get() == null
-                    ? resolved
-                    : roleValue(roleCode(resolved), Integer.MIN_VALUE);
-                if (tile.values.compareAndSet(index, 0L, published)) {
+                /* Store the height with the role so overlapping regions can
+                 * reuse the same sample. */
+                if (tile.values.compareAndSet(index, 0L, resolved)) {
                     ROLE_CACHE_PUBLISHES.incrementAndGet();
                 }
                 created.complete(resolved);
@@ -1025,8 +1566,7 @@ public final class CityShiftField {
     private record RoleTileToken(long key, RoleTile tile) {
     }
 
-    /** Per-cell flights keep overlapping role queries single flight without
-     * serialising unrelated cells in the same 32 by 32 tile. */
+    /** Keep overlapping role queries single-flight per cell. */
     private static final class RoleTile {
         private final AtomicLongArray values =
             new AtomicLongArray(ROLE_TILE_SIDE * ROLE_TILE_SIDE);
@@ -1118,10 +1658,9 @@ public final class CityShiftField {
         }
 
         public int halo() {
-            int reach = (int) Math.ceil(maxShift / minLatticeStep())
-                + REFERENCE_BLUR_COARSE * COARSE_STRIDE + 1;
-            int aligned = ((reach + COARSE_STRIDE - 1) / COARSE_STRIDE) * COARSE_STRIDE;
-            return Math.min(MAX_HALO, aligned);
+            /* Cover the blend radius plus interpolation guard cells. */
+            int influenceChunks = (int) Math.ceil(BLEND_WIDTH_BLOCKS / 16.0D);
+            return Math.min(MAX_HALO, Math.max(4, influenceChunks + 2));
         }
 
         public int maxRunOutBlocks() {
@@ -1151,6 +1690,21 @@ public final class CityShiftField {
     }
 
     private record Region(float[] shift,
+                          float[] natural,
+                          float[] reference,
+                          float[] step,
+                          float[] sourceDemand,
+                          float[] sourceDistance,
+                          float[] fadeDistance,
+                          float[] preRecoveryShift,
+                          float[] recoveryCandidate,
+                          float[] propagatedShift,
+                          boolean[] locked,
+                          int[] role,
+                          int[] sourceFloor,
+                          int[] recoveryFloor,
+                          int[] recoveryNatural,
+                          byte[] recoveryFlags,
                           long coarseNanos,
                           long roleNanos,
                           long gradientNanos,

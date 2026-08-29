@@ -97,7 +97,7 @@ public class MixinTreeFeatureNearCityBorder {
     private int lc2h$estimateTreeFootprint(FeaturePlaceContext<TreeConfiguration> context) {
         TreeConfiguration config = context.config();
         if (config == null || config.trunkPlacer == null || config.foliagePlacer == null) {
-            return 8;
+            return 6;
         }
         BlockPos origin = context.origin();
         long seed = context.level().getSeed()
@@ -115,11 +115,11 @@ public class MixinTreeFeatureNearCityBorder {
                 radius = Math.max(radius, config.foliagePlacer.foliageRadius(
                     RandomSource.create(seed + layer * 0x632BE59BD9B4E019L), layer));
             }
-            // A small safety margin covers trunk branches and hanging leaves;
-            // the user multiplier is applied once in TreeCapturePolicy.
-            return Math.max(8, Math.min(64, radius + 3));
+            // Use the configured foliage radius. Add two blocks for branches
+            // and hanging leaves; TreeCapturePolicy applies the user multiplier.
+            return Math.max(4, Math.min(64, radius + 2));
         } catch (Throwable ignored) {
-            return 8;
+            return 6;
         }
     }
 

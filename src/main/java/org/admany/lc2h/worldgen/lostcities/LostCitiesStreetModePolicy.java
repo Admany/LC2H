@@ -8,17 +8,16 @@ import java.util.Locale;
  * Runtime policy for the Lost Cities street planner.
  *
  * Lost Cities 7.5 introduced {@link StreetGenerationMode#HIERARCHICAL_GRID_V1}.
- * LC2H keeps the legacy planner as the safe default because the hierarchical
- * planner changes the building grid and is the source of the small-structure
- * and gridding regression reported in issue #12.
+ * LC2H uses the newer planner by default. ChaosZPack profiles are routed to
+ * the legacy planner because their layouts were authored for that grid.
  *
- * The selected value is deliberately held in a volatile field. ConfigManager
- * updates it when the LC2H config is loaded or applied, so the mixin does not
- * require a JVM property or a client/server restart to select the planner for
- * subsequently planned chunks.
+ * The selected value is held in a volatile field and updated when the config
+ * is loaded or applied.
  */
 public final class LostCitiesStreetModePolicy {
-    private static final StreetGenerationMode DEFAULT_MODE = StreetGenerationMode.LEGACY;
+    private static final StreetGenerationMode DEFAULT_MODE = StreetGenerationMode.HIERARCHICAL_GRID_V1;
+    private static final String CHAOS_Z_PACK_FLAT_PROFILE = "aaaaaaaaz15Flat";
+    private static final String CHAOS_Z_PACK_PREFIX = "Azzz";
     private static volatile StreetGenerationMode configuredMode = DEFAULT_MODE;
 
     private LostCitiesStreetModePolicy() {
@@ -33,12 +32,32 @@ public final class LostCitiesStreetModePolicy {
         return selected != null ? selected : (upstreamMode != null ? upstreamMode : DEFAULT_MODE);
     }
 
+    /**
+     * ChaosZPack's layouts were authored for the legacy planner. Keep those
+     * profiles on it even when the user normally prefers the newer planner.
+     */
+    public static StreetGenerationMode resolve(StreetGenerationMode upstreamMode, String profileName) {
+        if (requiresLegacyMode(profileName)) {
+            return StreetGenerationMode.LEGACY;
+        }
+        return resolve(upstreamMode);
+    }
+
+    public static boolean requiresLegacyMode(String profileName) {
+        if (profileName == null) {
+            return false;
+        }
+        String normalized = profileName.trim();
+        return normalized.equalsIgnoreCase(CHAOS_Z_PACK_FLAT_PROFILE)
+            || normalized.regionMatches(true, 0, CHAOS_Z_PACK_PREFIX, 0, CHAOS_Z_PACK_PREFIX.length());
+    }
+
     public static StreetGenerationMode configuredMode() {
         StreetGenerationMode selected = configuredMode;
         return selected != null ? selected : DEFAULT_MODE;
     }
 
-    /** Apply a config-file value immediately; invalid or missing values use LEGACY. */
+    /** Apply a config-file value immediately; invalid or missing values use the new planner. */
     public static void setConfiguredMode(String rawMode) {
         configuredMode = parse(rawMode);
     }

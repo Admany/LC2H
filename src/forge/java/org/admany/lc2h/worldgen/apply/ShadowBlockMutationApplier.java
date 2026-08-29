@@ -29,7 +29,7 @@ import java.util.Locale;
 
 public final class ShadowBlockMutationApplier {
 
-    private static final int MAX_MUTATIONS_PER_TICK = Math.max(64, Integer.getInteger("lc2h.shadowApply.max_mutations_per_tick", 384));
+    private static final int MAX_MUTATIONS_PER_TICK = Math.max(64, Integer.getInteger("lc2h.shadowApply.max_mutations_per_tick", 768));
     private static final int MAX_CHUNKS_PER_TICK = Math.max(1, Integer.getInteger("lc2h.shadowApply.max_chunks_per_tick", 8));
     private static final TicketType<ChunkPos> LC2H_SHADOW_TICKET =
         TicketType.create("lc2h_shadow_apply", Comparator.comparingLong(ChunkPos::toLong));
@@ -103,6 +103,10 @@ public final class ShadowBlockMutationApplier {
         private final ScopedChunk key;
         private final java.util.concurrent.ConcurrentLinkedQueue<ChunkShadowMutationPlan> plans = new java.util.concurrent.ConcurrentLinkedQueue<>();
         private final AtomicInteger remaining = new AtomicInteger();
+        private final AtomicBoolean queued = new AtomicBoolean();
+        /** Pin the destination while a captured tree batch is being applied. */
+        private final AtomicBoolean retainsChunkTicket = new AtomicBoolean(false);
+        private final AtomicBoolean chunkTicketHeld = new AtomicBoolean(false);
         private ChunkShadowMutationPlan activePlan;
         private int activeIndex;
 
@@ -123,6 +127,7 @@ public final class ShadowBlockMutationApplier {
         private final ScopedTransaction key;
         private final ConcurrentHashMap<ScopedChunk, ConcurrentLinkedQueue<ChunkShadowMutationPlan>> plansByChunk = new ConcurrentHashMap<>();
         private final AtomicInteger remaining = new AtomicInteger();
+        private final AtomicBoolean queued = new AtomicBoolean();
         private final AtomicBoolean ticketsHeld = new AtomicBoolean(false);
         private final Set<Long> ticketedChunks = ConcurrentHashMap.newKeySet();
         private final AtomicInteger ticketAcquireFailures = new AtomicInteger();
@@ -243,7 +248,7 @@ public final class ShadowBlockMutationApplier {
             txBatch.add(plan);
             ENQUEUED_PLANS.incrementAndGet();
             ENQUEUED_MUTATIONS.addAndGet(plan.size());
-            TRANSACTION_QUEUE.offer(txBatch);
+            offerTransactionBatch(txBatch);
             if (deferDrain) {
                 scheduleDrainDeferred();
             } else {
@@ -252,11 +257,15 @@ public final class ShadowBlockMutationApplier {
             return;
         }
         ChunkMutationBatch batch = PENDING.computeIfAbsent(key, ChunkMutationBatch::new);
+        if (plan.kind() == ChunkShadowMutationPlan.MutationKind.TREE_CAPTURE
+            || plan.kind() == ChunkShadowMutationPlan.MutationKind.TREE_FALLBACK) {
+            batch.retainsChunkTicket.set(true);
+        }
         batch.plans.offer(plan);
         batch.remaining.addAndGet(plan.size());
         ENQUEUED_PLANS.incrementAndGet();
         ENQUEUED_MUTATIONS.addAndGet(plan.size());
-        QUEUE.offer(batch);
+        offerChunkBatch(batch);
         if (deferDrain) {
             scheduleDrainDeferred();
         } else {
@@ -302,11 +311,25 @@ public final class ShadowBlockMutationApplier {
         }
     }
 
+    /** Keep one queue token for all slices targeting a chunk. */
+    private static void offerChunkBatch(ChunkMutationBatch batch) {
+        if (batch != null && batch.queued.compareAndSet(false, true)) {
+            QUEUE.offer(batch);
+        }
+    }
+
+    private static void offerTransactionBatch(TransactionMutationBatch batch) {
+        if (batch != null && batch.queued.compareAndSet(false, true)) {
+            TRANSACTION_QUEUE.offer(batch);
+        }
+    }
+
     private static void drain() {
         DRAIN_SCHEDULED.set(false);
         int remainingMutations = MAX_MUTATIONS_PER_TICK;
         if (ServerTickLoad.getElapsedMsInCurrentTick() >= 12.0D) {
-            remainingMutations = Math.min(remainingMutations, 96);
+            // Allow two small tree slices when the tick still has headroom.
+            remainingMutations = Math.min(remainingMutations, 192);
         }
         int processedChunks = 0;
         boolean hasPending = false;
@@ -316,6 +339,7 @@ public final class ShadowBlockMutationApplier {
             if (txBatch == null || txBatch.key == null || txBatch.key.scope() == null) {
                 continue;
             }
+            txBatch.queued.set(false);
             var server = ServerRescheduler.getServer();
             ServerLevel level = null;
             if (server != null) {
@@ -329,7 +353,7 @@ public final class ShadowBlockMutationApplier {
             if (level == null) {
                 MISSING_LEVEL_RETRIES.incrementAndGet();
                 hasPending = true;
-                TRANSACTION_QUEUE.offer(txBatch);
+                offerTransactionBatch(txBatch);
                 break;
             }
             if (!WorldGenScope.matches(level, txBatch.key.scope())) {
@@ -343,7 +367,7 @@ public final class ShadowBlockMutationApplier {
             if (!txBatch.allChunksLoaded(level)) {
                 MISSING_CHUNK_RETRIES.incrementAndGet();
                 hasPending = true;
-                TRANSACTION_QUEUE.offer(txBatch);
+                offerTransactionBatch(txBatch);
                 continue;
             }
 
@@ -421,6 +445,7 @@ public final class ShadowBlockMutationApplier {
             if (batch == null) {
                 break;
             }
+            batch.queued.set(false);
             ScopedChunk key = batch.key;
             ChunkCoord chunk = key == null ? null : key.chunk();
             if (chunk == null || chunk.dimension() == null) {
@@ -432,20 +457,22 @@ public final class ShadowBlockMutationApplier {
             if (level == null) {
                 MISSING_LEVEL_RETRIES.incrementAndGet();
                 hasPending = true;
-                QUEUE.offer(batch);
+                offerChunkBatch(batch);
                 break;
             }
             if (!WorldGenScope.matches(level, key.scope())) {
                 logStaleScopeOnce(level, key.scope(), chunk, batch.remaining(), false);
                 STALE_SCOPE_DROPS.addAndGet(Math.max(0, batch.remaining()));
+                releaseChunkTicket(level, batch);
                 PENDING.remove(key, batch);
                 continue;
             }
+            retainChunkTicket(level, batch);
             LevelChunk levelChunk = level.getChunkSource().getChunkNow(chunk.chunkX(), chunk.chunkZ());
             if (levelChunk == null) {
                 MISSING_CHUNK_RETRIES.incrementAndGet();
                 hasPending = true;
-                QUEUE.offer(batch);
+                offerChunkBatch(batch);
                 break;
             }
 
@@ -496,8 +523,9 @@ public final class ShadowBlockMutationApplier {
 
             if (batch.hasWork()) {
                 hasPending = true;
-                QUEUE.offer(batch);
+                offerChunkBatch(batch);
             } else {
+                releaseChunkTicket(level, batch);
                 PENDING.remove(key, batch);
             }
         }
@@ -509,6 +537,12 @@ public final class ShadowBlockMutationApplier {
 
     public static void clearAll() {
         releaseAllTransactionTickets();
+        var server = ServerRescheduler.getServer();
+        for (Map.Entry<ScopedChunk, ChunkMutationBatch> entry : PENDING.entrySet()) {
+            ScopedChunk key = entry.getKey();
+            ChunkMutationBatch batch = entry.getValue();
+            releaseChunkTicket(findLevel(server, key == null ? null : key.scope()), batch);
+        }
         QUEUE.clear();
         PENDING.clear();
         TRANSACTION_QUEUE.clear();
@@ -665,6 +699,41 @@ public final class ShadowBlockMutationApplier {
             return;
         }
         AsyncManager.runLater("shadow-apply-retry", () -> enqueue(plan), 1L, Priority.LOW);
+    }
+
+    private static void retainChunkTicket(ServerLevel level, ChunkMutationBatch batch) {
+        if (level == null || batch == null || !batch.retainsChunkTicket.get()
+            || batch.chunkTicketHeld.get() || batch.key == null || batch.key.chunk() == null) {
+            return;
+        }
+        ChunkCoord chunk = batch.key.chunk();
+        ChunkPos pos = new ChunkPos(chunk.chunkX(), chunk.chunkZ());
+        try {
+            level.getChunkSource().addRegionTicket(LC2H_SHADOW_TICKET, pos, 2, pos);
+            if (batch.chunkTicketHeld.compareAndSet(false, true)) {
+                TICKET_ACQUIRED.incrementAndGet();
+            } else {
+                level.getChunkSource().removeRegionTicket(LC2H_SHADOW_TICKET, pos, 2, pos);
+            }
+        } catch (Throwable t) {
+            LC2H.LOGGER.debug("[LC2H] Failed to retain tree shadow chunk ticket for {}: {}", pos, t.toString());
+        }
+    }
+
+    private static void releaseChunkTicket(ServerLevel level, ChunkMutationBatch batch) {
+        if (level == null || batch == null || !batch.chunkTicketHeld.compareAndSet(true, false)
+            || batch.key == null || batch.key.chunk() == null) {
+            return;
+        }
+        ChunkCoord chunk = batch.key.chunk();
+        ChunkPos pos = new ChunkPos(chunk.chunkX(), chunk.chunkZ());
+        try {
+            level.getChunkSource().removeRegionTicket(LC2H_SHADOW_TICKET, pos, 2, pos);
+            TICKET_RELEASED.incrementAndGet();
+        } catch (Throwable t) {
+            TICKET_RELEASE_FAILURES.incrementAndGet();
+            LC2H.LOGGER.debug("[LC2H] Failed to release tree shadow chunk ticket for {}: {}", pos, t.toString());
+        }
     }
 
     public static String diagnostics() {

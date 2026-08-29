@@ -301,7 +301,6 @@ final class Lc2hConfigController {
         if (!RESTART_CITY_EDGE || before == null || after == null) {
             return false;
         }
-        if (before.cityBlendEnabled != after.cityBlendEnabled) return true;
         if (before.cityBlendWidth != after.cityBlendWidth) return true;
         if (Double.compare(before.cityBlendSoftness, after.cityBlendSoftness) != 0) return true;
         if (before.cityBlendClearTrees != after.cityBlendClearTrees) return true;

@@ -8,6 +8,7 @@ import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.narration.NarrationElementOutput;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
+import net.minecraft.ChatFormatting;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.server.packs.resources.ResourceManager;
@@ -16,6 +17,9 @@ import net.minecraftforge.api.distmarker.OnlyIn;
 import org.admany.lc2h.LC2H;
 import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.util.ResourceLocations;
+import org.admany.lc2h.worldgen.lostcities.LostCityProfileOverrideManager;
+import org.admany.lc2h.worldgen.lostcities.LostCitiesStreetModePolicy;
+import mcjty.lostcities.setup.Config;
 import org.lwjgl.glfw.GLFW;
 
 import com.google.gson.JsonElement;
@@ -244,6 +248,7 @@ public class Lc2hConfigScreen extends Screen {
     private EditBox highwaySupportMaxDepthBox;
     private EditBox accentColorBox;
     private EditBox floatingVegetationBlocksBox;
+    private List<String> floatingVegetationInvalidTokens = List.of();
     private EditBox cacheCapBox;
     private EditBox lc2hCacheBox;
     private EditBox lostCitiesCacheBox;
@@ -408,6 +413,7 @@ private Component unsavedDiscardLabel = Component.empty();
         this.unsavedWarningProgress = 0f;
         this.unsavedSaveHover = 0f;
         this.unsavedDiscardHover = 0f;
+        this.floatingVegetationInvalidTokens = List.of();
 
         controller.registerBenchmarkListener();
 
@@ -453,21 +459,39 @@ private Component unsavedDiscardLabel = Component.empty();
                 tr("lc2h.config.option.floating_vegetation_blocks.desc"),
                 working.floatingVegetationAdditionalBlocks,
                 false,
-                1024);
-        this.floatingVegetationBlocksBox.setResponder(value -> working.floatingVegetationAdditionalBlocks = value);
+                4096,
+                260);
+        this.floatingVegetationBlocksBox.setTooltip(Tooltip.create(
+                tr("lc2h.config.option.floating_vegetation_blocks.desc")));
+        this.floatingVegetationBlocksBox.setResponder(value -> {
+            working.floatingVegetationAdditionalBlocks = value;
+            updateFloatingVegetationInputFeedback(value);
+        });
+        updateFloatingVegetationInputFeedback(working.floatingVegetationAdditionalBlocks);
         addToggle(layout,
                 tr("lc2h.config.option.explosion_debris.title"),
                 working.enableExplosionDebris,
                 tr("lc2h.config.option.explosion_debris.desc"),
                 false,
                 val -> working.enableExplosionDebris = val);
-        addChoice(layout,
+        String activeProfileName = activeLostCitiesProfileName();
+        boolean chaosZPackProfile = LostCitiesStreetModePolicy.requiresLegacyMode(activeProfileName);
+        Component streetModeDescription = tr("lc2h.config.option.lostcities_street_mode.desc");
+        if (chaosZPackProfile) {
+            streetModeDescription = streetModeDescription.copy()
+                .append(" ")
+                .append(tr("lc2h.config.option.lostcities_street_mode.chaos_profile_note_prefix"))
+                .append(Component.literal("Legacy Mode").withStyle(ChatFormatting.BOLD))
+                .append(tr("lc2h.config.option.lostcities_street_mode.chaos_profile_note_suffix"));
+        }
+        CustomButton streetModeButton = addChoice(layout,
                 tr("lc2h.config.option.lostcities_street_mode.title"),
-                working.lostCitiesStreetGenerationMode,
-                tr("lc2h.config.option.lostcities_street_mode.desc"),
+                chaosZPackProfile ? "LEGACY" : working.lostCitiesStreetGenerationMode,
+                streetModeDescription,
                 new String[]{"LEGACY", "HIERARCHICAL_GRID_V1"},
                 this::streetModeLabel,
                 val -> working.lostCitiesStreetGenerationMode = val);
+        streetModeButton.active = !chaosZPackProfile;
         addSectionHeader(layout, tr("lc2h.config.section.caching"));
         this.cacheCapBox = addNumberField(layout,
                 tr("lc2h.config.option.cache_combined_max_mb.title"),
@@ -487,7 +511,8 @@ private Component unsavedDiscardLabel = Component.empty();
                 tr("lc2h.config.option.city_blend_enabled.title"),
                 working.cityBlendEnabled,
                 tr("lc2h.config.option.city_blend_enabled.desc"),
-                Lc2hConfigController.RESTART_CITY_EDGE, val -> working.cityBlendEnabled = val);
+                false,
+                val -> working.cityBlendEnabled = val);
 
         addSectionHeader(layout, tr("lc2h.config.section.benchmark"));
         addActionButton(layout,
@@ -502,8 +527,7 @@ private Component unsavedDiscardLabel = Component.empty();
         int layoutBottom = layout.maxHeight();
         int desiredFooterY = this.height - 48;
         int minFooterY = this.contentTop + 80;
-        // Keep the button's custom three-pixel glow inside the window even on
-        // short screens; the previous bound left its lower edge at the clip.
+        // Keep the footer glow inside the window on short screens.
         int maxFooterY = Math.max(0, this.height - 32);
         if (minFooterY > maxFooterY) {
             minFooterY = maxFooterY;
@@ -702,7 +726,19 @@ private Component unsavedDiscardLabel = Component.empty();
         addRenderableWidget(button);
     }
 
-    private void addChoice(LayoutHelper layout, Component title, String initialValue, Component description,
+    private void addReadOnlyStatus(LayoutHelper layout,
+                                   Component title,
+                                   Component description,
+                                   Component status) {
+        EntryPlacement placement = prepareEntry(layout, title, description, false, 150, 20);
+        CustomButton button = createAnimatedButton(
+            placement.controlX(), placement.controlY(), placement.controlWidth(),
+            placement.controlHeight(), status, ignored -> {});
+        button.active = false;
+        addRenderableWidget(button);
+    }
+
+    private CustomButton addChoice(LayoutHelper layout, Component title, String initialValue, Component description,
                            String[] values, Function<String, Component> labelFactory, Consumer<String> onChange) {
         EntryPlacement placement = prepareEntry(layout, title, description, false, 190, 20);
         String[] choices = values == null || values.length == 0 ? new String[]{"LEGACY"} : values.clone();
@@ -723,6 +759,31 @@ private Component unsavedDiscardLabel = Component.empty();
                     b.setMessage(labelFactory.apply(selected));
                 });
         addRenderableWidget(button);
+        return button;
+    }
+
+    private String activeLostCitiesProfileName() {
+        Minecraft minecraft = Minecraft.getInstance();
+        try {
+            if (minecraft.level != null) {
+                String overrideName = LostCityProfileOverrideManager
+                    .overrideName(minecraft.level.dimension()).orElse(null);
+                if (overrideName != null && !overrideName.isBlank()) {
+                    return overrideName.trim();
+                }
+                String profileName = Config.getProfileForDimension(minecraft.level.dimension());
+                if (profileName != null && !profileName.isBlank()) {
+                    return profileName.trim();
+                }
+            }
+            if (Config.profileFromClient != null && !Config.profileFromClient.isBlank()) {
+                return Config.profileFromClient.trim();
+            }
+            String selectedProfile = Config.SELECTED_PROFILE.get();
+            return selectedProfile == null ? null : selectedProfile.trim();
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private Component streetModeLabel(String mode) {
@@ -737,7 +798,12 @@ private Component unsavedDiscardLabel = Component.empty();
     }
 
     private EditBox addTextField(LayoutHelper layout, Component title, Component description, String value, boolean requiresRestart, int maxLength) {
-        EntryPlacement placement = prepareEntry(layout, title, description, requiresRestart, 150, 18);
+        return addTextField(layout, title, description, value, requiresRestart, maxLength, 150);
+    }
+
+    private EditBox addTextField(LayoutHelper layout, Component title, Component description, String value,
+                                 boolean requiresRestart, int maxLength, int preferredWidth) {
+        EntryPlacement placement = prepareEntry(layout, title, description, requiresRestart, preferredWidth, 18);
         EditBox box = new EditBox(this.font, placement.controlX(), placement.controlY(), placement.controlWidth(), placement.controlHeight(), title);
         box.setValue(value == null ? "" : value);
         if (maxLength > 0) {
@@ -748,6 +814,21 @@ private Component unsavedDiscardLabel = Component.empty();
         textFieldAlpha.put(box, 1f);
         textFieldOffsetY.put(box, 0f);
         return box;
+    }
+
+    private void updateFloatingVegetationInputFeedback(String value) {
+        this.floatingVegetationInvalidTokens = ConfigManager.invalidFloatingVegetationTokens(value);
+        if (floatingVegetationBlocksBox == null) {
+            return;
+        }
+        if (floatingVegetationInvalidTokens.isEmpty()) {
+            floatingVegetationBlocksBox.setTooltip(Tooltip.create(
+                tr("lc2h.config.option.floating_vegetation_blocks.desc")));
+        } else {
+            String invalid = String.join(", ", floatingVegetationInvalidTokens);
+            floatingVegetationBlocksBox.setTooltip(Tooltip.create(Component.literal(
+                trRaw("lc2h.config.option.floating_vegetation_blocks.invalid", invalid))));
+        }
     }
 
     private CustomButton addActionButton(LayoutHelper layout, Component title, Component description, Component message, Button.OnPress onPress,
@@ -1062,9 +1143,7 @@ private Component unsavedDiscardLabel = Component.empty();
     }
 
     private void renderBodyWidgets(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-        // Footer and header controls are manually painted outside the viewport.
-        // Keep them out of Screen.render's body scissor so a future Button
-        // renderer cannot clip their lower half again.
+        // Footer and header controls are painted outside the body viewport.
         Map<Button, Boolean> fixedVisibility = new IdentityHashMap<>();
         for (Button button : buttonRects.keySet()) {
             if (!buttonOriginalY.containsKey(button)) {
@@ -1234,9 +1313,9 @@ private Component unsavedDiscardLabel = Component.empty();
             int drawY = newY + Math.round(currOffset);
             field.setY(drawY);
             boolean intersects = drawY + fieldH >= bodyTop && drawY <= bodyBottomClipped;
-            boolean fullyInside = drawY >= bodyTop && (drawY + fieldH) <= bodyBottomClipped;
             field.setVisible(currAlpha > 0.03f && intersects);
-            field.active = fullyInside;
+            // Keep a partially visible field clickable while scrolling.
+            field.active = intersects;
             if (!intersects) {
                 continue;
             }
@@ -1248,8 +1327,11 @@ private Component unsavedDiscardLabel = Component.empty();
                         (overlayAlpha << 24) | tint(0x0A0A15, accent, 0.08f));
             }
 
+            boolean invalidFloatingInput = field == floatingVegetationBlocksBox
+                && !floatingVegetationInvalidTokens.isEmpty();
+            int fieldBorder = invalidFloatingInput ? 0xFF5555 : getAccentColor();
             graphics.fill(field.getX() - 1, drawY - 1, field.getX() + field.getWidth() + 1, drawY + field.getHeight() + 1,
-                    ((int)(currAlpha * 255) << 24) | getAccentColor());
+                    ((int)(currAlpha * 255) << 24) | fieldBorder);
             graphics.fill(field.getX(), drawY, field.getX() + field.getWidth(), field.getY() + field.getHeight(),
                     ((int)(currAlpha * 200) << 24) | tint(0x1A1A2E, getAccentColor(), 0.08f));
         }

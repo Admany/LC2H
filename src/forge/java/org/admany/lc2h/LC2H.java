@@ -848,6 +848,8 @@ public class LC2H {
                         ChunkDebugManager.clearSelection(ctx.getSource().getPlayerOrException());
                         return 1;
                     }))
+                    .then(Commands.literal("explain")
+                        .executes(ctx -> explainChunkDebug(ctx.getSource())))
                     .then(Commands.literal("export")
                         .executes(ctx -> exportChunkDebug(ctx.getSource().getPlayerOrException(), null))
                         .then(Commands.argument("label", StringArgumentType.greedyString())
@@ -892,6 +894,9 @@ public class LC2H {
     private static int showDiagnosticsHelp(CommandSourceStack source) {
         ChatMessenger.info(source, "Diagnostics are idle until you explicitly start or capture them");
         ChatMessenger.commandLine(source, "/lc2h diagnostics chunk", "Show generation state for your chunk");
+        ChatMessenger.commandLine(source, "/lc2h diagnostics chunkdebug", "Enable the stick-based chunk selection overlay");
+        ChatMessenger.commandLine(source, "/lc2h diagnostics chunkdebug explain", "Explain the selected target chunk in chat");
+        ChatMessenger.commandLine(source, "/lc2h diagnostics chunkdebug export [label]", "Export target role, field, gate and height evidence as JSON");
         ChatMessenger.commandLine(source, "/lc2h diagnostics monitor status", "Show monitor state");
         ChatMessenger.commandLine(source, "/lc2h diagnostics monitor start 60", "Capture a bounded 60 second monitor report");
         ChatMessenger.commandLine(source, "/lc2h diagnostics dump", "Write an immediate stall dump");
@@ -968,6 +973,16 @@ public class LC2H {
     private static int setChunkDebug(CommandSourceStack source, boolean enabled)
             throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         ChunkDebugManager.setEnabled(source.getPlayerOrException(), enabled);
+        return 1;
+    }
+
+    private static int explainChunkDebug(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        ChunkDebugManager.ChunkSelection selection = ChunkDebugManager.snapshot(player);
+        for (String line : ChunkDebugExporter.explainSelection(player, selection)) {
+            ChatMessenger.info(source, line);
+        }
         return 1;
     }
 

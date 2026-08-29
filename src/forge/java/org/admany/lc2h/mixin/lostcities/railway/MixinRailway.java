@@ -9,6 +9,7 @@ import org.admany.lc2h.data.cache.LostCitiesCacheBridge;
 import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
 import org.admany.lc2h.dev.diagnostics.Lc2hTimingRegistry;
 import org.admany.lc2h.worldgen.lostcities.FastMultiChunkPlanner;
+import org.admany.lc2h.worldgen.lostcities.LostCitiesGuiPreviewGuard;
 import org.admany.lc2h.worldgen.lostcities.PlannerHotPath;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
@@ -53,6 +54,9 @@ public abstract class MixinRailway {
                 LC2H_RAIL_BUDGET.defaultEntryBytes(),
                 previous == null);
             return previous != null ? previous : Railway.RailChunkInfo.NOTHING;
+        }
+        if (LostCitiesGuiPreviewGuard.shouldDefer(provider, profile, coord, "rail")) {
+            return Railway.RailChunkInfo.NOTHING;
         }
         if (!PlannerHotPath.isActive()) {
             Railway.RailChunkInfo disk = LostCitiesCacheBridge.getDisk("rail_info", coord, Railway.RailChunkInfo.class);

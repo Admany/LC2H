@@ -1,4 +1,4 @@
-﻿{
+{
     "lc2h.chat.prefix": "[LC2H] ",
     "lc2h.ui.warning": "WARNUNG:",
     "lc2h.ui.enabled": "Aktiviert",
@@ -46,8 +46,8 @@
     "lc2h.config.option.debug_logging.desc": "Zusätzliche Debug-Informationen protokollieren (kann sehr umfangreich sein).",
     "lc2h.config.option.ui_accent_color.title": "UI-Akzentfarbe (Hex)",
     "lc2h.config.option.ui_accent_color.desc": "Akzentfarbe für das LC2H Konfigurationsmenü (Hex-Code, Beispiel: 3A86FF).",
-    "lc2h.config.option.city_blend_enabled.title": "Städte-Übergang aktivieren [EXPERIMENTELL]",
-    "lc2h.config.option.city_blend_enabled.desc": "Lässt Stadtränder weicher in das umliegende Gelände übergehen, um harte Grenzen zu vermeiden.",
+    "lc2h.config.option.city_blend_enabled.title": "Geländeglättung",
+    "lc2h.config.option.city_blend_enabled.desc": "Glättet Hügel und Berge in Stadtnähe, damit sie natürlich auslaufen und nicht in riesigen flachen Wänden enden. Standardmäßig aktiviert und kann ausgeschaltet werden.",
     "lc2h.config.option.city_blend_clear_trees.title": "Bäume am Stadtrand entfernen",
     "lc2h.config.option.city_blend_clear_trees.desc": "Entfernt Bäume in der Nähe der Stadtgrenze für einen saubereren Übergang.",
     "lc2h.config.option.city_blend_tree_seam_fix.title": "Prevent Half-Trees At City Seam",

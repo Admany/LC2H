@@ -1,4 +1,4 @@
-﻿{
+{
     "lc2h.chat.prefix": "[LC2H] ",
     "lc2h.ui.warning": "WARNING:",
     "lc2h.ui.enabled": "Enabled",
@@ -46,8 +46,8 @@
     "lc2h.config.option.debug_logging.desc": "Enable extra debug logging (can be noisy).",
     "lc2h.config.option.ui_accent_color.title": "UI Accent Color (Hex)",
     "lc2h.config.option.ui_accent_color.desc": "Accent color for the LC2H config UI (hex, example: 3A86FF).",
-    "lc2h.config.option.city_blend_enabled.title": "Enable City Blend [EXPERIMENTAL]",
-    "lc2h.config.option.city_blend_enabled.desc": "Blend city edges into surrounding terrain to reduce harsh borders.",
+    "lc2h.config.option.city_blend_enabled.title": "Terrain Smoothing",
+    "lc2h.config.option.city_blend_enabled.desc": "Smooths hills and mountains near cities so they blend naturally instead of ending in huge flat walls. Enabled by default and can be turned off.",
     "lc2h.config.option.city_blend_clear_trees.title": "Clear Trees Near City Border",
     "lc2h.config.option.city_blend_clear_trees.desc": "Clear trees near the city border for a cleaner transition.",
     "lc2h.config.option.city_blend_tree_seam_fix.title": "Prevent Half-Trees At City Seam",

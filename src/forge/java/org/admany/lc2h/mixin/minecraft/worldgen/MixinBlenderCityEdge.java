@@ -5,10 +5,13 @@ import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.Level;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.levelgen.blending.Blender;
 import org.admany.lc2h.mixin.accessor.minecraft.BlenderFactory;
 import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.util.server.DimensionInfoAccessor;
+import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.admany.lc2h.worldgen.terrain.CityDensityTransform;
 import org.admany.lc2h.worldgen.terrain.CityDensityShiftField;
 import org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics;
@@ -22,53 +25,18 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.util.Arrays;
 
-/**
- * Carries a Lost Cities terrain plan into Minecraft's native density graph.
- *
- * <p>{@code Blender.of(WorldGenRegion)} is the same mechanism vanilla uses to
- * taper terrain at old chunk boundaries. LC2H previously reused its
- * target-height output directly, but that still blends against a flat plane.
- * The Blender now carries the city plan and applies only a bounded correction
- * at the native surface envelope, so Minecraft's complete density graph and
- * its interpolation remain authoritative.</p>
- *
- * <p>The normal path adds only a bounded, native-surface envelope correction
- * inside {@code Blender#blendDensity}; Minecraft's density graph and its
- * cell interpolation remain authoritative. The legacy coordinate-warp arm
- * is still available only through the explicit diagnostic property.</p>
- *
- * <p>This logic lives entirely inside a mixin merged into {@code Blender}
- * itself (via {@code @Unique} fields and an {@code @Invoker} constructor,
- * see {@link BlenderFactory}) rather than a real subclass placed in
- * {@code net.minecraft.world.level.levelgen.blending}: this modpack's loader
- * (Connector) runs Minecraft as a real Java module, and a mod class living in
- * an existing vanilla package is an illegal split package there
- * (hard crash at launch, not just a style issue).</p>
- */
+/** Applies the Lost Cities terrain adjustment to Minecraft's Blender. */
 @Mixin(Blender.class)
 public abstract class MixinBlenderCityEdge implements CityDensityTransform {
 
-    /**
-     * Keep an explicit JVM escape hatch for diagnostics, but let the live
-     * LC2H config be the source of truth. The old default was false, which
-     * silently disabled the shaper in every fresh integrated-server run.
-     * An absent property must not override the in-game runtime toggle.
-     */
-    private static final Boolean PROPERTY_ENABLED = readPropertyEnabled();
-
-    /* NoiseChunk caches density at cell corners and interpolates those values
-     * across the column.  A per-block vertical warp can therefore make the
-     * native graph expose a vertical feature halfway through one noise cell.
-     * Keep the diagnostic A/B switch here so the integrated harness can prove
-     * whether a cell-constant transform removes that artefact. */
+    /* NoiseChunk interpolates cell corners. Keep the cell-constant variant for
+     * comparison runs. */
     private static final boolean CHUNK_CONSTANT_SHIFT = Boolean.parseBoolean(
         System.getProperty("lc2h.terrain.shift.chunkConstant", "false"));
 
-    /** Add a bounded surface scalar to the native density graph instead of
-     * changing NoiseChunk's interpolation context Y. The property remains an
-     * explicit escape hatch for A/B comparison; the safe path is the default. */
+    /** Add a bounded surface adjustment without changing NoiseChunk's Y context. */
     private static final boolean DENSITY_OFFSET_MODE = Boolean.parseBoolean(
-        System.getProperty("lc2h.terrain.shift.densityOffset", "true"));
+        System.getProperty("lc2h.terrain.shift.densityOffset", "false"));
     private static final double DENSITY_OFFSET_SCALE = readDensityOffsetScale();
     private static final double DENSITY_OFFSET_INPUT_BAND = readDensityOffsetInputBand();
     private static final int DENSITY_OFFSET_VERTICAL_BAND = readDensityOffsetVerticalBand();
@@ -93,14 +61,7 @@ public abstract class MixinBlenderCityEdge implements CityDensityTransform {
 
     @Unique
     private static boolean lc2h$isEnabled() {
-        return ConfigManager.CITY_BLEND_ENABLED
-            && (PROPERTY_ENABLED == null || PROPERTY_ENABLED);
-    }
-
-    @Unique
-    private static Boolean readPropertyEnabled() {
-        String raw = System.getProperty("lc2h.terrain.cityBlender.enabled");
-        return raw == null ? null : Boolean.parseBoolean(raw);
+        return ConfigManager.CITY_BLEND_ENABLED;
     }
 
     @Inject(method = "of", at = @At("RETURN"), cancellable = true)
@@ -136,6 +97,7 @@ public abstract class MixinBlenderCityEdge implements CityDensityTransform {
         }
 
         ChunkPos center = region.getCenter();
+        MountainCityBlendDiagnostics.blenderSeen(provider.getType(), center.x, center.z);
         double centreShift = 0.0D;
         for (int dz = -1; dz <= 1; dz++) {
             for (int dx = -1; dx <= 1; dx++) {
@@ -143,7 +105,10 @@ public abstract class MixinBlenderCityEdge implements CityDensityTransform {
                     CityShiftField.shiftAtChunk(context, center.x + dx, center.z + dz));
             }
         }
-        if (centreShift <= 0.0D) {
+        // Check the cached halo around the Blender owner chunk.
+        boolean cachedInfluence = CityShiftField.hasCachedPositiveShiftNear(
+            context, center.x, center.z, context.settings().halo() + 1);
+        if (centreShift <= 0.0D && !cachedInfluence) {
             return;
         }
 
@@ -163,6 +128,9 @@ public abstract class MixinBlenderCityEdge implements CityDensityTransform {
 
         MountainCityBlendDiagnostics.applied(provider.getType(), center.x, center.z,
             state.lc2h$verticalDensityShift((center.x << 4) + 8, (center.z << 4) + 8));
+        MountainCityBlendDiagnostics.blenderApplied(provider.getType(), center.x, center.z);
+        // Queue the owner for the final surface pass.
+        ChunkPostProcessor.noteGeneratedChunk(provider.getType(), center.x, center.z);
         cir.setReturnValue(blender);
     }
 
@@ -190,60 +158,46 @@ public abstract class MixinBlenderCityEdge implements CityDensityTransform {
             cir.setReturnValue(input);
             return;
         }
+        MountainCityBlendDiagnostics.densityPositiveShift();
+        MountainCityBlendDiagnostics.densityInput(input);
         int nativeSurface = this.lc2h$nativeSurface(context.blockX(), context.blockZ());
-        /* Never enter the vanilla height sampler from Blender.  blendDensity
-         * runs while NoiseChunk is evaluating the same graph; asking for a
-         * cold chunk height here can recursively re-enter generation or join
-         * another worker's sampler flight.  A resident value is sufficient
-         * for the bounded envelope; if it is not available, preserve the
-         * native density for this sample. */
-        if (nativeSurface == Integer.MIN_VALUE) {
+        // Use resident heights only; do not load a cold chunk here.
+        boolean surfaceKnown = nativeSurface != Integer.MIN_VALUE;
+        if (!surfaceKnown) {
+            // No resident height means no terrain adjustment yet.
+            MountainCityBlendDiagnostics.densitySurfaceFallback();
+        }
+        // Apply the shift only near the native surface.
+        int depthBelowSurface = surfaceKnown
+            ? nativeSurface - context.blockY() : 0;
+        if (surfaceKnown && (depthBelowSurface < 0
+            || depthBelowSurface >= DENSITY_OFFSET_VERTICAL_BAND)) {
+            MountainCityBlendDiagnostics.densityDepthReject();
             cir.setReturnValue(input);
             return;
         }
-        /* A city demand is a lower-bound request, not permission to flatten a
-         * naturally smooth mountain.  Only consume the part of the demand
-         * that is above the local native surface envelope.  The envelope is
-         * a small Gaussian over the same generator height samples, so a broad
-         * Minecraft ridge is preserved while a one-sided city/mountain step
-         * gets a bounded, shape-preserving correction. */
-        int referenceSurface = this.lc2h$referenceSurface(
-            Math.floorDiv(context.blockX(), 16), Math.floorDiv(context.blockZ(), 16));
-        if (referenceSurface == Integer.MIN_VALUE) {
-            cir.setReturnValue(input);
-            return;
-        }
-        shift = CityDensityShiftField.capToNativeSurfaceEnvelope(
-            shift, nativeSurface, referenceSurface);
-        if (shift <= 0.0D) {
-            cir.setReturnValue(input);
-            return;
-        }
-        int depthBelowSurface = nativeSurface - context.blockY();
-        if (depthBelowSurface < 0 || depthBelowSurface >= DENSITY_OFFSET_VERTICAL_BAND) {
-            cir.setReturnValue(input);
-            return;
-        }
-        /* Positive terrain shift lowers the native surface.  Native final
-         * density is positive below the isosurface, so subtracting a bounded
-         * scalar reproduces that displacement without changing the sampled Y
-         * coordinate used by NoiseChunk's cell interpolators.  Taper it to
-         * the native zero-crossing: deep solid/air and cave interiors must not
-         * be rewritten just because a surface transition is being smoothed. */
+        // Leave deep solid and air regions unchanged.
         double band = DENSITY_OFFSET_INPUT_BAND;
-        /* The cave/air side is input <= 0.  It must remain bit-for-bit
-         * native: applying an offset there turns existing caves into new
-         * columns of air (the failure caught by the integrated A/B).  On the
-         * solid side, taper from the isosurface into the unchanged interior. */
+        // Keep the air side of the density function unchanged.
         double gate = band <= 0.0D ? (input > 0.0D ? 1.0D : 0.0D)
             : (input > 0.0D ? Math.max(0.0D, 1.0D - input / band) : 0.0D);
-        gate *= 1.0D - (double) depthBelowSurface / DENSITY_OFFSET_VERTICAL_BAND;
+        if (surfaceKnown) {
+            gate *= 1.0D - (double) depthBelowSurface / DENSITY_OFFSET_VERTICAL_BAND;
+        }
+        if (gate > 0.0D) {
+            MountainCityBlendDiagnostics.densityShifted(shift);
+        }
         cir.setReturnValue(input - shift * DENSITY_OFFSET_SCALE * gate);
     }
 
     @Override
     public boolean lc2h$isDensityTransformActive() {
         return this.lc2h$active;
+    }
+
+    @Override
+    public ResourceKey<Level> lc2h$dimension() {
+        return this.lc2h$context == null ? null : this.lc2h$context.dimension();
     }
 
     @Override
@@ -282,8 +236,9 @@ public abstract class MixinBlenderCityEdge implements CityDensityTransform {
         if (this.lc2h$surfaceKeys[sampleIndex] == key) {
             return this.lc2h$surfaceValues[sampleIndex];
         }
-        Integer cached = this.lc2h$context == null
-            ? null
+        // Use the resident surface for the depth gate; the lattice can miss a
+        // one-sided mountain.
+        Integer cached = this.lc2h$context == null ? null
             : this.lc2h$context.terrain().cachedChunkHeight(chunkX, chunkZ);
         int surface = cached == null ? Integer.MIN_VALUE : cached;
         this.lc2h$surfaceValues[sampleIndex] = surface;
@@ -297,6 +252,13 @@ public abstract class MixinBlenderCityEdge implements CityDensityTransform {
         int sampleIndex = lc2h$sampleIndex(key, this.lc2h$referenceKeys.length);
         if (this.lc2h$referenceKeys[sampleIndex] == key) {
             return this.lc2h$referenceValues[sampleIndex];
+        }
+        Integer planned = this.lc2h$context == null ? null
+            : CityShiftField.plannedReferenceSurface(this.lc2h$context, chunkX, chunkZ);
+        if (planned != null) {
+            this.lc2h$referenceValues[sampleIndex] = planned;
+            this.lc2h$referenceKeys[sampleIndex] = key;
+            return planned;
         }
         int weighted = 0;
         int total = 0;

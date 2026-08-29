@@ -39,6 +39,8 @@ def lc2hRunDebugProp = (findProperty('lc2h.runDebug') ?: System.getProperty('lc2
 def lc2hShadowtestProps = [
     'lc2h.shadowtest.auto',
     'lc2h.shadowtest.auto.stop',
+    'lc2h.shadowtest.auto.stop.delay_ticks',
+    'lc2h.shadowtest.dimension',
     'lc2h.shadowtest.x',
     'lc2h.shadowtest.y',
     'lc2h.shadowtest.z'
@@ -106,6 +108,7 @@ def lc2hWorldParityProps = [
     'lc2h.terrain.shift.densityOffsetVerticalBand',
     'lc2h.terrain.cityBlender.enabled',
     'lc2h.cityBlend.enabled',
+    'lc2h.terrain.floorBridge',
     'lc2h.terrain.preserveNaturalMountains'
 ]
 minecraft {

@@ -5,11 +5,13 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import mcjty.lostcities.api.LostChunkCharacteristics;
+import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.api.MultiPos;
 import mcjty.lostcities.setup.Registration;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
+import mcjty.lostcities.worldgen.lost.City;
 import mcjty.lostcities.worldgen.lost.DamageArea;
 import mcjty.lostcities.worldgen.lost.Explosion;
 import mcjty.lostcities.worldgen.lost.MultiChunk;
@@ -20,11 +22,14 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.ChunkStatus;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureStart;
 import net.minecraftforge.fml.loading.FMLPaths;
@@ -36,6 +41,10 @@ import org.admany.lc2h.util.lostcities.MultiChunkCacheAccess;
 import org.admany.lc2h.worldgen.async.snapshot.MultiChunkSnapshot;
 import org.admany.lc2h.util.chunk.ChunkPostProcessor;
 import org.admany.lc2h.worldgen.lostcities.MultiChunkBoundaryRegistry;
+import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
+import org.admany.lc2h.worldgen.terrain.CityShiftField;
+import org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics;
+import org.admany.lc2h.worldgen.terrain.NaturalHeightSampler;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -48,6 +57,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Comparator;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 public final class ChunkDebugExporter {
@@ -55,6 +65,30 @@ public final class ChunkDebugExporter {
     private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss").withZone(ZoneId.systemDefault());
 
     private ChunkDebugExporter() {
+    }
+
+    /** Build the in-game report for the selected chunk. */
+    public static List<String> explainSelection(ServerPlayer player,
+                                                 ChunkDebugManager.ChunkSelection selection) {
+        if (player == null) {
+            return List.of("chunkdebug: no player");
+        }
+        ChunkPos selected = selection == null ? null : selection.primary();
+        if (selected == null && selection != null) {
+            selected = selection.secondary();
+        }
+        if (selected == null) {
+            selected = player.chunkPosition();
+        }
+        Integer anchorY = selection != null
+            ? (selected.equals(selection.primary()) ? selection.primaryY() : selection.secondaryY())
+            : null;
+        int y = anchorY != null
+            ? anchorY
+            : player.level().getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                selected.getMiddleBlockX(), selected.getMiddleBlockZ());
+        return org.admany.lc2h.worldgen.terrain.CityBlendDebugger.explain(
+            player.serverLevel(), new BlockPos(selected.getMiddleBlockX(), y, selected.getMiddleBlockZ()));
     }
 
     public static Path exportSelection(ServerPlayer player, ChunkDebugManager.ChunkSelection selection, String label) throws Exception {
@@ -83,6 +117,8 @@ public final class ChunkDebugExporter {
         int maxChunkZ = Math.max(primary.z, secondary.z);
 
         JsonObject root = new JsonObject();
+        root.addProperty("formatVersion", 2);
+        root.addProperty("decisionTraceVersion", 1);
         root.addProperty("dimension", dimension.toString());
         root.addProperty("exportedAt", Instant.now().toString());
         root.addProperty("player", player.getGameProfile().getName());
@@ -101,6 +137,12 @@ public final class ChunkDebugExporter {
 
         IDimensionInfo provider = resolveProvider(player);
         root.addProperty("providerAvailable", provider != null);
+        JsonObject runtimeDiagnostics = new JsonObject();
+        runtimeDiagnostics.addProperty("mountainBlend", MountainCityBlendDiagnostics.diagnostics());
+        runtimeDiagnostics.addProperty("shiftField", CityShiftField.diagnostics());
+        runtimeDiagnostics.addProperty("snowReconciliation", ChunkPostProcessor.snowDiagnostics());
+        runtimeDiagnostics.addProperty("floatingCleanup", ChunkPostProcessor.floatingDiagnostics());
+        root.add("runtimeDiagnostics", runtimeDiagnostics);
 
         JsonArray chunks = new JsonArray();
         for (int x = minChunkX; x <= maxChunkX; x++) {
@@ -122,6 +164,7 @@ public final class ChunkDebugExporter {
                 chunk.add("multichunkBoundary", buildMultiChunkBoundaryJson(provider, coord));
                 chunk.add("undergroundScan", buildUndergroundScanJson(player, coord, buildingInfo));
                 chunk.add("treeSeam", buildTreeSeamDebugJson(player.level(), provider, coord));
+                chunk.add("terrainDecision", buildTerrainDecisionJson(player, provider, coord));
                 chunk.add("structures", buildStructureDebugJson(player.level(), coord));
                 chunks.add(chunk);
             }
@@ -182,6 +225,332 @@ public final class ChunkDebugExporter {
         } catch (Throwable ignored) {
         }
         return null;
+    }
+
+    /** Export the terrain report for the selected chunk. */
+    private static JsonObject buildTerrainDecisionJson(ServerPlayer player,
+                                                        IDimensionInfo provider,
+                                                        ChunkCoord coord) {
+        JsonObject obj = new JsonObject();
+        if (player == null || coord == null || !(player.level() instanceof ServerLevel level)) {
+            obj.addProperty("available", false);
+            obj.addProperty("reason", "server-level-missing");
+            return obj;
+        }
+
+        final int chunkX = coord.chunkX();
+        final int chunkZ = coord.chunkZ();
+        obj.addProperty("available", true);
+        obj.addProperty("chunkX", chunkX);
+        obj.addProperty("chunkZ", chunkZ);
+        obj.addProperty("cityBlendConfigEnabled", ConfigManager.CITY_BLEND_ENABLED);
+
+        LevelChunk resident = null;
+        try {
+            resident = level.getChunkSource().getChunkNow(chunkX, chunkZ);
+        } catch (Throwable ignored) {
+        }
+        JsonObject residency = new JsonObject();
+        residency.addProperty("loaded", resident != null);
+        if (resident != null) {
+            try {
+                residency.addProperty("status", String.valueOf(resident.getStatus()));
+                residency.addProperty("full", resident.getStatus() == ChunkStatus.FULL);
+            } catch (Throwable ignored) {
+            }
+        }
+        obj.add("residency", residency);
+
+        LostCityProfile profile = null;
+        try {
+            if (provider != null) {
+                profile = provider.getProfile();
+            }
+        } catch (Throwable ignored) {
+        }
+
+        JsonObject role = new JsonObject();
+        role.addProperty("available", provider != null && profile != null);
+        if (provider == null) {
+            role.addProperty("reason", "provider-missing");
+        } else if (profile == null) {
+            role.addProperty("reason", "profile-missing");
+        } else {
+            addRoleFacts(role, provider, profile, coord);
+            JsonArray neighbors = new JsonArray();
+            int[][] offsets = {{0, -1}, {1, 0}, {0, 1}, {-1, 0},
+                {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
+            for (int[] offset : offsets) {
+                ChunkCoord neighbor = new ChunkCoord(coord.dimension(), chunkX + offset[0], chunkZ + offset[1]);
+                JsonObject fact = new JsonObject();
+                fact.addProperty("dx", offset[0]);
+                fact.addProperty("dz", offset[1]);
+                addRoleFacts(fact, provider, profile, neighbor);
+                neighbors.add(fact);
+            }
+            role.add("neighbors", neighbors);
+        }
+        obj.add("role", role);
+
+        NaturalHeightSampler.LevelSampler heights = NaturalHeightSampler.forLevel(level);
+        CityShiftField.Context context = CityShiftField.context(provider, profile, heights);
+        JsonObject field = new JsonObject();
+        double targetShift = 0.0D;
+        Integer plannedNatural = null;
+        Integer plannedReference = null;
+        if (context == null) {
+            field.addProperty("available", false);
+            field.addProperty("reason", provider == null ? "provider-missing" : "no-height-sampler");
+        } else {
+            CityShiftField.ShiftSettings settings = context.settings();
+            field.addProperty("available", true);
+            field.addProperty("enabled", settings.enabled());
+            field.addProperty("slopeFlat", settings.slopeFlat());
+            field.addProperty("slopeSteep", settings.slopeSteep());
+            field.addProperty("maxShift", settings.maxShift());
+            field.addProperty("reliefStrength", settings.reliefStrength());
+            field.addProperty("haloChunks", settings.halo());
+            field.addProperty("maxRunOutBlocks", settings.maxRunOutBlocks());
+            field.addProperty("settingsVersion", settings.version());
+            plannedNatural = CityShiftField.plannedNaturalSurface(context, chunkX, chunkZ);
+            plannedReference = CityShiftField.plannedReferenceSurface(context, chunkX, chunkZ);
+            boolean readyBeforeWait = plannedNatural != null;
+            long waitStarted = System.nanoTime();
+            String waitOutcome = readyBeforeWait ? "ALREADY_READY" : "NOT_NEEDED";
+            if (!readyBeforeWait && settings.enabled()) {
+                try {
+                    CityShiftField.readyForChunk(context, chunkX, chunkZ)
+                        .get(20L, TimeUnit.SECONDS);
+                    waitOutcome = "READY";
+                } catch (java.util.concurrent.TimeoutException timeout) {
+                    waitOutcome = "TIMEOUT";
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    waitOutcome = "INTERRUPTED";
+                } catch (Throwable failure) {
+                    waitOutcome = "FAILED_" + failure.getClass().getSimpleName();
+                }
+                plannedNatural = CityShiftField.plannedNaturalSurface(context, chunkX, chunkZ);
+                plannedReference = CityShiftField.plannedReferenceSurface(context, chunkX, chunkZ);
+            }
+            field.addProperty("regionReadyBeforeDebugWait", readyBeforeWait);
+            field.addProperty("debugWaitOutcome", waitOutcome);
+            field.addProperty("debugWaitMillis",
+                (System.nanoTime() - waitStarted) / 1_000_000L);
+            targetShift = CityShiftField.cachedShiftAtChunk(context, chunkX, chunkZ);
+            field.addProperty("regionCacheReady", plannedNatural != null);
+            field.addProperty("targetShiftCached", targetShift);
+            if (plannedNatural != null) {
+                field.addProperty("plannedNaturalSurface", plannedNatural);
+            }
+            if (plannedReference != null) {
+                field.addProperty("plannedReferenceSurface", plannedReference);
+            }
+            JsonObject targetBuilderTrace = new JsonObject();
+            addBuilderTrace(targetBuilderTrace,
+                CityShiftField.debugCell(context, chunkX, chunkZ));
+            field.add("targetBuilderTrace", targetBuilderTrace);
+
+            JsonArray shifts = new JsonArray();
+            double minShift = Double.POSITIVE_INFINITY;
+            double maxShift = Double.NEGATIVE_INFINITY;
+            int positive = 0;
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    double shift = CityShiftField.cachedShiftAtChunk(context, chunkX + dx, chunkZ + dz);
+                    minShift = Math.min(minShift, shift);
+                    maxShift = Math.max(maxShift, shift);
+                    if (shift > 0.0D) {
+                        positive++;
+                    }
+                    JsonObject sample = new JsonObject();
+                    sample.addProperty("dx", dx);
+                    sample.addProperty("dz", dz);
+                    sample.addProperty("shift", shift);
+                    JsonObject builderTrace = new JsonObject();
+                    addBuilderTrace(builderTrace,
+                        CityShiftField.debugCell(context, chunkX + dx, chunkZ + dz));
+                    sample.add("builderTrace", builderTrace);
+                    shifts.add(sample);
+                }
+            }
+            field.add("neighborShifts", shifts);
+            field.addProperty("neighborPositiveCount", positive);
+            field.addProperty("neighborMinShift", minShift == Double.POSITIVE_INFINITY ? 0.0D : minShift);
+            field.addProperty("neighborMaxShift", maxShift == Double.NEGATIVE_INFINITY ? 0.0D : maxShift);
+        }
+        obj.add("field", field);
+
+        JsonObject heightsObj = new JsonObject();
+        Integer naturalCached = heights == null ? null : heights.cachedChunkHeight(chunkX, chunkZ);
+        heightsObj.addProperty("naturalSamplerCached", naturalCached != null);
+        if (naturalCached != null) {
+            heightsObj.addProperty("naturalSamplerSurface", naturalCached);
+        }
+        if (resident != null) {
+            addResidentHeight(heightsObj, resident, Heightmap.Types.OCEAN_FLOOR_WG, "oceanFloorWg");
+            addResidentHeight(heightsObj, resident, Heightmap.Types.WORLD_SURFACE_WG, "worldSurfaceWg");
+            addResidentHeight(heightsObj, resident, Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, "motionBlockingNoLeaves");
+            addResidentHeight(heightsObj, resident, Heightmap.Types.WORLD_SURFACE, "worldSurface");
+        }
+        obj.add("heights", heightsObj);
+
+        MountainCityBlendDiagnostics.ChunkTraceSnapshot trace =
+            MountainCityBlendDiagnostics.chunkTrace(level.dimension(), chunkX, chunkZ);
+        JsonObject runtime = new JsonObject();
+        runtime.addProperty("recorded", trace != null);
+        if (trace != null) {
+            runtime.addProperty("gateSeen", trace.gateSeen());
+            runtime.addProperty("gateAlreadyActive", trace.gateAlreadyActive());
+            runtime.addProperty("gateReadyRebuilds", trace.gateReadyRebuilds());
+            runtime.addProperty("gateDeferred", trace.gateDeferred());
+            runtime.addProperty("gateResumed", trace.gateResumed());
+            runtime.addProperty("gateNoRegion", trace.gateNoRegion());
+            runtime.addProperty("gateFailures", trace.gateFailures());
+            runtime.addProperty("blenderRegionSeen", trace.blenderSeen());
+            runtime.addProperty("blenderRegionApplied", trace.blenderApplied());
+            runtime.addProperty("noiseTransformCalls", trace.noiseTransformCalls());
+            runtime.addProperty("noiseTransformShift", trace.noiseTransformShift());
+            runtime.addProperty("targetFieldPositive", trace.targetFieldPositive());
+            runtime.addProperty("targetShift", trace.targetShift());
+            if (trace.lastGateDecision() != null) {
+                runtime.addProperty("lastGateDecision", trace.lastGateDecision());
+            }
+            runtime.addProperty("updatedAtMs", trace.updatedAtMs());
+        }
+        MountainCityBlendDiagnostics.GenerationOutcome generation =
+            MountainCityBlendDiagnostics.recordedGenerationOutcome(level.dimension(), chunkX, chunkZ);
+        if (generation != null) {
+            JsonObject outcome = new JsonObject();
+            outcome.addProperty("summary", generation.summary());
+            outcome.addProperty("centreShift", generation.centreShift());
+            outcome.addProperty("keyedBy", "blender-region-centre");
+            runtime.add("regionCentreOutcome", outcome);
+        }
+        obj.add("runtime", runtime);
+
+        JsonObject post = new JsonObject();
+        post.addProperty("pendingChunkScans", ChunkPostProcessor.getPendingScanCount());
+        if (resident != null) {
+            post.addProperty("treeProtectedBlocks",
+                ChunkPostProcessor.getProtectedTreeBlockCount(level, chunkX, chunkZ));
+            post.addProperty("treeSeamChunk", ChunkPostProcessor.isSeamChunk(level, chunkX, chunkZ));
+        }
+        obj.add("postProcessing", post);
+
+        JsonArray reasons = new JsonArray();
+        String state;
+        String reason;
+        if (provider == null) {
+            state = "DISABLED";
+            reason = "NO_LOST_CITIES_PROVIDER";
+        } else if (profile == null) {
+            state = "REJECTED";
+            reason = "PROFILE_UNAVAILABLE";
+        } else if (context == null) {
+            state = "REJECTED";
+            reason = "NO_NATURAL_HEIGHT_SAMPLER";
+        } else if (!ConfigManager.CITY_BLEND_ENABLED || !context.settings().enabled()) {
+            state = "DISABLED";
+            reason = "CITY_BLEND_DISABLED";
+        } else if (!(targetShift > 0.0D)) {
+            state = "NO_DEMAND";
+            reason = "NO_POSITIVE_SHIFT_AT_TARGET";
+        } else if (trace == null) {
+            state = "NOT_OBSERVED";
+            reason = "TARGET_NOT_SEEN_BY_TERRAIN_GATE";
+        } else if (trace.gateFailures() > 0) {
+            state = "REJECTED";
+            reason = "TERRAIN_GATE_FAILURE";
+        } else if (trace.gateNoRegion() > 0
+            && trace.gateAlreadyActive() == 0
+            && trace.gateReadyRebuilds() == 0
+            && trace.gateResumed() == 0) {
+            state = "REJECTED";
+            reason = "ACTIVE_BLENDER_MISSING";
+        } else if (trace.noiseTransformCalls() > 0) {
+            state = "APPLIED_TO_TARGET";
+            reason = "NATIVE_NOISECHUNK_TRANSFORM_OBSERVED";
+        } else if (trace.gateAlreadyActive() > 0
+            || trace.gateReadyRebuilds() > 0
+            || trace.gateResumed() > 0) {
+            state = "APPLIED_TO_TARGET";
+            reason = "TARGET_GATE_BOUND_TO_CITY_SHIFT_FIELD_NO_SAMPLE_RETAINED";
+        } else if (trace.gateDeferred() > 0) {
+            state = "DEFERRED";
+            reason = "WAITING_FOR_IMMUTABLE_SHIFT_REGIONS";
+        } else {
+            state = "NOT_OBSERVED";
+            reason = "TARGET_TRACE_HAS_NO_APPLICATION_EVENT";
+        }
+        obj.addProperty("decision", state);
+        obj.addProperty("reason", reason);
+        obj.addProperty("terrainTransformApplied", "APPLIED_TO_TARGET".equals(state));
+        obj.addProperty("flattened", "APPLIED_TO_TARGET".equals(state));
+        if (targetShift > 0.0D) {
+            reasons.add("positive shift demand reaches this chunk: " + fmt(targetShift) + " blocks");
+        } else {
+            reasons.add("no positive shift demand is published for this chunk");
+        }
+        if (trace == null) {
+            reasons.add("no per-target gate event is retained; this is not proof that an old chunk was reshaped");
+        } else if (trace.noiseTransformCalls() > 0) {
+            reasons.add("a positive native NoiseChunk transform was observed for this exact target chunk");
+        } else if (trace.lastGateDecision() != null) {
+            reasons.add("last target gate decision: " + trace.lastGateDecision());
+        }
+        if (plannedNatural == null && context != null && context.settings().enabled()) {
+            reasons.add("shift region did not become resident during the bounded manual-debug wait");
+        }
+        reasons.add("flattened=true means native density was bound to LC2H's shift field; LC2H does not create a flat plane");
+        obj.add("explanation", reasons);
+        return obj;
+    }
+
+    private static void addResidentHeight(JsonObject target,
+                                          LevelChunk chunk,
+                                          Heightmap.Types type,
+                                          String name) {
+        try {
+            target.addProperty(name, chunk.getHeight(type, 8, 8) + 1);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void addRoleFacts(JsonObject target,
+                                     IDimensionInfo provider,
+                                     LostCityProfile profile,
+                                     ChunkCoord coord) {
+        try {
+            ChunkRoleProbe.Probe cached = ChunkRoleProbe.peekStableTerrainProbe(
+                provider, coord.dimension(), coord.chunkX(), coord.chunkZ());
+            ChunkRoleProbe.Probe probe = cached != null
+                ? cached
+                : ChunkRoleProbe.getStableTerrainProbe(provider, coord.dimension(), coord.chunkX(), coord.chunkZ());
+            target.addProperty("stableProbeCached", cached != null);
+            target.addProperty("isCity", probe.isCity());
+            target.addProperty("cityLevel", probe.cityLevel());
+            target.addProperty("hasHighway", probe.hasHighway());
+            target.addProperty("highwayLevel", probe.highwayLevel());
+            target.addProperty("highwayTunnel", probe.highwayTunnel());
+            target.addProperty("hasRailway", probe.hasRailway());
+            target.addProperty("hasSurfaceRailway", probe.hasSurfaceRailway());
+            target.addProperty("buildingTypeKnown", probe.buildingTypeKnown());
+            target.addProperty("unsafeForSurfaceTree", probe.isUnsafe());
+        } catch (Throwable failure) {
+            target.addProperty("probeError", failure.getClass().getSimpleName());
+        }
+        try {
+            target.addProperty("isCityRaw", BuildingInfo.isCityRaw(coord, provider, profile));
+        } catch (Throwable failure) {
+            target.addProperty("isCityRawError", failure.getClass().getSimpleName());
+        }
+        try {
+            target.addProperty("cityFactor", City.getCityFactor(coord, provider, profile));
+            target.addProperty("cityThreshold", profile.CITY_THRESHOLD);
+        } catch (Throwable failure) {
+            target.addProperty("cityFactorError", failure.getClass().getSimpleName());
+        }
     }
 
     private static JsonObject buildMultiChunkJson(IDimensionInfo provider, ChunkCoord coord) {
@@ -655,6 +1024,54 @@ public final class ChunkDebugExporter {
         } catch (Throwable ignored) {
         }
         return String.valueOf(target);
+    }
+
+    private static void addBuilderTrace(JsonObject obj, CityShiftField.DebugCell trace) {
+        obj.addProperty("available", trace != null);
+        if (trace == null) {
+            return;
+        }
+        obj.addProperty("lockedSource", trace.lockedSource());
+        obj.addProperty("roleType", trace.roleType());
+        obj.addProperty("roleName", switch (trace.roleType()) {
+            case 2 -> "CITY";
+            case 3 -> "HIGHWAY";
+            default -> "NONE";
+        });
+        obj.addProperty("roleLevel", trace.roleLevel());
+        if (trace.sourceFloor() != Integer.MIN_VALUE) {
+            obj.addProperty("sourceFloor", trace.sourceFloor());
+        }
+        addFinite(obj, "sourceDemand", trace.sourceDemand());
+        addFinite(obj, "sourceDistance", trace.sourceDistance());
+        addFinite(obj, "fadeDistance", trace.fadeDistance());
+        addFinite(obj, "naturalSurface", trace.naturalSurface());
+        addFinite(obj, "latticeStep", trace.latticeStep());
+        addFinite(obj, "preRecoveryShift", trace.preRecoveryShift());
+        obj.addProperty("zeroDemandCityEdge", trace.zeroDemandCityEdge());
+        obj.addProperty("exactReceiverEdge", trace.exactReceiverEdge());
+        obj.addProperty("recoverySampled", trace.recoverySampled());
+        obj.addProperty("recoveryCandidateSeen", trace.recoveryCandidateSeen());
+        obj.addProperty("recoveryApplied", trace.recoveryApplied());
+        addFinite(obj, "recoveryCandidate", trace.recoveryCandidate());
+        if (trace.recoveryFloor() != Integer.MIN_VALUE) {
+            obj.addProperty("recoveryFloor", trace.recoveryFloor());
+        }
+        if (trace.recoveryNatural() != Integer.MIN_VALUE) {
+            obj.addProperty("recoveryNatural", trace.recoveryNatural());
+        }
+        addFinite(obj, "propagatedShift", trace.propagatedShift());
+        addFinite(obj, "finalShift", trace.finalShift());
+    }
+
+    private static void addFinite(JsonObject obj, String name, double value) {
+        if (Double.isFinite(value)) {
+            obj.addProperty(name, value);
+        }
+    }
+
+    private static String fmt(double value) {
+        return String.format(java.util.Locale.ROOT, "%.2f", value);
     }
 
     private static String sanitize(String label) {

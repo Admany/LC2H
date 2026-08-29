@@ -69,6 +69,7 @@ public final class ShadowMutationRuntimeHarness {
             case "vines" -> results.add(runVines(level, anchor.offset(0, 0, 16)));
             case "fluids" -> results.add(runFluids(level, anchor.offset(0, 0, 32)));
             case "treeplacer" -> results.add(runTreePlacer(level, anchor.offset(0, 0, 48)));
+            case "vanilla", "vanilla_tree" -> results.add(runVanillaTree(level, anchor));
             case "midgard" -> results.add(runMidgard(level, anchor.offset(0, 0, 64)));
             case "all" -> {
                 results.add(runGravity(level, anchor));
@@ -80,7 +81,7 @@ public final class ShadowMutationRuntimeHarness {
                 scenario,
                 false,
                 0,
-                List.of("unknown scenario; expected gravity, vines, fluids, treeplacer or all")));
+                List.of("unknown scenario; expected gravity, vines, fluids, vanilla, treeplacer, midgard or all")));
         }
         return results;
     }
@@ -355,6 +356,79 @@ public final class ShadowMutationRuntimeHarness {
             hasLog && hasLeaves && !ShadowBlockMutationApplier.hasPendingWork(),
             cycles,
             details);
+    }
+
+    /** Exercise the vanilla tree mixin on an integrated server seam. */
+    private static ScenarioResult runVanillaTree(ServerLevel level, BlockPos anchor) {
+        TreeCompatTracker.refreshRuntimeAvailability();
+        List<String> details = new ArrayList<>();
+        // Clear captures left by spawn preparation so this test is isolated.
+        DeferredTreeQueue.clearDimension(level);
+        Registry<ConfiguredFeature<?, ?>> configuredFeatures;
+        try {
+            configuredFeatures = level.registryAccess().registryOrThrow(Registries.CONFIGURED_FEATURE);
+        } catch (Throwable t) {
+            return new ScenarioResult("vanilla", false, 0,
+                List.of("configured feature registry unavailable: " + t.getClass().getSimpleName() + ": " + t.getMessage()));
+        }
+        ResourceLocation featureId = ResourceLocations.of("minecraft", "oak");
+        ConfiguredFeature<?, ?> feature = configuredFeatures.get(featureId);
+        if (feature == null) {
+            return new ScenarioResult("vanilla", false, 0, List.of("configured feature missing: " + featureId));
+        }
+
+        BlockPos origin = findCaptureOrigin(level, anchor);
+        if (origin == null) {
+            return new ScenarioResult("vanilla", false, 0,
+                List.of("no LC-safe seam found for vanilla TreeFeature capture"));
+        }
+        clearVolume(level, origin.offset(-18, -2, -18), origin.offset(18, 48, 18));
+        touchChunks(level, origin, 3);
+        level.setBlock(origin.below(), Blocks.DIRT.defaultBlockState(), DEBUG_FLAGS);
+
+        long capturesBefore = TreeCompatTracker.captureCount(DeferredTreeCaptureContext.CaptureSource.VANILLA_TREE);
+        long appliedBefore = TreeCompatTracker.appliedCount(DeferredTreeCaptureContext.CaptureSource.VANILLA_TREE);
+        boolean placed;
+        try {
+            placed = feature.place(level,
+                level.getChunkSource().getGenerator(),
+                RandomSource.create(level.getSeed() ^ origin.asLong()),
+                origin);
+        } catch (Throwable t) {
+            return new ScenarioResult("vanilla", false, 0,
+                List.of("vanilla oak feature placement failed: " + t.getClass().getSimpleName() + ": " + t.getMessage()));
+        }
+
+        // Replay through the production queue and applier.
+        DeferredTreeQueue.promoteReadyLoaded(level, 128);
+        int replayCycles = DeferredTreeEventHandler.forceReplayReadyForDebug(level.getServer(), 64, 16_384);
+        int applyCycles = ShadowBlockMutationApplier.forceDrainForDebug(128);
+        int cycles = replayCycles + applyCycles;
+
+        long captures = TreeCompatTracker.captureCount(DeferredTreeCaptureContext.CaptureSource.VANILLA_TREE) - capturesBefore;
+        long applied = TreeCompatTracker.appliedCount(DeferredTreeCaptureContext.CaptureSource.VANILLA_TREE) - appliedBefore;
+        int logs = 0;
+        int leaves = 0;
+        for (BlockPos pos : BlockPos.betweenClosed(origin.offset(-16, 0, -16), origin.offset(16, 40, 16))) {
+            BlockState state = level.getBlockState(pos);
+            if (state.is(BlockTags.LOGS)) {
+                logs++;
+            }
+            if (state.is(BlockTags.LEAVES)) {
+                leaves++;
+            }
+        }
+        int pending = DeferredTreeQueue.pendingCount(level);
+        int ready = DeferredTreeQueue.readyCount(level);
+        boolean queueIdle = pending == 0 && ready == 0 && !ShadowBlockMutationApplier.hasPendingWork();
+        details.add("feature=" + featureId + " origin=" + origin + " placed=" + placed);
+        details.add("captureDelta=" + captures + " appliedDelta=" + applied
+            + " replayCycles=" + replayCycles + " shadowApplyCycles=" + applyCycles
+            + " logs=" + logs + " leaves=" + leaves + " pending=" + pending + " ready=" + ready);
+        details.add("capturePolicy=" + TreeCapturePolicy.diagnostics());
+        details.add("treeDiagnostics=" + DeferredTreeEventHandler.capturedTreeDiagnostics(level));
+        return new ScenarioResult("vanilla", placed && captures > 0 && applied > 0
+            && logs > 0 && leaves > 0 && queueIdle, cycles, details);
     }
 
     private static ScenarioResult runMidgard(ServerLevel level, BlockPos anchor) {

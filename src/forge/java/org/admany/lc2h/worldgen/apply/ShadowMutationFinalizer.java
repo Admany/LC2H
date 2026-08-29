@@ -171,6 +171,32 @@ final class ShadowMutationFinalizer {
         if (entries == null || entries.length == 0) {
             return List.of();
         }
+        if (plan.kind() == ChunkShadowMutationPlan.MutationKind.TREE_CAPTURE && entries.length > 1) {
+            // Captured trees arrive as small plans. Stage buckets keep their
+            // order without sorting every slice.
+            @SuppressWarnings("unchecked")
+            List<IndexedEntry>[] buckets = new List[Stage.values().length];
+            for (int i = 0; i < entries.length; i++) {
+                ChunkShadowMutationPlan.Entry entry = entries[i];
+                if (entry == null || entry.state() == null) {
+                    continue;
+                }
+                Stage stage = classify(entry.state());
+                List<IndexedEntry> bucket = buckets[stage.order()];
+                if (bucket == null) {
+                    bucket = new ArrayList<>();
+                    buckets[stage.order()] = bucket;
+                }
+                bucket.add(new IndexedEntry(i, stage, entry));
+            }
+            List<IndexedEntry> ordered = new ArrayList<>(entries.length);
+            for (List<IndexedEntry> bucket : buckets) {
+                if (bucket != null) {
+                    ordered.addAll(bucket);
+                }
+            }
+            return ordered;
+        }
         List<IndexedEntry> ordered = new ArrayList<>(entries.length);
         for (int i = 0; i < entries.length; i++) {
             ChunkShadowMutationPlan.Entry entry = entries[i];
@@ -276,21 +302,12 @@ final class ShadowMutationFinalizer {
                 return ApplyOutcome.rejected("chunk_unloaded");
             }
             int flags = normalizeApplyFlags(entry.flags(), entry.state(), entry.markTreePlacement());
-            // A captured Lost Cities mutation can replace a structure block
-            // carrying a block entity with air or a normal block.  Leaving
-            // the old entity in the chunk's pending NBT creates thousands of
-            // "Tried to load a block entity for block air" warnings when
-            // players later stream those chunks back in.  The target's normal
-            // state write/newBlockEntity path owns any replacement entity, so
-            // discard the old one before every captured state replacement.
+            // Remove a stale block entity before replacing its block state.
             clearExistingBlockEntity(level, chunk, pos);
             boolean changed = level.setBlock(pos, entry.state(), flags);
             if (!entry.state().hasBlockEntity()) {
-                // We already have the destination chunk pinned above.  Calling
-                // ServerLevel.removeBlockEntity here re-enters Level's neighbour
-                // update path, which can call getBlockState on an adjacent chunk
-                // and make the server thread wait for worldgen.  Remove the
-                // pending entity directly from the loaded chunk instead.
+                // Remove directly from the pinned chunk to avoid neighbour
+                // lookups during the server tick.
                 chunk.removeBlockEntity(pos);
             }
             BlockState actualState = getLoadedChunk(level, pos) == null ? null : getLoadedChunk(level, pos).getBlockState(pos);
@@ -366,11 +383,8 @@ final class ShadowMutationFinalizer {
     }
 
     private static int normalizeAttachmentFlags(int flags) {
-        // Attachments are replayed only after their destination chunk is
-        // loaded.  Neighbour propagation is not required for the placement
-        // itself and can synchronously resolve an adjacent chunk through
-        // ServerLevel, which is exactly the server-thread stall this queue is
-        // meant to avoid.
+        // The destination is loaded already; skip neighbour propagation to
+        // avoid resolving another chunk from the server thread.
         return (flags | Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE)
             & ~(Block.UPDATE_NEIGHBORS | Block.UPDATE_INVISIBLE);
     }

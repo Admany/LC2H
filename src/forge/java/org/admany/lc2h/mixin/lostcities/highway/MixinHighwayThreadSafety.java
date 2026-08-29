@@ -8,6 +8,7 @@ import mcjty.lostcities.worldgen.lost.Orientation;
 import org.admany.lc2h.data.cache.LostCitiesCacheBridge;
 import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
 import org.admany.lc2h.worldgen.lostcities.PlannerHotPath;
+import org.admany.lc2h.worldgen.lostcities.LostCitiesGuiPreviewGuard;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Mutable;
@@ -60,7 +61,14 @@ public abstract class MixinHighwayThreadSafety {
                 Integer prev = cache.putIfAbsent(cp, disk);
                 LostCitiesCacheBudgetManager.recordPut(selectBudget(cache), cp, selectBudget(cache).defaultEntryBytes(), prev == null);
                 cir.setReturnValue(prev != null ? prev : disk);
+                return;
             }
+        }
+        if (LostCitiesGuiPreviewGuard.shouldDefer(provider, profile, cp,
+            "highway:" + String.valueOf(orientation))) {
+            // -1 is Lost Cities' no-highway value. Do not cache the preview
+            // fallback; a later frame can resolve the cell.
+            cir.setReturnValue(-1);
         }
     }
 

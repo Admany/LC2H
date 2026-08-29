@@ -226,6 +226,22 @@ public final class DeferredTreeQueue {
         enqueue(retried.dim(), retried);
     }
 
+    /**
+     * Requeue a tree after it has been removed from a ready queue and release
+     * the current retention exactly once. Requeue releases expired entries.
+     */
+    public static void requeueAndRelease(PendingTree tree) {
+        if (tree == null) {
+            return;
+        }
+        boolean requeueOwnsRelease = tree.retryCount() < MAX_REQUEUE_ATTEMPTS
+            && !tree.isExpired(System.currentTimeMillis());
+        requeue(tree);
+        if (requeueOwnsRelease) {
+            DeferredTreeChunkRetainer.release(tree);
+        }
+    }
+
     public static List<PendingTree> drainReady(ResourceKey<Level> dim, ServerLevel level, int loadedChunkX, int loadedChunkZ) {
         if (dim == null || level == null) {
             return Collections.emptyList();
@@ -807,10 +823,7 @@ public final class DeferredTreeQueue {
     }
 
     public static boolean isDeferredReplayEnabled() {
-        // Captured trees are the only safe way to preserve decoration that
-        // crosses a Lost Cities ownership boundary.  This must not depend on
-        // a client/server config toggle: disabling replay after capture turns
-        // a recoverable tree into a silently missing one.
+        // Captured trees must remain replayable after crossing an LC boundary.
         return true;
     }
 

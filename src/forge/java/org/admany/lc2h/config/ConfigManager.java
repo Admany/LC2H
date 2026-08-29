@@ -25,6 +25,7 @@ import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 public class ConfigManager {
     public static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -32,6 +33,8 @@ public class ConfigManager {
 
     public static final String DEFAULT_GLOW_LICHEN_ID = "minecraft:glow_lichen";
     public static final String IMMERSIVE_WEATHERING_FROST_ID = "immersive_weathering:frost";
+    /** Normalized block ids used by the floating-vegetation cleanup. */
+    private static volatile Set<String> FLOATING_VEGETATION_IDS = Set.of(DEFAULT_GLOW_LICHEN_ID);
 
     public static boolean ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER = true;
     public static boolean ENABLE_AUTOMATIC_CHUNK_SCANS = false;
@@ -40,11 +43,9 @@ public class ConfigManager {
     public static boolean CITY_VERTICAL_TERRAIN_CLEARANCE = false;
     public static boolean ENABLE_LOSTCITIES_GENERATION_LOCK = true;
     public static boolean ENABLE_LOSTCITIES_PART_SLICE_COMPAT = true;
-    public static String LOSTCITIES_STREET_GENERATION_MODE = "LEGACY";
-    /* Experimental terrain shaping is opt-in.  Enabling it on a migrated or
-     * freshly-created profile changes native Lost Cities terrain before the
-     * player has a chance to inspect the A/B result. */
-    public static boolean CITY_BLEND_ENABLED = false;
+    public static String LOSTCITIES_STREET_GENERATION_MODE = "HIERARCHICAL_GRID_V1";
+    // Terrain smoothing is enabled by default but remains a live user setting.
+    public static boolean CITY_BLEND_ENABLED = true;
     public static int CITY_BLEND_WIDTH = 36;
     public static double CITY_BLEND_SOFTNESS = 1.4;
     public static boolean ENABLE_CACHE_STATS_LOGGING = true;
@@ -95,7 +96,7 @@ public class ConfigManager {
         public boolean cityVerticalTerrainClearance = false;
         public boolean enableLostCitiesGenerationLock = true;
         public boolean enableLostCitiesPartSliceCompat = true;
-        public String lostCitiesStreetGenerationMode = "LEGACY";
+        public String lostCitiesStreetGenerationMode = "HIERARCHICAL_GRID_V1";
         public boolean enableCacheStatsLogging = true;
         public boolean enableFloatingVegetationRemoval = true;
         /**
@@ -120,7 +121,8 @@ public class ConfigManager {
         public int cacheLostCitiesDiskTtlHours = 2;
 
         // City edge blending
-        public boolean cityBlendEnabled = false;
+        // Enabled by default and applied live from the config screen.
+        public boolean cityBlendEnabled = true;
         public int cityBlendWidth = 36;
         public double cityBlendSoftness = 1.4;
 
@@ -177,8 +179,7 @@ public class ConfigManager {
             Config merged = new Config();
             try {
                 for (java.lang.reflect.Field field : Config.class.getFields()) {
-            // Gson fills missing primitives with false or zero. Merge only fields that
-            // are present so new true-by-default options survive config migration.
+            // Merge only fields present in the file so new defaults survive upgrades.
                     if (userFields.has(field.getName())) {
                         field.set(merged, field.get(userConfig));
                     }
@@ -187,13 +188,11 @@ public class ConfigManager {
                 LCLogger.error("[LC2H] [Config] ❌ Failed to merge config fields: " + e.getMessage());
             }
 
-            // Drop obsolete opt-outs before writing the normalized config. The old
-            // vertical clear deleted terrain blindly and the tree flags caused rejects.
+            // Retire the old terrain-clear and tree-rejection options.
             merged.cityVerticalTerrainClearance = false;
             merged.cityBlendClearTrees = true;
             merged.cityBlendTreeSeamFix = true;
-            // The street planner is now a live LC2H setting. Normalize old or
-            // hand-edited values while migrating the JSON file.
+            // Normalize hand-edited planner values while migrating the file.
             merged.lostCitiesStreetGenerationMode = LostCitiesStreetModePolicy.normalizeValue(merged.lostCitiesStreetGenerationMode);
             merged.floatingVegetationAdditionalBlocks = normalizeFloatingVegetationBlocks(
                 merged.floatingVegetationAdditionalBlocks);
@@ -206,11 +205,7 @@ public class ConfigManager {
         }
     }
 
-    /**
-     * Built-in attachment vegetation is always eligible for the general
-     * floating cleanup. Immersive Weathering's frost is only advertised as a
-     * default when that block is actually registered by the current pack.
-     */
+    /** Return the built-in attachment blocks available in this pack. */
     public static List<String> defaultFloatingVegetationBlocks() {
         LinkedHashSet<String> defaults = new LinkedHashSet<>();
         defaults.add(DEFAULT_GLOW_LICHEN_ID);
@@ -220,17 +215,12 @@ public class ConfigManager {
                 defaults.add(IMMERSIVE_WEATHERING_FROST_ID);
             }
         } catch (Throwable ignored) {
-            // Registry access is not guaranteed during very early config
-            // loading; the runtime predicate retries it after registration.
+            // Registries may not be ready during early config loading.
         }
         return List.copyOf(defaults);
     }
 
-    /**
-     * Normalizes a JSON/UI list and merges mandatory built-in defaults. Empty
-     * tokens and malformed registry ids are ignored so a typo never makes the
-     * cleanup scan throw or match an unrelated block.
-     */
+    /** Normalize configured ids and add the built-in defaults. */
     public static List<String> normalizeFloatingVegetationBlocks(Collection<?> configured) {
         LinkedHashSet<String> normalized = new LinkedHashSet<>(defaultFloatingVegetationBlocks());
         if (configured != null) {
@@ -242,8 +232,7 @@ public class ConfigManager {
                 if (value.isEmpty()) {
                     continue;
                 }
-                // Config JSON stores one id per item, while the screen accepts
-                // comma/newline separated input for easy editing.
+                // The UI accepts comma- or newline-separated values.
                 for (String token : value.split("[,\\r\\n]+")) {
                     String id = token.trim();
                     if (!id.isEmpty() && ResourceLocations.tryParse(id) != null) {
@@ -259,17 +248,38 @@ public class ConfigManager {
         return normalizeFloatingVegetationBlocks(text == null ? List.of() : List.of(text));
     }
 
+    /** Return normalized ids used by the cleanup pass. */
+    public static Set<String> floatingVegetationIds() {
+        return FLOATING_VEGETATION_IDS;
+    }
+
+    public static boolean isFloatingVegetationId(String id) {
+        return id != null && FLOATING_VEGETATION_IDS.contains(id);
+    }
+
+    /** Return malformed UI tokens so the screen can show an input warning. */
+    public static List<String> invalidFloatingVegetationTokens(String text) {
+        if (text == null || text.isBlank()) {
+            return List.of();
+        }
+        LinkedHashSet<String> invalid = new LinkedHashSet<>();
+        for (String token : text.split("[,\\r\\n]+")) {
+            String value = token == null ? "" : token.trim().toLowerCase(Locale.ROOT);
+            if (!value.isEmpty() && ResourceLocations.tryParse(value) == null) {
+                invalid.add(value);
+            }
+        }
+        return List.copyOf(invalid);
+    }
+
     public static String floatingVegetationText(Collection<?> configured) {
         return String.join(", ", normalizeFloatingVegetationBlocks(configured));
     }
 
-    /**
-     * Registry-backed defaults are refreshed after Forge has fired registry
-     * events. This matters because the mod constructor loads config before a
-     * third-party block such as Immersive Weathering's frost is registered.
-     */
+    /** Refresh registry-dependent defaults after Forge registration. */
     public static void refreshFloatingVegetationDefaults() {
         if (CONFIG == null) {
+            FLOATING_VEGETATION_IDS = Set.of(DEFAULT_GLOW_LICHEN_ID);
             return;
         }
         List<String> normalized = normalizeFloatingVegetationBlocks(CONFIG.floatingVegetationAdditionalBlocks);
@@ -278,6 +288,7 @@ public class ConfigManager {
             writePrettyJsonConfig(CONFIG);
             LCLogger.info("[LC2H] [Config] Floating vegetation defaults refreshed: {}", normalized);
         }
+        FLOATING_VEGETATION_IDS = Set.copyOf(normalized);
     }
 
     public static void writePrettyJsonConfig(Config merged) {
@@ -297,10 +308,10 @@ public class ConfigManager {
         comments.put("cityVerticalTerrainClearance", "Retired compatibility field. LC2H always preserves native Lost Cities terrain shaping.");
         comments.put("enableLostCitiesGenerationLock", "Recommended: serialize nearby Lost Cities chunk-gen to avoid bugged/duplicated chunks (may reduce max throughput)");
         comments.put("enableLostCitiesPartSliceCompat", "Recommended: prevent crashes from broken/invalid Lost Cities building parts (safe bounds checks)");
-        comments.put("lostCitiesStreetGenerationMode", "Lost Cities street planner. LEGACY is the LC2H-safe default; HIERARCHICAL_GRID_V1 is the Lost Cities 7.5.x grid. Applies to chunks planned after saving, without a restart.");
+        comments.put("lostCitiesStreetGenerationMode", "Lost Cities street planner. The 7.5.x grid is the default. ChaosZPack profiles automatically use LEGACY. Applies to chunks planned after saving without a restart.");
         comments.put("enableCacheStatsLogging", "Enable cache stats logging");
         comments.put("enableFloatingVegetationRemoval", "Enable removal of floating vegetation after terrain generation");
-        comments.put("floatingVegetationAdditionalBlocks", "Additional block ids treated as attachment vegetation by the general floating cleanup. Glow lichen is built in; Immersive Weathering frost is added when registered.");
+        comments.put("floatingVegetationAdditionalBlocks", "Extra floating blocks to remove, separated by commas. Glow lichen and IW frost are included when available.");
         comments.put("enableExplosionDebris", "Enable Lost Cities explosion debris spill into adjacent chunks (can add rubble around streets)");
         comments.put("hideExperimentalWarning", "Hide the experimental features warning screen");
         comments.put("enableDebugLogging", "Enable debug logging for memory management and warmup operations");
@@ -315,7 +326,7 @@ public class ConfigManager {
         comments.put("cacheLostCitiesDiskTtlHours", "Lost Cities disk cache TTL (hours).");
 
         // City edge blending
-        comments.put("cityBlendEnabled", "Enable smooth blending of city edges into surrounding terrain");
+        comments.put("cityBlendEnabled", "Smooth terrain near city borders. Enabled by default and can be changed live");
         comments.put("cityBlendWidth", "Blend width in blocks around city borders");
         comments.put("cityBlendSoftness", "Blend softness (higher = softer falloff)");
         comments.put("cityBlendClearTrees", "Always active: protect city boundaries from unsafe tree placement.");
@@ -463,6 +474,8 @@ public class ConfigManager {
 
     public static void initializeGlobals() {
         CONFIG = loadOrCreateConfig();
+        // Publish the normalized cleanup ids after registries are ready.
+        refreshFloatingVegetationDefaults();
         ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER = CONFIG.enableAsyncDoubleBlockBatcher;
         ENABLE_AUTOMATIC_CHUNK_SCANS = CONFIG.enableAutomaticChunkScans;
         REJECT_STRUCTURES_IN_CITY_CHUNKS = CONFIG.rejectStructuresInCityChunks;
@@ -508,8 +521,7 @@ public class ConfigManager {
         CITY_BLEND_ENABLED = CONFIG.cityBlendEnabled;
         CITY_BLEND_WIDTH = CONFIG.cityBlendWidth;
         CITY_BLEND_SOFTNESS = CONFIG.cityBlendSoftness;
-        // Keep the cached terrain field in sync with the live config. This is
-        // also what makes Apply & Save take effect without a process restart.
+        // Refresh the live terrain field when Apply & Save is used.
         CityShiftField.ShiftSettings.withEnabled(CITY_BLEND_ENABLED);
         CityShiftField.withBlendShape(CITY_BLEND_WIDTH, CITY_BLEND_SOFTNESS);
         CITY_BLEND_CLEAR_TREES = true;
