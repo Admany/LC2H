@@ -1,8 +1,5 @@
 package org.admany.lc2h.world.cleanup;
 
-import mcjty.lostcities.setup.Registration;
-import mcjty.lostcities.worldgen.IDimensionInfo;
-import org.admany.lc2h.worldgen.lostcities.ChunkRoleProbe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
@@ -74,7 +71,7 @@ public final class VineClusterCleaner {
     private static final int VINE_SCAN_BATCH_SIZE = Math.max(512, Integer.getInteger("lc2h.vine.scan_batch_size", 2048));
     // Bump when the scan candidate set changes; old cache entries may have
     // marked a chunk complete before configurable lichen/frost support.
-    private static final int VINE_SCAN_CACHE_VERSION = 5;
+    private static final int VINE_SCAN_CACHE_VERSION = 6;
 
     private static final Map<ResourceKey<net.minecraft.world.level.Level>, Integer> CHUNK_CURSOR = new ConcurrentHashMap<>();
     private static final Map<ResourceKey<net.minecraft.world.level.Level>, Map<Long, Long>> LAST_SCAN = new ConcurrentHashMap<>();
@@ -96,10 +93,7 @@ public final class VineClusterCleaner {
     private static final LongAdder SCAN_DISPATCHES = new LongAdder();
     private static final LongAdder SCAN_PAUSES = new LongAdder();
     private static final LongAdder SCAN_LEVELS = new LongAdder();
-    private static final LongAdder SCAN_LEVELS_WITH_INFO = new LongAdder();
-    private static final LongAdder SCAN_NO_DIM_INFO = new LongAdder();
     private static final LongAdder SCAN_CHUNK_ATTEMPTS = new LongAdder();
-    private static final LongAdder SCAN_RELEVANT_CHUNKS = new LongAdder();
     private static volatile MinecraftServer LAST_SERVER;
     private static volatile ScheduledExecutorService FALLBACK_SCHEDULER;
 
@@ -228,11 +222,6 @@ public final class VineClusterCleaner {
             return;
         }
 
-        IDimensionInfo dimInfo = getDimensionInfo(level);
-        if (dimInfo == null) {
-            return;
-        }
-
         MinecraftServer server = level.getServer();
 
         if (!initialized) {
@@ -253,12 +242,6 @@ public final class VineClusterCleaner {
 
         String cacheKey = vineScanKey(level.dimension(), chunkPos.x, chunkPos.z);
         if (FeatureCache.get(cacheKey) != null) {
-            return;
-        }
-
-        if (!isCleanupRelevantChunk(dimInfo, level.dimension(), chunkPos.x, chunkPos.z)) {
-            // Do not cache a negative role result; the chunk may become a seam
-            // after Lost Cities finishes warming its caches.
             return;
         }
 
@@ -371,12 +354,6 @@ public final class VineClusterCleaner {
 
             for (ServerLevel level : server.getAllLevels()) {
                 SCAN_LEVELS.increment();
-                IDimensionInfo dimInfo = getDimensionInfo(level);
-                if (dimInfo == null) {
-                    SCAN_NO_DIM_INFO.increment();
-                    continue;
-                }
-                SCAN_LEVELS_WITH_INFO.increment();
                 long[] loaded = snapshotLoadedChunkKeys(level);
                 int size = loaded.length;
                 if (size <= 0) continue;
@@ -423,10 +400,6 @@ public final class VineClusterCleaner {
                         if (FeatureCache.get(cacheKey) != null) {
                             continue;
                         }
-                        if (!isCleanupRelevantChunk(dimInfo, level.dimension(), cx, cz)) {
-                            continue;
-                        }
-                        SCAN_RELEVANT_CHUNKS.increment();
                         if (scanChunkForVinesAsync(level, chunk)) {
                             processed++;
                             lastScanForLevel.put(chunkKey, now);
@@ -483,7 +456,11 @@ public final class VineClusterCleaner {
         }
 
         try {
-            AsyncManager.submitSupplier(
+            // AsyncManager can run a task inline while the server is still
+            // warming up. Use its isolated executor directly here so a
+            // chunk-load callback can never perform the scan on the server
+            // or FastChunkGen worker thread.
+            AsyncManager.submitSupplierFallback(
                 "vine_cleanup",
                 () -> {
                     long startedNs = System.nanoTime();
@@ -498,30 +475,7 @@ public final class VineClusterCleaner {
                         IN_FLIGHT_CHUNKS.remove(scanKey);
                     }
                     return null;
-                },
-                Priority.LOW
-            );
-            SCANS_SUBMITTED.increment();
-            return true;
-        } catch (Throwable ignored) {
-        }
-
-        try {
-            AsyncManager.submitSupplier(
-                "vine_cleanup_fallback",
-                () -> {
-                    long startedNs = System.nanoTime();
-                    try {
-                        performVineScan(level, chunk);
-                    } finally {
-                        SCAN_TIME_NS.add(System.nanoTime() - startedNs);
-                        SCANS_COMPLETED.increment();
-                        exitScan();
-                        IN_FLIGHT_CHUNKS.remove(scanKey);
-                    }
-                    return null;
-                },
-                org.admany.lc2h.concurrency.async.Priority.LOW
+                }
             );
             SCANS_SUBMITTED.increment();
             return true;
@@ -542,11 +496,6 @@ public final class VineClusterCleaner {
 
             if (FeatureCache.get(cacheKey) != null) {
                 return; 
-            }
-
-            IDimensionInfo dimInfo = getDimensionInfo(level);
-            if (dimInfo == null || !isCleanupRelevantChunk(dimInfo, level.dimension(), chunkPos.x, chunkPos.z)) {
-                return;
             }
 
             int baseX = chunkPos.getMinBlockX();
@@ -735,16 +684,11 @@ public final class VineClusterCleaner {
             return false;
         }
 
-        boolean survives;
-        try {
-            survives = state.canSurvive(level, pos);
-        } catch (Throwable ignored) {
-            return false;
-        }
-        if (!survives) {
-            return false;
-        }
-
+        // This method runs on the cleanup executor. Do not call
+        // BlockState#canSurvive with ServerLevel here: some modded states
+        // resolve neighbours through chunk generation and can join a
+        // FastChunkGen future. The resident-neighbour walk below is the
+        // non-blocking support check used by this component scan.
         for (Direction direction : supportDirections(family)) {
             BlockPos neighborPos = pos.relative(direction);
             net.minecraft.world.level.block.state.BlockState neighborState;
@@ -761,7 +705,10 @@ public final class VineClusterCleaner {
             if (neighborState.isAir()) {
                 continue;
             }
-            if (attachmentFamily(neighborState) == family) {
+            // Another attachment block is not a real anchor. Treating a
+            // vine, lichen, or frost block as support would preserve a whole
+            // floating cluster just because two vegetation types touch.
+            if (attachmentFamily(neighborState) != null) {
                 continue;
             }
             return true;
@@ -1045,43 +992,11 @@ public final class VineClusterCleaner {
             + " inFlight=" + IN_FLIGHT.get()
             + " indexedChunks=" + indexedChunks
             + " levels=" + SCAN_LEVELS.sum()
-            + " levelsWithInfo=" + SCAN_LEVELS_WITH_INFO.sum()
-            + " noDimInfo=" + SCAN_NO_DIM_INFO.sum()
             + " chunkAttempts=" + SCAN_CHUNK_ATTEMPTS.sum()
-            + " relevantChunks=" + SCAN_RELEVANT_CHUNKS.sum()
             + " submitted=" + submitted
             + " completed=" + completed
             + " inFlightChunks=" + IN_FLIGHT_CHUNKS.size()
             + " avgMs=" + String.format(java.util.Locale.ROOT, "%.3f", averageMs);
-    }
-
-    private static IDimensionInfo getDimensionInfo(ServerLevel level) {
-        try {
-            return Registration.LOSTCITY_FEATURE.get().getDimensionInfo(level);
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
-
-    private static boolean isCityChunk(IDimensionInfo dimInfo, ResourceKey<net.minecraft.world.level.Level> dim, int cx, int cz) {
-        try {
-            return ChunkRoleProbe.isCity(dimInfo, dim, cx, cz);
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private static boolean isCleanupRelevantChunk(IDimensionInfo dimInfo,
-                                                  ResourceKey<net.minecraft.world.level.Level> dim,
-                                                  int cx,
-                                                  int cz) {
-        if (isCityChunk(dimInfo, dim, cx, cz)) {
-            return true;
-        }
-        return isCityChunk(dimInfo, dim, cx + 1, cz)
-            || isCityChunk(dimInfo, dim, cx - 1, cz)
-            || isCityChunk(dimInfo, dim, cx, cz + 1)
-            || isCityChunk(dimInfo, dim, cx, cz - 1);
     }
 
     private static String vineScanKey(ResourceKey<net.minecraft.world.level.Level> dim, int cx, int cz) {

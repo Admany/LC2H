@@ -1135,13 +1135,25 @@ public abstract class MixinBuildingInfo {
 
         WorldGenLevel world = provider.getWorld();
         characteristics.isCity = isCityRaw(coord, provider, profile);
+        boolean boundaryReserved = false;
 
         if (!characteristics.isCity) {
             characteristics.multiPos = MultiPos.SINGLE;
             characteristics.multiBuilding = null;
         } else {
             initMultiBuildingSection(characteristics, coord, provider, profile);
-            if (MultiChunkBoundaryRegistry.shouldReserveBoundaryCorridor(provider, coord)) {
+            /*
+             * A boundary corridor only applies to a genuinely free single
+             * cell.  Never tear down a multichunk cell that Lost Cities (or
+             * the async footprint publisher) has already selected: doing so
+             * leaves the rest of the building intact while this chunk is
+             * generated as empty.
+             */
+            if (characteristics.multiPos != null
+                    && characteristics.multiPos.isSingle()
+                    && !MultiBuildingFootprintRegistry.owns(provider, coord)
+                    && MultiChunkBoundaryRegistry.shouldReserveBoundaryCorridor(provider, coord)) {
+                boundaryReserved = true;
                 characteristics.multiPos = MultiPos.SINGLE;
                 characteristics.multiBuilding = null;
                 characteristics.multiBuildingId = null;
@@ -1160,7 +1172,16 @@ public abstract class MixinBuildingInfo {
         Random rand = getBuildingRandom(chunkX, chunkZ, provider.getSeed());
         characteristics.couldHaveBuilding = characteristics.isCity &&
             checkBuildingPossibility(coord, provider, profile, characteristics.multiPos, characteristics.cityLevel, characteristics.rawPlannedRoadType, rand);
-        if (characteristics.isCity && MultiChunkBoundaryRegistry.shouldReserveBoundaryCorridor(provider, coord)) {
+        /*
+         * The corridor decision is for single-cell placement only.  Applying
+         * it after footprint enforcement used to turn a valid multichunk cell
+         * into couldHaveBuilding=false, so BuildingInfo skipped that cell and
+         * rendered a rectangular cut through the building.
+         */
+        if (boundaryReserved
+                && characteristics.isCity
+                && characteristics.multiPos.isSingle()
+                && !MultiBuildingFootprintRegistry.owns(provider, coord)) {
             characteristics.couldHaveBuilding = false;
         }
         if ((profile.isSpace() || profile.isSpheres()) && characteristics.multiPos.isSingle()) {

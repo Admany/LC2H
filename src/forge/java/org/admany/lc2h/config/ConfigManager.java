@@ -254,7 +254,20 @@ public class ConfigManager {
     }
 
     public static boolean isFloatingVegetationId(String id) {
-        return id != null && FLOATING_VEGETATION_IDS.contains(id);
+        if (id == null) {
+            return false;
+        }
+        String normalized = id.trim().toLowerCase(Locale.ROOT);
+        if (DEFAULT_GLOW_LICHEN_ID.equals(normalized)) {
+            return true;
+        }
+        if (IMMERSIVE_WEATHERING_FROST_ID.equals(normalized)) {
+            // The config is loaded before some mod registries are complete.
+            // Recognize the built-in id without touching the registry from a
+            // cleanup worker; a frost state can only exist when IW is present.
+            return true;
+        }
+        return FLOATING_VEGETATION_IDS.contains(normalized);
     }
 
     /** Return malformed UI tokens so the screen can show an input warning. */

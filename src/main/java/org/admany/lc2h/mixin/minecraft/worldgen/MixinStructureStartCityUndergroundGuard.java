@@ -54,18 +54,22 @@ public class MixinStructureStartCityUndergroundGuard {
         CityStructureProtection.StructureDecision decision;
         synchronized (LC2H_DECISIONS) {
             decision = LC2H_DECISIONS.get(start);
-            if (decision == null || !decision.complete()) {
+            if (decision == null) {
                 decision = CityStructureProtection.inspectStructureBox(
                     dimInfo,
                     dimInfo.getType(),
                     start.getBoundingBox(),
                     ConfigManager.CITY_STRUCTURE_REJECTION_BUFFER_CHUNKS);
-                if (decision.complete()) {
-                    LC2H_DECISIONS.put(start, decision);
-                }
+                /*
+                 * Keep an unresolved result for the whole start.  Rechecking
+                 * each touched chunk can change unknown into reject halfway
+                 * through placement, leaving a multichunk structure cut off.
+                 * Allowing one unresolved start is preferable to writing a
+                 * partial structure and is consistent for every chunk.
+                 */
+                LC2H_DECISIONS.put(start, decision);
             }
         }
-        /* A cold role is retried on the next touched chunk after prewarming. */
         if (decision.reject()) {
             ci.cancel();
         }

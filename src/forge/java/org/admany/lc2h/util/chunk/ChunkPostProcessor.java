@@ -146,10 +146,9 @@ public class ChunkPostProcessor {
     private static final double TARGET_TICK_MS = 20.0D;
     private static final boolean ENABLE_BATCH_DRAIN = Boolean.getBoolean("lc.floating.enable_batch_drain");
     private static final boolean AUTO_RESCAN_STARTUP = Boolean.getBoolean("lc.floating.auto_rescan_startup");
-    /* Event-driven checks are bounded and only run for chunks adjacent to an
-     * LC-owned area. Keep them on by default so direct structure writes and
-     * tree replay are audited even when the expensive full-chunk scanner is
-     * disabled. The full scanner still requires ENABLE_AUTOMATIC_CHUNK_SCANS. */
+    /* Event-driven checks are bounded and run for resident chunks. Keep them
+     * on by default so direct structure writes and tree replay are audited
+     * even when the periodic full-chunk scanner is disabled. */
     private static final boolean ENABLE_FLOATING_SCAN = Boolean.parseBoolean(
         System.getProperty("lc.floating.enable_scan", "true"));
     private static final int SAFE_SET_FLAGS = 2;
@@ -183,7 +182,7 @@ public class ChunkPostProcessor {
     private static final String DATA_ROOT = "lc2h";
     private static final String DATA_FLAG = "doubleblock_repaired";
     private static final String DATA_SCAN_VERSION_FLAG = "postprocess_scan_version";
-    private static final int CURRENT_SCAN_VERSION = 2;
+    private static final int CURRENT_SCAN_VERSION = 3;
 
     private static final Map<ChunkScanKey, ScanCursor> CHUNK_SCAN_PROGRESS = new ConcurrentHashMap<>();
     private static final Set<ChunkScanKey> INFLIGHT_CHUNK_SCANS = Collections.newSetFromMap(new ConcurrentHashMap<>());
@@ -1483,9 +1482,15 @@ public class ChunkPostProcessor {
             // Keep this marker for compatibility without scanning during load.
         }
         // Drain surface reconciliation from the server tick after promotion.
-        if (!ConfigManager.ENABLE_AUTOMATIC_CHUNK_SCANS) return;
+        // A chunk-load audit is useful even when the expensive automatic
+        // rescan is disabled: queue only chunks that actually contain a
+        // candidate block, then let the normal bounded tick pass process it.
         boolean floatingScanEnabled = ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL && ENABLE_FLOATING_SCAN;
-        boolean doubleBlockEnabled = ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER;
+        // Keep the legacy full double-block sweep behind its existing opt-in
+        // switch. Vegetation audits may run on load without turning every
+        // tall plant into a full-chunk scan when automatic scans are off.
+        boolean doubleBlockEnabled = ConfigManager.ENABLE_AUTOMATIC_CHUNK_SCANS
+            && ConfigManager.ENABLE_ASYNC_DOUBLE_BLOCK_BATCHER;
         if (!floatingScanEnabled && !doubleBlockEnabled) return;
         boolean cityChunk = floatingScanEnabled && shouldScanFloatingInChunk(level, chunk.getPos().x, chunk.getPos().z);
         boolean effectiveFloating = floatingScanEnabled && cityChunk;
@@ -2713,7 +2718,7 @@ public class ChunkPostProcessor {
         if (level == null || pos == null) {
             return;
         }
-        if (!shouldScanFloatingInChunk(level, pos.getX() >> 4, pos.getZ() >> 4)) {
+        if (!ConfigManager.ENABLE_FLOATING_VEGETATION_REMOVAL || !ENABLE_FLOATING_SCAN) {
             return;
         }
         ResourceKey<Level> dimension = level.dimension();

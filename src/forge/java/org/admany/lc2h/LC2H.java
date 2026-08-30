@@ -258,6 +258,10 @@ public class LC2H {
         LostCityProfileOverrideManager.clearAllOverrides();
         initializeAsyncDelay(event.getServer());
         registerWithQuantifiedApi();
+        // All Forge block registries are live by server start. Refresh once
+        // more so Immersive Weathering frost is present in the cleanup list
+        // even when its registry was late during common setup.
+        ConfigManager.refreshFloatingVegetationDefaults();
         org.admany.lc2h.dev.diagnostics.CriticalMixinHookValidator.resetWatch();
         try {
             org.admany.lc2h.worldgen.lostcities.LostCityFeatureGuards.reset();
