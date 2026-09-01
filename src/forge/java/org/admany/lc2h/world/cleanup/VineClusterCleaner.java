@@ -71,7 +71,7 @@ public final class VineClusterCleaner {
     private static final int VINE_SCAN_BATCH_SIZE = Math.max(512, Integer.getInteger("lc2h.vine.scan_batch_size", 2048));
     // Bump when the scan candidate set changes; old cache entries may have
     // marked a chunk complete before configurable lichen/frost support.
-    private static final int VINE_SCAN_CACHE_VERSION = 6;
+    private static final int VINE_SCAN_CACHE_VERSION = 7;
 
     private static final Map<ResourceKey<net.minecraft.world.level.Level>, Integer> CHUNK_CURSOR = new ConcurrentHashMap<>();
     private static final Map<ResourceKey<net.minecraft.world.level.Level>, Map<Long, Long>> LAST_SCAN = new ConcurrentHashMap<>();
@@ -761,8 +761,10 @@ public final class VineClusterCleaner {
 
     private static AttachmentFamily classifyAttachmentBlock(BlockState state) {
         // Keep the periodic component cleaner in lockstep with the
-        // event-driven post processor. This covers glow lichen, Immersive
-        // Weathering frost, and any ids added through the config screen.
+        // event-driven post processor, including blocks registered late.
+        if (state.is(Blocks.GLOW_LICHEN)) {
+            return AttachmentFamily.CONFIGURED_VEGETATION;
+        }
         if (ChunkPostProcessor.isConfiguredFloatingVegetation(state)) {
             return AttachmentFamily.CONFIGURED_VEGETATION;
         }

@@ -334,6 +334,11 @@ final class ShadowMutationFinalizer {
                     actualState = chunk.getBlockState(pos);
                 }
             }
+            // Deferred replays bypass WorldGenRegion.setBlock; send their
+            // vegetation and orphan-leaf candidates through the same check.
+            if (ChunkPostProcessor.isFloatingCandidate(actualState)) {
+                ChunkPostProcessor.queueFloatingCheck(level, pos);
+            }
             if (entry.markTreePlacement()) {
                 ChunkPostProcessor.markTreePlacement(level, pos, entry.state());
             }

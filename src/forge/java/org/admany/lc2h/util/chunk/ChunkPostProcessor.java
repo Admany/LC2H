@@ -120,6 +120,8 @@ public class ChunkPostProcessor {
         Integer.getInteger("lc.floating.queue_alert_threshold", Math.min(MAX_QUEUE, 1024))
     );
     private static final int MAX_PENDING_FLOATING_CHECKS = Math.max(256, Integer.getInteger("lc.floating.max_pending_checks", 8192));
+    private static final int MAX_PENDING_FLOATING_OVERFLOW = Math.max(1024,
+        Integer.getInteger("lc.floating.max_pending_overflow", 65_536));
     private static final int MAX_FLOATING_CHECKS_PER_TICK = Math.max(8, Integer.getInteger("lc.floating.max_checks_per_tick", 128));
     private static final int MAX_FLOATING_CHECK_RETRIES = Math.max(2,
         Integer.getInteger("lc.floating.max_check_retries", 12));
@@ -182,7 +184,7 @@ public class ChunkPostProcessor {
     private static final String DATA_ROOT = "lc2h";
     private static final String DATA_FLAG = "doubleblock_repaired";
     private static final String DATA_SCAN_VERSION_FLAG = "postprocess_scan_version";
-    private static final int CURRENT_SCAN_VERSION = 3;
+    private static final int CURRENT_SCAN_VERSION = 4;
 
     private static final Map<ChunkScanKey, ScanCursor> CHUNK_SCAN_PROGRESS = new ConcurrentHashMap<>();
     private static final Set<ChunkScanKey> INFLIGHT_CHUNK_SCANS = Collections.newSetFromMap(new ConcurrentHashMap<>());
@@ -228,7 +230,9 @@ public class ChunkPostProcessor {
 
     private static final class PendingCheckQueue {
         private final ConcurrentLinkedQueue<PendingFloatingCheck> queue = new ConcurrentLinkedQueue<>();
+        private final ConcurrentLinkedQueue<PendingFloatingCheck> overflow = new ConcurrentLinkedQueue<>();
         private final AtomicInteger size = new AtomicInteger();
+        private final AtomicInteger overflowSize = new AtomicInteger();
         private final ConcurrentHashMap<Long, Boolean> dedupe = new ConcurrentHashMap<>();
         private volatile ResourceKey<Level> dimensionKey;
         private volatile ServerLevel level;
@@ -320,6 +324,7 @@ public class ChunkPostProcessor {
             || isPotentialFloatingSourceFluid(state)
             || isHorrorElementBlock(state)
             || isAttachmentDecoration(state)
+            || isPotentialOrphanedTreeLeaf(state)
             || isModdedTreeDecoration(state);
     }
 
@@ -394,12 +399,10 @@ public class ChunkPostProcessor {
                 || !hasConnectedArtifactAnchor(level, pos, ArtifactFamily.ATTACHMENT, anchorMemo);
         }
         if (state.is(BlockTags.LEAVES)) {
-            /* Vanilla owns leaf decay.  A DISTANCE=7 leaf is observable while
-             * a feature is still writing its trunk, and seam replay can make
-             * the log live in a neighbouring chunk.  Treating it as LC2H
-             * floating vegetation was the direct cause of stripped canopies;
-             * never delete leaves from this repair pass. */
-            return false;
+            // A distance-seven leaf is only removed when its loaded component
+            // no longer reaches a trunk. Unknown chunks keep it for a later
+            // pass, so a tree crossing a generation boundary is not stripped.
+            return isDecayMarkedLeaf(state) && !hasConnectedTreeAnchor(level, pos);
         }
         if (isModdedTreeDecoration(state)) {
             return !canSurviveAt(level, pos, state, unsupported)
@@ -869,6 +872,10 @@ public class ChunkPostProcessor {
         return !persistent && distance >= 7;
     }
 
+    private static boolean isPotentialOrphanedTreeLeaf(BlockState state) {
+        return state != null && state.is(BlockTags.LEAVES) && isDecayMarkedLeaf(state);
+    }
+
     private enum ArtifactFamily {
         ATTACHMENT,
         TREE_DECORATION
@@ -979,14 +986,14 @@ public class ChunkPostProcessor {
             BlockPos current = queue.removeFirst();
             for (Direction direction : DIRECTIONS) {
                 BlockPos neighbor = current.relative(direction);
-                if (!level.isLoaded(neighbor)) {
+                BlockState neighborState = getLoadedState(level, neighbor);
+                if (neighborState == null) {
                     return true;
                 }
-                BlockState neighborState = level.getBlockState(neighbor);
-                if (neighborState.is(BlockTags.LOGS)) {
+                if (isTreeTrunkBlock(neighborState)) {
                     return true;
                 }
-                if (neighborState.is(BlockTags.LEAVES) && visited.add(neighbor.asLong())) {
+                if (isTreeLeafBlock(neighborState) && visited.add(neighbor.asLong())) {
                     queue.addLast(neighbor);
                 }
             }
@@ -1242,6 +1249,9 @@ public class ChunkPostProcessor {
         // support check to the bounded server queue.
         if (isAttachmentDecoration(state) || isModdedTreeDecoration(state)) {
             ServerLevel worldgenLevel = resolveWorldgenServerLevel(region);
+            if (worldgenLevel == null) {
+                worldgenLevel = resolveServerLevel(region);
+            }
             if (worldgenLevel != null) {
                 enqueueFloatingCheck(worldgenLevel, pos);
             }
@@ -1342,15 +1352,55 @@ public class ChunkPostProcessor {
             for (Direction direction : DIRECTIONS) {
                 BlockPos neighbor = current.relative(direction);
                 BlockState neighborState = region.getBlockState(neighbor);
-                if (neighborState.is(BlockTags.LOGS)) {
+                if (isTreeTrunkBlock(neighborState)) {
                     return true;
                 }
-                if (neighborState.is(BlockTags.LEAVES) && visited.add(neighbor.asLong())) {
+                if (isTreeLeafBlock(neighborState) && visited.add(neighbor.asLong())) {
                     queue.addLast(neighbor);
                 }
             }
         }
         return false;
+    }
+
+    private static boolean isTreeTrunkBlock(BlockState state) {
+        if (state == null) {
+            return false;
+        }
+        if (state.is(BlockTags.LOGS)) {
+            return true;
+        }
+        ResourceLocation key = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+        if (key == null || "minecraft".equals(key.getNamespace())) {
+            return false;
+        }
+        String path = key.getPath().toLowerCase(java.util.Locale.ROOT);
+        return path.contains("log")
+            || path.contains("trunk")
+            || path.contains("stem")
+            || path.contains("branch")
+            || path.contains("bark")
+            || path.endsWith("_wood")
+            || path.equals("wood");
+    }
+
+    private static boolean isTreeLeafBlock(BlockState state) {
+        if (state == null) {
+            return false;
+        }
+        if (state.is(BlockTags.LEAVES)) {
+            return true;
+        }
+        ResourceLocation key = ForgeRegistries.BLOCKS.getKey(state.getBlock());
+        if (key == null || "minecraft".equals(key.getNamespace())) {
+            return false;
+        }
+        String path = key.getPath().toLowerCase(java.util.Locale.ROOT);
+        return path.contains("leaves")
+            || path.contains("leaf")
+            || path.contains("foliage")
+            || path.contains("needles")
+            || path.contains("frond");
     }
 
     private static boolean hasTrackedPlantSelfSupport(BlockState state, BlockState belowState) {
@@ -1393,6 +1443,11 @@ public class ChunkPostProcessor {
         } catch (Throwable ignored) {
             return null;
         }
+    }
+
+    /** Queue a resident-world check without reading Lost Cities state. */
+    public static void queueFloatingCheck(ServerLevel level, BlockPos pos) {
+        enqueueFloatingCheck(level, pos);
     }
 
     private static java.lang.reflect.Method findWorldGenRegionLevelMethod(Class<?> type) {
@@ -1755,7 +1810,7 @@ public class ChunkPostProcessor {
         int pending = 0;
         for (PendingCheckQueue bucket : PENDING_FLOATING.values()) {
             if (bucket != null) {
-                pending += Math.max(0, bucket.size.get());
+                pending += Math.max(0, bucket.size.get()) + Math.max(0, bucket.overflowSize.get());
             }
         }
         return "pending=" + pending
@@ -2725,26 +2780,33 @@ public class ChunkPostProcessor {
         PendingCheckQueue bucket = PENDING_FLOATING.computeIfAbsent(dimension, k -> new PendingCheckQueue());
         bucket.dimensionKey = dimension;
         bucket.level = level;
-        int currentPending = bucket.size.get();
-        // Keep events queued during worldgen; the queue is bounded and deduplicated.
+        // Keep events queued during worldgen; both queues are deduplicated.
         long packed = pos.asLong();
         if (bucket.dedupe.putIfAbsent(packed, Boolean.TRUE) != null) {
             return;
         }
         int pending = bucket.size.incrementAndGet();
+        long nowTick = level.getServer() == null ? 0L : level.getServer().getTickCount();
         if (pending > MAX_PENDING_FLOATING_CHECKS) {
-            bucket.dedupe.remove(packed);
             bucket.size.decrementAndGet();
-            if (LOGGED_FLOATING_QUEUE_HARD_LIMIT.compareAndSet(false, true)) {
-                LCLogger.warn(
-                    "ChunkPostProcessor floating check queue full ({} >= {}). Dropping new checks until backlog reduces.",
-                    pending,
-                    MAX_PENDING_FLOATING_CHECKS
-                );
+            int overflow = bucket.overflowSize.incrementAndGet();
+            if (overflow > MAX_PENDING_FLOATING_OVERFLOW) {
+                bucket.overflowSize.decrementAndGet();
+                bucket.dedupe.remove(packed);
+                FLOATING_CHECK_RETRY_DROPS.incrementAndGet();
+                if (LOGGED_FLOATING_QUEUE_HARD_LIMIT.compareAndSet(false, true)) {
+                    LCLogger.warn(
+                        "ChunkPostProcessor floating check queues are full ({} main + {} overflow). Dropping new checks until backlog reduces.",
+                        pending - 1,
+                        overflow - 1
+                    );
+                }
+                return;
             }
+            bucket.overflow.add(new PendingFloatingCheck(packed, 0, nowTick));
+            FLOATING_DRAIN_REQUESTED.set(true);
             return;
         }
-        long nowTick = level.getServer() == null ? 0L : level.getServer().getTickCount();
         bucket.queue.add(new PendingFloatingCheck(packed, 0, nowTick));
         if (pending < MAX_PENDING_FLOATING_CHECKS / 2) {
             LOGGED_FLOATING_QUEUE_HARD_LIMIT.set(false);
@@ -2778,8 +2840,9 @@ public class ChunkPostProcessor {
         long currentTick = server == null ? 0L : server.getTickCount();
         ArtifactAnchorMemo anchorMemo = new ArtifactAnchorMemo();
         for (PendingCheckQueue bucket : PENDING_FLOATING.values()) {
+            promoteFloatingOverflow(bucket);
             if (remainingBudget <= 0) {
-                pending = pending || bucket.size.get() > 0;
+                pending = pending || bucket.size.get() > 0 || bucket.overflowSize.get() > 0;
                 continue;
             }
             ServerLevel level = bucket.level;
@@ -2838,6 +2901,9 @@ public class ChunkPostProcessor {
             if (bucket.size.get() > 0) {
                 pending = true;
             }
+            if (bucket.overflowSize.get() > 0) {
+                pending = true;
+            }
         }
         if (pending) {
             FLOATING_DRAIN_REQUESTED.set(true);
@@ -2854,24 +2920,70 @@ public class ChunkPostProcessor {
         }
         int nextAttempt = previous.attempt + 1;
         if (nextAttempt > MAX_FLOATING_CHECK_RETRIES) {
-            FLOATING_CHECK_RETRY_DROPS.incrementAndGet();
-            return;
+            // Generation can keep a neighboring chunk unavailable for longer
+            // than the normal retry window. Keep the candidate in the bounded
+            // queue and start a fresh backoff cycle instead of losing it.
+            nextAttempt = 0;
         }
         long delay = Math.min(MAX_FLOATING_RETRY_DELAY_TICKS,
             1L << Math.min(6, Math.max(0, nextAttempt - 1)));
-        if (bucket.dedupe.putIfAbsent(previous.packed, Boolean.TRUE) != null) {
+        queueFloatingRetry(bucket,
+            new PendingFloatingCheck(previous.packed, nextAttempt, 0L),
+            currentTick,
+            delay);
+    }
+
+    private static void promoteFloatingOverflow(PendingCheckQueue bucket) {
+        if (bucket == null) {
             return;
+        }
+        while (bucket.size.get() < MAX_PENDING_FLOATING_CHECKS) {
+            PendingFloatingCheck check = bucket.overflow.poll();
+            if (check == null) {
+                return;
+            }
+            bucket.overflowSize.decrementAndGet();
+            if (!bucket.dedupe.containsKey(check.packed)) {
+                continue;
+            }
+            int pending = bucket.size.incrementAndGet();
+            if (pending > MAX_PENDING_FLOATING_CHECKS) {
+                bucket.size.decrementAndGet();
+                bucket.overflowSize.incrementAndGet();
+                bucket.overflow.add(check);
+                return;
+            }
+            bucket.queue.add(check);
+        }
+    }
+
+    private static boolean queueFloatingRetry(PendingCheckQueue bucket,
+                                               PendingFloatingCheck check,
+                                               long currentTick,
+                                               long delay) {
+        if (bucket == null || check == null) {
+            return false;
+        }
+        if (bucket.dedupe.putIfAbsent(check.packed, Boolean.TRUE) != null) {
+            return false;
         }
         int pending = bucket.size.incrementAndGet();
         if (pending > MAX_PENDING_FLOATING_CHECKS) {
-            bucket.dedupe.remove(previous.packed);
             bucket.size.decrementAndGet();
-            FLOATING_CHECK_RETRY_DROPS.incrementAndGet();
-            return;
+            int overflow = bucket.overflowSize.incrementAndGet();
+            if (overflow > MAX_PENDING_FLOATING_OVERFLOW) {
+                bucket.overflowSize.decrementAndGet();
+                bucket.dedupe.remove(check.packed);
+                FLOATING_CHECK_RETRY_DROPS.incrementAndGet();
+                return false;
+            }
+            bucket.overflow.add(new PendingFloatingCheck(check.packed, check.attempt, currentTick + delay));
+        } else {
+            bucket.queue.add(new PendingFloatingCheck(check.packed, check.attempt, currentTick + delay));
         }
-        bucket.queue.add(new PendingFloatingCheck(previous.packed, nextAttempt, currentTick + delay));
         FLOATING_CHECK_RETRIES.incrementAndGet();
         FLOATING_DRAIN_REQUESTED.set(true);
+        return true;
     }
 
     private static void drainShadowRemovals(MinecraftServer server) {
@@ -3030,7 +3142,10 @@ public class ChunkPostProcessor {
         if (!isTreeProtectedBlock(state)) {
             return;
         }
-        ServerLevel level = resolveServerLevel(region);
+        ServerLevel level = resolveWorldgenServerLevel(region);
+        if (level == null) {
+            level = resolveServerLevel(region);
+        }
         if (level == null) {
             return;
         }
@@ -3076,7 +3191,10 @@ public class ChunkPostProcessor {
         if (!newState.isAir()) {
             return false;
         }
-        ServerLevel level = resolveServerLevel(region);
+        ServerLevel level = resolveWorldgenServerLevel(region);
+        if (level == null) {
+            level = resolveServerLevel(region);
+        }
         if (level == null) {
             return false;
         }
@@ -3091,10 +3209,7 @@ public class ChunkPostProcessor {
         }
         ChunkScanKey key = chunkKey(level.dimension().location(), cx, cz);
         java.util.concurrent.ConcurrentHashMap<Long, Boolean> protectedSet = PROTECTED_TREE_BLOCKS.get(key);
-        if (protectedSet != null && protectedSet.containsKey(pos.asLong())) {
-            return true;
-        }
-        return true;
+        return protectedSet != null && protectedSet.containsKey(pos.asLong());
     }
 
     private static boolean isTreeProtectedBlock(BlockState state) {

@@ -301,7 +301,7 @@ public final class SeamOwnershipJournal {
             return;
         }
         try {
-            if (ChunkPostProcessor.isTracked(state.getBlock())) {
+            if (ChunkPostProcessor.isFloatingCandidate(state)) {
                 ChunkPostProcessor.markForRemovalIfFloating(region, pos);
             }
         } catch (Throwable ignored) {
