@@ -69,6 +69,6 @@ public class MixinVegetationPatchFeatureCityGuard {
         if (dim == null) {
             return false;
         }
-        return ChunkRoleProbe.isCity(dimInfo, dim, pos.getX() >> 4, pos.getZ() >> 4);
+        return ChunkRoleProbe.getTreeSafetyProbe(dimInfo, dim, pos.getX() >> 4, pos.getZ() >> 4).isCity();
     }
 }

@@ -1,0 +1,274 @@
+plugins {
+    id 'java-library'
+    id 'eclipse'
+    id 'idea'
+    id 'maven-publish'
+    id 'net.neoforged.gradle.userdev' version '7.1.25'
+    id 'com.gradleup.shadow' version '8.3.6'
+}
+
+apply from: file('../../../gradle/load-shared-properties.gradle')
+
+version = project.property('mod_version')
+group = project.property('mod_group_id')
+
+// Keep the platform build outputs isolated from any older NeoGradle checkout
+// that may have populated the default build directory.
+layout.buildDirectory.set(file('build-neo-gradle9'))
+
+base {
+    archivesName = 'lc2h-neoforge-1.21.1'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+def repoRoot = file('../../../')
+def quantifiedJar = file("${repoRoot}/libs/quantified-api-omni-${project.property('quantified_version')}.jar")
+def lostCitiesJar = file("${repoRoot}/libs/lostcities-${project.property('lostcities_version')}.jar")
+if (!quantifiedJar.isFile()) {
+    throw new GradleException("Missing Quantified API ${project.property('quantified_version')} at ${quantifiedJar}. Add the exact omni jar to libs before building.")
+}
+if (!lostCitiesJar.isFile()) {
+    throw new GradleException("Missing Lost Cities ${project.property('lostcities_version')} at ${lostCitiesJar}. Add the exact jar to libs before building.")
+}
+def generatedSources = layout.buildDirectory.dir('generated/sources/neoforge')
+def sourceRoots = [file('../../../src/main/java'), file('../../forge/1.20.1/src/main/java')]
+def neoExcludedSources = [
+    'org/admany/lc2h/mixin/forge/client/MixinForgeHooksClient.java',
+    'org/admany/lc2h/mixin/lostcities/config/MixinConfig.java',
+    'org/admany/lc2h/mixin/lostcities/spawn/MixinForgeEventHandlersBedFix.java'
+] as Set
+
+def packageReplacements = [
+    'net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext': 'org.admany.lc2h.neoforge.compat.FMLJavaModLoadingContext',
+    'net.minecraftforge.common.MinecraftForge': 'net.neoforged.neoforge.common.NeoForge',
+    'net.minecraftforge.registries.ForgeRegistries': 'org.admany.lc2h.neoforge.compat.ForgeRegistries',
+    'net.minecraftforge.registries.RegistryObject': 'net.neoforged.neoforge.registries.DeferredHolder',
+    'net.minecraftforge.client.ConfigScreenHandler': 'org.admany.lc2h.neoforge.compat.ConfigScreenHandler',
+    'net.minecraftforge.client.event.RenderGuiOverlayEvent': 'net.neoforged.neoforge.client.event.RenderGuiEvent',
+    'net.minecraftforge.event.TickEvent': 'org.admany.lc2h.neoforge.compat.TickEvent',
+    'net.minecraftforge.network.simple.SimpleChannel': 'org.admany.lc2h.neoforge.compat.network.SimpleChannel',
+    'net.minecraftforge.network.NetworkEvent': 'org.admany.lc2h.neoforge.compat.network.NetworkEvent',
+    'net.minecraftforge.network.NetworkRegistry': 'org.admany.lc2h.neoforge.compat.network.NetworkRegistry',
+    'net.minecraftforge.network.NetworkDirection': 'org.admany.lc2h.neoforge.compat.network.NetworkDirection',
+    'net.minecraftforge.network.PacketDistributor': 'org.admany.lc2h.neoforge.compat.network.PacketDistributor',
+    'net.minecraftforge.versions.forge.ForgeVersion': 'org.admany.lc2h.neoforge.compat.ForgeVersion',
+    'net.minecraft.world.level.chunk.ChunkStatus': 'net.minecraft.world.level.chunk.status.ChunkStatus',
+    'net.minecraftforge.api.distmarker': 'net.neoforged.api.distmarker',
+    'net.minecraftforge.client.event': 'net.neoforged.neoforge.client.event',
+    'net.minecraftforge.client': 'net.neoforged.neoforge.client',
+    'net.minecraftforge.common.util': 'net.neoforged.neoforge.common.util',
+    'net.minecraftforge.common': 'net.neoforged.neoforge.common',
+    'net.minecraftforge.eventbus.api': 'net.neoforged.bus.api',
+    'net.minecraftforge.event': 'net.neoforged.neoforge.event',
+    'net.minecraftforge.fml.javafmlmod': 'net.neoforged.fml.javafmlmod',
+    'net.minecraftforge.fml.event': 'net.neoforged.fml.event',
+    'net.minecraftforge.fml.loading': 'net.neoforged.fml.loading',
+    'net.minecraftforge.fml.config': 'net.neoforged.fml.config',
+    'net.minecraftforge.fml': 'net.neoforged.fml',
+    'net.minecraftforge.network': 'net.neoforged.neoforge.network',
+    'net.minecraftforge.registries': 'net.neoforged.neoforge.registries',
+    'net.minecraftforge.server': 'net.neoforged.neoforge.server',
+    'net.minecraftforge.forgespi': 'net.neoforged.neoforgespi'
+]
+
+tasks.register('prepareNeoForgeSources') {
+    group = 'build setup'
+    description = 'Copies LC2H sources into the NeoForge source set and applies loader package mappings.'
+    inputs.files(sourceRoots.collect { fileTree(it) })
+    outputs.dir(generatedSources)
+    doLast {
+        def destination = generatedSources.get().asFile
+        project.delete(destination)
+        sourceRoots.each { root ->
+            fileTree(root).matching { include '**/*.java' }.files.each { source ->
+                def relative = root.toPath().relativize(source.toPath()).toString().replace('\\', '/')
+                if (neoExcludedSources.contains(relative)) {
+                    return
+                }
+                def output = new File(destination, relative)
+                output.parentFile.mkdirs()
+                def text = source.getText('UTF-8')
+                packageReplacements.each { from, to -> text = text.replace(from, to) }
+                // Keep the NeoForge implementation in its own namespace so a
+                // single omni jar can carry it beside the Forge classes.
+                def preservedNeoPackage = '__LC2H_NEO_PACKAGE__.'
+                text = text.replace('org.admany.lc2h.neoforge.', preservedNeoPackage)
+                text = text.replace('org.admany.lc2h', 'org.admany.lc2h.neoforge')
+                text = text.replace(preservedNeoPackage, 'org.admany.lc2h.neoforge.')
+                text = text.replace('@Mod.EventBusSubscriber', '@EventBusSubscriber')
+                text = text.replace('Mod.EventBusSubscriber.Bus.MOD', 'EventBusSubscriber.Bus.MOD')
+                text = text.replace('MinecraftForge', 'NeoForge')
+                text = text.replace('RenderGuiOverlayEvent', 'RenderGuiEvent')
+                text = text.replace('ConfigScreenHandler.ConfigScreenFactory.class', 'net.neoforged.neoforge.client.gui.IConfigScreenFactory.class')
+                text = text.replace('net.neoforged.neoforge.registries.DeferredHolder<net.minecraft.sounds.SoundEvent>', 'net.neoforged.neoforge.registries.DeferredHolder<net.minecraft.sounds.SoundEvent, net.minecraft.sounds.SoundEvent>')
+                text = text.replace('.toPath()', '')
+                text = text.replace('getCurrentBlock()', 'getCurrentState()')
+                text = text.replace('getAverageTickTime()', 'getCurrentSmoothedTickTime()')
+                text = text.replace('chunk.getStatus()', 'chunk.getPersistedStatus()')
+                text = text.replace('resident.getStatus()', 'resident.getPersistedStatus()')
+                text = text.replace('resolved.getStatus()', 'resolved.getPersistedStatus()')
+                text = text.replace('loaded.getStatus()', 'loaded.getPersistedStatus()')
+                // Descriptor literals are not affected by Java import rewrites.
+                // NeoForge moved ChunkStatus into the status subpackage.
+                text = text.replace('net/minecraft/world/level/chunk/ChunkStatus', 'net/minecraft/world/level/chunk/status/ChunkStatus')
+                text = text.replace('renderBackground(gfx);', 'renderBackground(gfx, 0, 0, 0.0F);')
+                text = text.replace('super.mouseScrolled(mouseX, mouseY, delta)', 'super.mouseScrolled(mouseX, mouseY, 0.0D, delta)')
+                text = text.replace('public boolean mouseScrolled(double mouseX, double mouseY, double delta)', 'public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double delta)')
+                text = text.replace('Config.getProfileForDimension(minecraft.level.dimension())', 'Config.profileFromClient')
+                text = text.replace('event.isCancelable()', 'false')
+                text = text.replace('event.setCanceled(true);', '')
+                text = text.replace('new AABB(anchor.offset(-2, -2, -2), anchor.offset(6, 6, 6))', 'new AABB(anchor.getX() - 2, anchor.getY() - 2, anchor.getZ() - 2, anchor.getX() + 7, anchor.getY() + 7, anchor.getZ() + 7)')
+                text = text.replace('snapshot.blockEntities = captureBlockEntities(chunk);', 'snapshot.blockEntities = captureBlockEntities(level, chunk);')
+                text = text.replace('captureBlockEntities(LevelChunk chunk)', 'captureBlockEntities(ServerLevel level, LevelChunk chunk)')
+                text = text.replace('be.saveWithoutMetadata()', 'be.saveWithoutMetadata(level.registryAccess())')
+                text = text.replace('DeferredTreeSavedData::load, DeferredTreeSavedData::new, DATA_NAME', 'new SavedData.Factory<>(DeferredTreeSavedData::new, (tag, ignored) -> DeferredTreeSavedData.load(tag)), DATA_NAME')
+                if (relative.endsWith('DeferredTreeSavedData.java')) {
+                    text = text.replace('public CompoundTag save(CompoundTag tag)', 'public CompoundTag save(CompoundTag tag, net.minecraft.core.HolderLookup.Provider provider)')
+                }
+                text = text.replace('CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>', 'CompletableFuture<ChunkResult<ChunkAccess>>')
+                text = text.replace('Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>', 'ChunkResult<ChunkAccess>')
+                text = text.replace('result.left().isPresent()', 'result.isSuccess()')
+                text = text.replace('result.right().isPresent()', '!result.isSuccess()')
+                text = text.replace('result.left().orElse(null)', 'result.orElse(null)')
+                text = text.replace('result.right().map(ChunkHolder.ChunkLoadingFailure::toString).orElse("<unknown>")', 'result.getError()')
+                if (text.contains('ChunkResult<ChunkAccess>') && !text.contains('import net.minecraft.server.level.ChunkResult;')) {
+                    text = text.replace('import net.minecraft.server.level.ChunkHolder;', 'import net.minecraft.server.level.ChunkHolder;\nimport net.minecraft.server.level.ChunkResult;')
+                }
+                if (relative.endsWith('MixinNoiseBasedChunkGeneratorTerrainGate.java')) {
+                    text = text.replace('fillFromNoise(Ljava/util/concurrent/Executor;Lnet/minecraft/world/level/levelgen/blending/Blender;', 'fillFromNoise(Lnet/minecraft/world/level/levelgen/blending/Blender;')
+                    text = text.replace('private void lc2h$awaitTerrainPlanBeforeNoise(Executor executor,', 'private void lc2h$awaitTerrainPlanBeforeNoise(')
+                    text = text.replace('|| executor == null || structureManager == null', '|| structureManager == null')
+                    text = text.replace('lc2h$fillWithReadyBlender(executor, readyBlender,', 'lc2h$fillWithReadyBlender(readyBlender,')
+                    text = text.replace('}, executor));', '}));')
+                    text = text.replace('return self.fillFromNoise(executor, readyBlender,', 'return self.fillFromNoise(readyBlender,')
+                    text = text.replace('private CompletableFuture<ChunkAccess> lc2h$fillWithReadyBlender(Executor executor,', 'private CompletableFuture<ChunkAccess> lc2h$fillWithReadyBlender(')
+                    text = text.replace('                executor, blender, randomState, structureManager, chunk);', '                blender, randomState, structureManager, chunk);')
+                }
+                // NeoForge ships the Lost Cities GUI with named mappings and
+                // does not consume the Forge refmap. Use the inherited
+                // Screen.render name for this loader while Forge keeps its
+                // reobfuscated render target.
+                if (relative.endsWith('MixinGuiLCConfigPreviewBudget.java')) {
+                    text = text.replace('method = "m_88315_"', 'method = "render"')
+                }
+                text = text.replace('new ResourceLocation("minecraft", "grass")', 'ResourceLocation.fromNamespaceAndPath("minecraft", "grass")')
+                text = text.replace('new ResourceLocation("minecraft", "short_grass")', 'ResourceLocation.fromNamespaceAndPath("minecraft", "short_grass")')
+                text = text.replace('new ResourceLocation(', 'ResourceLocation.parse(')
+                text = text.replace('ForgeRegistries.BLOCKS.getValue(', 'ForgeRegistries.BLOCKS.get(')
+                text = text.replace('ForgeRegistries.BLOCK_ENTITY_TYPES.getValue(', 'ForgeRegistries.BLOCK_ENTITY_TYPES.get(')
+                if (text.contains('@EventBusSubscriber') && !text.contains('import net.neoforged.fml.common.EventBusSubscriber;')) {
+                    text = text.replaceFirst(/(package [^;]+;\s*)/, '$1\nimport net.neoforged.fml.common.EventBusSubscriber;\n')
+                }
+                text = text.replace('COUNTDOWN_SOUND.isPresent()', 'COUNTDOWN_SOUND.isBound()')
+                text = text.replace('BUTTON_CLICK_SOUND.isPresent()', 'BUTTON_CLICK_SOUND.isBound()')
+                output.setText(text, 'UTF-8')
+            }
+        }
+    }
+}
+
+sourceSets {
+    main {
+        java {
+            srcDirs = [generatedSources, file('src/main/java')]
+        }
+        resources {
+            srcDirs = [file('../../../src/main/resources'), file('../../forge/1.20.1/src/main/resources'), file('src/main/resources')]
+            exclude 'META-INF/mods.toml'
+            exclude 'mixins.lc2h.json'
+        }
+    }
+}
+
+tasks.named('compileJava').configure {
+    dependsOn tasks.named('prepareNeoForgeSources')
+}
+
+
+runs {
+    configureEach {
+        systemProperty 'forge.logging.markers', 'REGISTRIES'
+        systemProperty 'forge.logging.console.level', 'debug'
+        modSource project.sourceSets.main
+    }
+    client {
+        workingDirectory project.file('run')
+    }
+    server {
+        workingDirectory project.file('run')
+        programArgument '--nogui'
+    }
+}
+
+dependencies {
+    implementation "net.neoforged:neoforge:${project.property('neoforge_version')}"
+    implementation files(quantifiedJar)
+    implementation files(lostCitiesJar)
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    def props = [
+        minecraft_version: project.property('minecraft_version'),
+        minecraft_version_range: project.property('minecraft_version_range'),
+        neoforge_version_range: project.property('neoforge_version_range'),
+        loader_version_range: project.property('loader_version_range'),
+        mod_id: project.property('mod_id'),
+        mod_name: project.property('mod_name'),
+        mod_license: project.property('mod_license'),
+        mod_version: project.property('mod_version'),
+        mod_authors: project.property('mod_authors'),
+        mod_description: project.property('mod_description'),
+        quantified_version: project.property('quantified_version')
+    ]
+    inputs.properties props
+    from(file('../../forge/1.20.1/src/main/resources/mixins.lc2h.json')) {
+        rename { 'mixins.lc2h.neoforge.json' }
+        filter { line ->
+            line
+                .replace('    "forge.client.MixinForgeHooksClient",\n', '')
+                .replace('    "lostcities.spawn.MixinForgeEventHandlersBedFix",\n', '')
+        }
+    }
+    filesMatching(['META-INF/neoforge.mods.toml', 'pack.mcmeta', 'mixins.lc2h.neoforge.json']) {
+        expand props + [project: project]
+    }
+    doLast {
+        def mixinFile = file("${layout.buildDirectory.get().asFile}/resources/main/mixins.lc2h.neoforge.json")
+        if (mixinFile.exists()) {
+            def mixinText = mixinFile.getText('UTF-8')
+            [
+                '    "forge.client.MixinForgeHooksClient",',
+                '    "lostcities.spawn.MixinForgeEventHandlersBedFix",'
+            ].each { entry -> mixinText = mixinText.replace(entry, '') }
+            mixinText = mixinText.replace('"package": "org.admany.lc2h.mixin"', '"package": "org.admany.lc2h.neoforge.mixin"')
+            mixinText = mixinText.replace('"plugin": "org.admany.lc2h.mixin.Lc2hMixinConfigPlugin"', '"plugin": "org.admany.lc2h.neoforge.mixin.Lc2hMixinConfigPlugin"')
+            // WorldGenRegion no longer has the Forge-only firstPos/lastPos fields;
+            // callers use its cross-loader hasChunk window check instead.
+            mixinText = mixinText.replaceAll(/(?m)^\s*"accessor\.minecraft\.WorldGenRegionAccessor",\s*\r?\n/, '')
+            // NeoForge uses its named 1.21.1 classes; do not carry over the Forge SRG refmap.
+            mixinText = mixinText.replaceAll('(?m)^\\s*"refmap":\\s*"mixins\\.lc2h\\.refmap\\.json",?\\s*\\r?\\n', '')
+            mixinText = mixinText.replace('  },\r\n}', '  }\r\n}')
+            mixinText = mixinText.replace('  },\n}', '  }\n}')
+            mixinFile.setText(mixinText, 'UTF-8')
+        }
+    }
+}
+
+tasks.named('jar', Jar).configure {
+    archiveFileName = "lc2h-neoforge-1.21.1-${project.property('mod_version')}.jar"
+    manifest {
+        attributes(
+            'Specification-Title': project.property('mod_id'),
+            'Specification-Vendor': project.property('mod_authors'),
+            'Specification-Version': '1',
+            'Implementation-Title': project.name,
+            'Implementation-Version': project.version,
+            'Implementation-Vendor': project.property('mod_authors')
+        )
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}

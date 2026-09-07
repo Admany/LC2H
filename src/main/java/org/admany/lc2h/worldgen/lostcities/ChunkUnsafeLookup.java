@@ -28,7 +28,9 @@ final class ChunkUnsafeLookup {
             slot = (slot + 1) & mask;
         }
 
-        boolean unsafe = ChunkRoleProbe.isUnsafe(dimInfo, dim, cx, cz);
+        ChunkRoleProbe.Probe probe = ChunkRoleProbe.getTreeSafetyProbe(dimInfo, dim, cx, cz);
+        boolean unsafe = !ChunkRoleProbe.hasTreeSafetyProbe(dimInfo, dim, cx, cz)
+            || probe.isUnsafe();
         if ((size + 1) * 3 >= keys.length * 2) {
             grow();
             mask = keys.length - 1;

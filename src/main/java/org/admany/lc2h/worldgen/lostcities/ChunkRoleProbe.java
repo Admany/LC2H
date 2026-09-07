@@ -7,7 +7,6 @@ import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import mcjty.lostcities.worldgen.lost.BuildingInfo;
 import mcjty.lostcities.worldgen.lost.City;
-import mcjty.lostcities.worldgen.lost.CitySphere;
 import mcjty.lostcities.worldgen.lost.Highway;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
@@ -51,13 +50,35 @@ public final class ChunkRoleProbe {
                 return thread;
             },
             new ThreadPoolExecutor.AbortPolicy());
+    private static final AtomicInteger CHARACTERISTICS_PREWARM_THREAD_IDS = new AtomicInteger();
+    private static final ThreadPoolExecutor CHARACTERISTICS_PREWARM_EXECUTOR =
+        new ThreadPoolExecutor(
+            1,
+            1,
+            30L,
+            TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(64),
+            runnable -> {
+                Thread thread = new Thread(runnable,
+                    "lc2h-characteristics-prewarm-" + CHARACTERISTICS_PREWARM_THREAD_IDS.incrementAndGet());
+                thread.setDaemon(true);
+                thread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 2));
+                return thread;
+            },
+            new ThreadPoolExecutor.AbortPolicy());
     private static final ConcurrentHashMap<IDimensionInfo,
         ConcurrentHashMap<ChunkCoord, CompletableFuture<Probe>>> STABLE_FLIGHTS =
+        new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<IDimensionInfo,
+        ConcurrentHashMap<ChunkCoord, CompletableFuture<LostChunkCharacteristics>>> CHARACTERISTICS_FLIGHTS =
         new ConcurrentHashMap<>();
     private static final AtomicLong STABLE_PREWARM_SUBMITTED = new AtomicLong();
     private static final AtomicLong STABLE_PREWARM_COMPLETED = new AtomicLong();
     private static final AtomicLong STABLE_PREWARM_REJECTED = new AtomicLong();
     private static final AtomicLong STABLE_CONTENTION_FALLBACKS = new AtomicLong();
+    private static final AtomicLong CHARACTERISTICS_PREWARM_SUBMITTED = new AtomicLong();
+    private static final AtomicLong CHARACTERISTICS_PREWARM_COMPLETED = new AtomicLong();
+    private static final AtomicLong CHARACTERISTICS_PREWARM_REJECTED = new AtomicLong();
     private static final AtomicLong STABLE_LIFECYCLE = new AtomicLong();
     private static final AtomicInteger OP_COUNTER = new AtomicInteger(0);
     private static final boolean TREE_SURFACE_RAIL_ONLY =
@@ -79,10 +100,6 @@ public final class ChunkRoleProbe {
         boolean buildingTypeKnown
     ) {
         public boolean isUnsafe() {
-            // Underground rail tunnels do not own the surface. Treat only
-            // surface rail/stations as tree-unsafe; the same applies to
-            // highways.  A tunnel in an otherwise normal chunk must not veto
-            // the trees above it.
             return isCity || hasSurfaceHighway()
                 || (TREE_SURFACE_RAIL_ONLY ? hasSurfaceRailway : hasRailway);
         }
@@ -187,6 +204,105 @@ public final class ChunkRoleProbe {
         return snapshot != null ? snapshot.characteristics() : null;
     }
 
+    public static Probe peek(IDimensionInfo dimInfo,
+                             ResourceKey<Level> dim,
+                             int chunkX,
+                             int chunkZ) {
+        if (dimInfo == null || dim == null) {
+            return null;
+        }
+        ChunkCoord coord = new ChunkCoord(dim, chunkX, chunkZ);
+        long now = System.currentTimeMillis();
+        Entry cached = CACHE.get(coord);
+        if (cached != null && isFresh(cached, now)) {
+            return cached.probe();
+        }
+        Entry snapshot = fromSnapshot(coord, now);
+        return snapshot == null ? null : snapshot.probe();
+    }
+
+    public static Probe getTreeSafetyProbe(IDimensionInfo dimInfo,
+                                           ResourceKey<Level> dim,
+                                           int chunkX,
+                                           int chunkZ) {
+        Probe published = peek(dimInfo, dim, chunkX, chunkZ);
+        return published != null
+            ? published
+            : getStableTerrainProbe(dimInfo, dim, chunkX, chunkZ);
+    }
+
+    /** True when a tree-safety answer is already published for this chunk. */
+    public static boolean hasTreeSafetyProbe(IDimensionInfo dimInfo,
+                                             ResourceKey<Level> dim,
+                                             int chunkX,
+                                             int chunkZ) {
+        if (dimInfo == null || dim == null) {
+            return false;
+        }
+        if (peek(dimInfo, dim, chunkX, chunkZ) != null) {
+            return true;
+        }
+        ConcurrentHashMap<ChunkCoord, Probe> providerCache = TERRAIN_CACHE.get(dimInfo);
+        return providerCache != null && providerCache.containsKey(new ChunkCoord(dim, chunkX, chunkZ));
+    }
+
+    public static CompletableFuture<LostChunkCharacteristics> requestCharacteristicsAsync(
+        IDimensionInfo dimInfo, ResourceKey<Level> dim, int chunkX, int chunkZ) {
+        if (dimInfo == null || dim == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        ChunkCoord coord = new ChunkCoord(dim, chunkX, chunkZ);
+        LostChunkCharacteristics cached = peekCharacteristics(coord);
+        if (cached != null) {
+            return CompletableFuture.completedFuture(cached);
+        }
+
+        ConcurrentHashMap<ChunkCoord, CompletableFuture<LostChunkCharacteristics>> flights =
+            CHARACTERISTICS_FLIGHTS.computeIfAbsent(dimInfo, ignored -> new ConcurrentHashMap<>());
+        CompletableFuture<LostChunkCharacteristics> created = new CompletableFuture<>();
+        CompletableFuture<LostChunkCharacteristics> existing = flights.putIfAbsent(coord, created);
+        if (existing != null) {
+            return existing;
+        }
+
+        long lifecycle = STABLE_LIFECYCLE.get();
+        CHARACTERISTICS_PREWARM_SUBMITTED.incrementAndGet();
+        try {
+            CHARACTERISTICS_PREWARM_EXECUTOR.execute(() -> {
+                try {
+                    if (lifecycle != STABLE_LIFECYCLE.get()) {
+                        created.cancel(false);
+                        return;
+                    }
+
+                    LostChunkCharacteristics resolved = BuildingInfo.getChunkCharacteristics(coord, dimInfo);
+                    if (resolved != null && lifecycle == STABLE_LIFECYCLE.get()) {
+                        rememberCharacteristics(coord, resolved);
+                        created.complete(resolved);
+                    } else {
+                        created.complete(null);
+                    }
+                    CHARACTERISTICS_PREWARM_COMPLETED.incrementAndGet();
+                } catch (Throwable failure) {
+                    created.completeExceptionally(failure);
+                } finally {
+                    flights.remove(coord, created);
+                    if (flights.isEmpty()) {
+                        CHARACTERISTICS_FLIGHTS.remove(dimInfo, flights);
+                    }
+                }
+            });
+        } catch (RejectedExecutionException rejected) {
+            CHARACTERISTICS_PREWARM_REJECTED.incrementAndGet();
+            flights.remove(coord, created);
+            if (flights.isEmpty()) {
+                CHARACTERISTICS_FLIGHTS.remove(dimInfo, flights);
+            }
+            created.completeExceptionally(rejected);
+        }
+        return created;
+    }
+
     public static boolean isCity(IDimensionInfo dimInfo, ResourceKey<Level> dim, int chunkX, int chunkZ) {
         return get(dimInfo, dim, chunkX, chunkZ).isCity();
     }
@@ -208,11 +324,6 @@ public final class ChunkRoleProbe {
         return new RoleGrid(dim, centerX, centerZ, clampedRadius, probes);
     }
 
-    /**
-     * Route-aware grid for terrain and structure decisions which must see
-     * Lost Cities highways even when a cached BuildingInfo snapshot only
-     * contains the cheaper city characteristics.
-     */
     public static RoleGrid getInfrastructureGrid(IDimensionInfo dimInfo,
                                                  ResourceKey<Level> dim,
                                                  int centerX,
@@ -235,15 +346,6 @@ public final class ChunkRoleProbe {
         return new RoleGrid(dim, centerX, centerZ, clampedRadius, probes);
     }
 
-    /**
-     * Stable early-worldgen role grid for density and city-floor blending.
-     *
-     * <p>This intentionally bypasses {@link BuildingInfoSnapshotStore} and
-     * {@link BuildingInfo#getChunkCharacteristics}: those represent a later,
-     * mutable planning stage. The raw city factor is the predicate Lost
-     * Cities itself starts {@code isCityRaw} from, while highway levels are
-     * coordinate/seed derived. Only successfully resolved probes are cached.</p>
-     */
     public static RoleGrid getStableTerrainGrid(IDimensionInfo dimInfo,
                                                 ResourceKey<Level> dim,
                                                 int centerX,
@@ -281,16 +383,27 @@ public final class ChunkRoleProbe {
         CompletableFuture<Probe> existing = flights.putIfAbsent(coord, created);
         if (existing != null) {
             try {
-                /* Do not wait on a cold probe from worldgen. */
                 Probe ready = existing.getNow(null);
                 if (ready != null) {
                     return ready;
                 }
                 STABLE_CONTENTION_FALLBACKS.incrementAndGet();
-                return EMPTY_PROBE;
+                Probe fallback = computeStableTerrainProbe(dimInfo, coord);
+                if (fallback != null) {
+                    providerCache.putIfAbsent(coord, fallback);
+                }
+                return fallback == null ? EMPTY_PROBE : fallback;
             } catch (Throwable ignored) {
                 STABLE_CONTENTION_FALLBACKS.incrementAndGet();
-                return EMPTY_PROBE;
+                try {
+                    Probe fallback = computeStableTerrainProbe(dimInfo, coord);
+                    if (fallback != null) {
+                        providerCache.putIfAbsent(coord, fallback);
+                    }
+                    return fallback == null ? EMPTY_PROBE : fallback;
+                } catch (Throwable ignoredFallback) {
+                    return EMPTY_PROBE;
+                }
             }
         }
         Probe resolved = computeStableTerrainProbe(dimInfo, coord);
@@ -311,28 +424,30 @@ public final class ChunkRoleProbe {
         }
     }
 
-    /**
-     * Starts a stable role computation without making the caller wait. This
-     * is used by structure placement, where a cold city-factor query would
-     * otherwise hold a worldgen worker inside vanilla noise evaluation.
-     */
     public static void requestStableTerrainProbe(IDimensionInfo dimInfo,
                                                   ResourceKey<Level> dim,
                                                   int chunkX,
                                                   int chunkZ) {
+        requestStableTerrainProbeAsync(dimInfo, dim, chunkX, chunkZ);
+    }
+
+    public static CompletableFuture<Probe> requestStableTerrainProbeAsync(
+        IDimensionInfo dimInfo, ResourceKey<Level> dim, int chunkX, int chunkZ) {
         if (dimInfo == null || dim == null) {
-            return;
+            return CompletableFuture.completedFuture(EMPTY_PROBE);
         }
         ChunkCoord coord = new ChunkCoord(dim, chunkX, chunkZ);
         ConcurrentHashMap<ChunkCoord, Probe> providerCache = TERRAIN_CACHE.get(dimInfo);
-        if (providerCache != null && providerCache.containsKey(coord)) {
-            return;
+        Probe cached = providerCache == null ? null : providerCache.get(coord);
+        if (cached != null) {
+            return CompletableFuture.completedFuture(cached);
         }
         ConcurrentHashMap<ChunkCoord, CompletableFuture<Probe>> flights =
             STABLE_FLIGHTS.computeIfAbsent(dimInfo, ignored -> new ConcurrentHashMap<>());
         CompletableFuture<Probe> created = new CompletableFuture<>();
-        if (flights.putIfAbsent(coord, created) != null) {
-            return;
+        CompletableFuture<Probe> existing = flights.putIfAbsent(coord, created);
+        if (existing != null) {
+            return existing;
         }
         long lifecycle = STABLE_LIFECYCLE.get();
         STABLE_PREWARM_SUBMITTED.incrementAndGet();
@@ -369,6 +484,7 @@ public final class ChunkRoleProbe {
             }
             created.completeExceptionally(rejected);
         }
+        return created;
     }
 
     /** Return a previously resolved terrain probe without doing Lost Cities work. */
@@ -404,11 +520,6 @@ public final class ChunkRoleProbe {
         return getRouteAware(dimInfo, dim, chunkX, chunkZ);
     }
 
-    /**
-     * Summarizes rail roles in a generated window. The distinction is useful
-     * in parity runs because an underground-only rail chunk must not veto the
-     * surface tree feature.
-     */
     public static RailSafetySummary summarizeRailSafety(IDimensionInfo dimInfo, ResourceKey<Level> dim,
                                                         int minChunkX, int maxChunkX,
                                                         int minChunkZ, int maxChunkZ) {
@@ -483,6 +594,9 @@ public final class ChunkRoleProbe {
         STABLE_FLIGHTS.values().forEach(flights ->
             flights.values().forEach(future -> future.cancel(false)));
         STABLE_FLIGHTS.clear();
+        CHARACTERISTICS_FLIGHTS.values().forEach(flights ->
+            flights.values().forEach(future -> future.cancel(false)));
+        CHARACTERISTICS_FLIGHTS.clear();
     }
 
     public static void rememberCharacteristics(ChunkCoord coord, LostChunkCharacteristics characteristics) {
@@ -647,16 +761,11 @@ public final class ChunkRoleProbe {
             }
 
             boolean isCity = !BuildingInfo.isVoidChunk(coord, dimInfo);
-            if (isCity && (profile.isSpace() || profile.isSpheres())) {
-                isCity = !CitySphere.onCitySphereBorder(coord, dimInfo)
-                    && !CitySphere.hasMonorailStation(coord, dimInfo);
-            }
             if (isCity) {
                 isCity = City.getCityFactor(coord, dimInfo, profile) > profile.CITY_THRESHOLD;
             }
 
-            int cityLevel = isCity ? BuildingInfo.getCityLevel(coord, dimInfo) : 0;
-            /* Do not wake the intercity planner from a terrain probe. */
+            int cityLevel = isCity ? stableCityLevel(dimInfo, profile, coord) : 0;
             int highwayLevel = stableHighwayLevel(dimInfo, profile, coord);
             boolean hasHighway = highwayLevel >= 0;
             boolean highwayTunnel = hasHighway && isHighwayTunnel(dimInfo, coord, profile,
@@ -664,9 +773,33 @@ public final class ChunkRoleProbe {
             return new Probe(isCity, false, cityLevel, hasHighway, highwayLevel,
                 highwayTunnel, false, false, false);
         } catch (Throwable ignored) {
-            // Do not poison the lifecycle cache with a false negative. A later
-            // call can retry once the provider has become fully usable.
             return null;
+        }
+    }
+
+    private static int stableCityLevel(IDimensionInfo dimInfo,
+                                       LostCityProfile profile,
+                                       ChunkCoord coord) {
+        if (dimInfo == null || profile == null || coord == null) {
+            return 0;
+        }
+        try {
+            mcjty.lostcities.worldgen.ChunkHeightmap heightmap = dimInfo.getHeightmap(coord);
+            if (heightmap == null) {
+                return 0;
+            }
+            int height = heightmap.getHeight();
+            if (height < profile.CITY_LEVEL0_HEIGHT) return 0;
+            if (height < profile.CITY_LEVEL1_HEIGHT) return 1;
+            if (height < profile.CITY_LEVEL2_HEIGHT) return 2;
+            if (height < profile.CITY_LEVEL3_HEIGHT) return 3;
+            if (height < profile.CITY_LEVEL4_HEIGHT) return 4;
+            if (height < profile.CITY_LEVEL5_HEIGHT) return 5;
+            if (height < profile.CITY_LEVEL6_HEIGHT) return 6;
+            if (height < profile.CITY_LEVEL7_HEIGHT) return 7;
+            return 8;
+        } catch (Throwable ignored) {
+            return 0;
         }
     }
 
@@ -686,13 +819,9 @@ public final class ChunkRoleProbe {
         if (dimInfo.getHighwayGenerationMode() == HighwayGenerationMode.INTERCITY_NETWORK_V1) {
             return IntercityHighwayIndex.peekLevel(dimInfo, profile, coord, null);
         }
-        /* Legacy route lookup can take the same locks in reverse order. Leave
-         * it to the route-aware path. */
         return -1;
     }
 
-    /** Mirrors Lost Cities' BuildingInfo#isTunnel(level) decision without
-     * constructing a full BuildingInfo for every terrain-blend sample. */
     private static boolean isHighwayTunnel(IDimensionInfo dimInfo,
                                            ChunkCoord coord,
                                            LostCityProfile profile,

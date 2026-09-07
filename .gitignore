@@ -31,6 +31,17 @@ build
 /showcase/
 /sustained-*/
 
+# Platform build output and local Gradle state
+/.gradle-local/
+/platforms/*/*/.gradle-local/
+/platforms/*/*/build-*/
+/platforms/*/*/run/
+/platforms/*/*/runs/
+/platforms/*/*/run-data/
+/platforms/*/*/logs/
+/platforms/*/*/mcmodsrepo/
+/tmp-neoforge/
+
 # one-off verification captures and generated server files
 *.out.txt
 *.err.txt
@@ -47,13 +58,14 @@ build
 /diagnostics/
 /tmp-javap/
 /%TEMP%/
+/data/
+/META-INF/
 /net/
 /intercity-parity-compare.txt
 /source-reach-compare.txt
 
 # other
 eclipse
-run
 LostCitiesRepo/
 readme
 desktop.ini

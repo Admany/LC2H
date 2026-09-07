@@ -15,7 +15,6 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.util.Mth;
-import org.admany.lc2h.mixin.accessor.minecraft.WorldGenRegionAccessor;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
@@ -259,16 +258,8 @@ public class MixinCityEdgeBlendSurfaceFix {
             int chunkX = blockX >> 4;
             int chunkZ = blockZ >> 4;
             if (world instanceof WorldGenRegion region) {
-                WorldGenRegionAccessor accessor = (WorldGenRegionAccessor) region;
-                var firstPos = accessor.lc2h$getFirstPos();
-                var lastPos = accessor.lc2h$getLastPos();
-                if (firstPos == null || lastPos == null) {
-                    return false;
-                }
-                if (chunkX < firstPos.x || chunkX > lastPos.x || chunkZ < firstPos.z || chunkZ > lastPos.z) {
-                    return false;
-                }
-                return true;
+                // NeoForge 1.21.1 dropped firstPos/lastPos; hasChunk is the shared window check.
+                return region.hasChunk(chunkX, chunkZ);
             }
             return world.hasChunk(chunkX, chunkZ);
         } catch (Throwable t) {

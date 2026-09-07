@@ -23,6 +23,8 @@
     "lc2h.config.option.floating_vegetation_blocks.invalid": "Ignored invalid block IDs: %s",
     "lc2h.config.option.explosion_debris.title": "Explosion Debris Spill",
     "lc2h.config.option.explosion_debris.desc": "Allow Lost Cities explosions to scatter rubble into adjacent chunks (can add clutter around streets).",
+    "lc2h.config.option.lc2h_logging.title": "LC2H Logging",
+    "lc2h.config.option.lc2h_logging.desc": "Show routine LC2H status messages in the log. Warnings and errors still show.",
     "lc2h.config.option.lostcities_gen_lock.title": "Lost Cities Safe Gen Lock (Recommended)",
     "lc2h.config.option.lostcities_gen_lock.desc": "Reduces rare Lost Cities chunk-gen bugs (duplicated/bugged chunks). Leave ON unless you\u0027re troubleshooting performance.",
     "lc2h.config.option.lostcities_part_safety.title": "Part Safety Checks (Recommended)",

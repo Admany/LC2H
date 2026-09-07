@@ -1,0 +1,13 @@
+// Platform builds inherit the mod metadata and local library versions from the root.
+def sharedPropertiesFile = project.file('../../../gradle.properties')
+if (!sharedPropertiesFile.isFile()) {
+    throw new GradleException("Missing shared properties file: ${sharedPropertiesFile}")
+}
+
+def sharedProperties = new Properties()
+sharedPropertiesFile.withInputStream { sharedProperties.load(it) }
+sharedProperties.each { key, value ->
+    if (!project.hasProperty(key.toString())) {
+        project.ext.set(key.toString(), value.toString())
+    }
+}
