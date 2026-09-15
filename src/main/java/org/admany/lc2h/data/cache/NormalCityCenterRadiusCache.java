@@ -3,6 +3,7 @@ package org.admany.lc2h.data.cache;
 import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import org.admany.lc2h.util.PackedCoordinateKey;
+import org.admany.lc2h.worldgen.lostcities.LostCitiesGuiPreviewGuard;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -21,7 +22,7 @@ public final class NormalCityCenterRadiusCache {
     private static final int MAX_TILES = Math.max(256,
         Integer.getInteger("lc2h.city.normalCenterCacheTiles", 4_096));
 
-    private static final ConcurrentHashMap<IDimensionInfo,
+    private static final ConcurrentHashMap<Object,
         ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, Tile>>> TILES =
         new ConcurrentHashMap<>();
     private static final ConcurrentLinkedQueue<TileToken> ORDER = new ConcurrentLinkedQueue<>();
@@ -36,7 +37,7 @@ public final class NormalCityCenterRadiusCache {
                             int chunkX,
                             int chunkZ) {
         ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, Tile>> byProfile =
-            TILES.get(provider);
+            TILES.get(LostCitiesGuiPreviewGuard.cacheScope(provider, profile));
         if (byProfile == null) {
             return Float.NaN;
         }
@@ -60,8 +61,9 @@ public final class NormalCityCenterRadiusCache {
                                 int chunkX,
                                 int chunkZ,
                                 float radius) {
+        Object scope = LostCitiesGuiPreviewGuard.cacheScope(provider, profile);
         ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, Tile>> byProfile =
-            TILES.computeIfAbsent(provider, ignored -> new ConcurrentHashMap<>());
+            TILES.computeIfAbsent(scope, ignored -> new ConcurrentHashMap<>());
         ConcurrentHashMap<Long, Tile> tiles =
             byProfile.computeIfAbsent(profile, ignored -> new ConcurrentHashMap<>());
         long tileKey = tileKey(chunkX, chunkZ);
@@ -71,7 +73,7 @@ public final class NormalCityCenterRadiusCache {
             Tile previous = tiles.putIfAbsent(tileKey, created);
             tile = previous == null ? created : previous;
             if (previous == null) {
-                ORDER.offer(new TileToken(provider, profile, tiles, tileKey, created));
+                ORDER.offer(new TileToken(scope, profile, tiles, tileKey, created));
                 TILE_COUNT.incrementAndGet();
                 trim();
             }
@@ -115,11 +117,11 @@ public final class NormalCityCenterRadiusCache {
             TILE_COUNT.decrementAndGet();
             if (oldest.tiles.isEmpty()) {
                 ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, Tile>> byProfile =
-                    TILES.get(oldest.provider);
+                    TILES.get(oldest.scope);
                 if (byProfile != null) {
                     byProfile.remove(oldest.profile, oldest.tiles);
                     if (byProfile.isEmpty()) {
-                        TILES.remove(oldest.provider, byProfile);
+                        TILES.remove(oldest.scope, byProfile);
                     }
                 }
             }
@@ -130,7 +132,7 @@ public final class NormalCityCenterRadiusCache {
         private final AtomicIntegerArray values = new AtomicIntegerArray(TILE_SIDE * TILE_SIDE);
     }
 
-    private record TileToken(IDimensionInfo provider,
+    private record TileToken(Object scope,
                              LostCityProfile profile,
                              ConcurrentHashMap<Long, Tile> tiles,
                              long tileKey,

@@ -3,9 +3,11 @@ package org.admany.lc2h.mixin.lostcities.gui;
 import mcjty.lostcities.gui.GuiLCConfig;
 import net.minecraft.client.gui.GuiGraphics;
 import org.admany.lc2h.worldgen.lostcities.LostCitiesGuiPreviewGuard;
+import org.admany.lc2h.data.cache.BuildingInfoCacheRegistry;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /** Bounds the uncached railway/highway work performed by the upstream profile preview. */
@@ -34,6 +36,29 @@ public abstract class MixinGuiLCConfigPreviewBudget {
 
     @Inject(method = "refreshPreview", at = @At("HEAD"))
     private void lc2h$clearPreviewBudget(CallbackInfo ci) {
-        LostCitiesGuiPreviewGuard.clear();
+        LostCitiesGuiPreviewGuard.refreshPreview();
+    }
+
+    @Redirect(
+        method = "refreshPreview",
+        at = @At(
+            value = "INVOKE",
+            target = "Lmcjty/lostcities/worldgen/lost/BuildingInfo;cleanCache()V",
+            remap = false
+        )
+    )
+    private void lc2h$clearPreviewBuildingInfoOnly() {
+        BuildingInfoCacheRegistry.clearPreview();
+    }
+
+    @Redirect(
+        method = "refreshPreview",
+        at = @At(
+            value = "INVOKE",
+            target = "Lmcjty/lostcities/worldgen/lost/City;cleanCache()V",
+            remap = false
+        )
+    )
+    private void lc2h$keepRuntimeCityCaches() {
     }
 }

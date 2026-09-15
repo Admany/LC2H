@@ -16,6 +16,7 @@ import org.spongepowered.asm.mixin.Unique;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Mixin(value = BuildingInfo.class, remap = false)
 public abstract class MixinNativeBuildingInfoCharacteristicsCache {
@@ -36,6 +37,29 @@ public abstract class MixinNativeBuildingInfoCharacteristicsCache {
     @Shadow
     private static LostChunkCharacteristics getChunkCharacteristicsLocked(ChunkCoord coord, IDimensionInfo provider) {
         throw new AssertionError();
+    }
+
+    @Shadow
+    private static int getCityLevelLocked(ChunkCoord coord, IDimensionInfo provider) {
+        return 0;
+    }
+
+    @org.spongepowered.asm.mixin.gen.Invoker("<init>")
+    static BuildingInfo lc2h$invokeCreate(ChunkCoord coord, IDimensionInfo provider) {
+        throw new AssertionError();
+    }
+
+    @org.spongepowered.asm.mixin.injection.Redirect(
+        method = "<init>",
+        at = @org.spongepowered.asm.mixin.injection.At(
+            value = "INVOKE",
+            target = "Lmcjty/lostcities/worldgen/lost/BuildingInfo;getDimensionLock(Lnet/minecraft/resources/ResourceKey;)Ljava/lang/Object;",
+            remap = false
+        ),
+        require = 0
+    )
+    private Object lc2h$perInstanceMemoizationLock(net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) {
+        return new Object();
     }
 
     @Overwrite
@@ -94,18 +118,81 @@ public abstract class MixinNativeBuildingInfoCharacteristicsCache {
         }
     }
 
+    @Overwrite
+    public static int getCityLevel(ChunkCoord coord, IDimensionInfo provider) {
+        if (coord == null || provider == null) {
+            return getCityLevelLocked(coord, provider);
+        }
+        BuildingInfoCacheScope scope = BuildingInfoCacheRegistry.scope(provider);
+        ReentrantLock lock = scope.buildingLocks.computeIfAbsent(coord, ignored -> new ReentrantLock());
+        if (!lock.tryLock()) {
+            return getCityLevelLocked(coord, provider);
+        }
+        try {
+            return getCityLevelLocked(coord, provider);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Overwrite
+    public static BuildingInfo getBuildingInfo(ChunkCoord coord, IDimensionInfo provider) {
+        if (coord == null) {
+            return lc2h$invokeCreate(null, provider);
+        }
+        BuildingInfoCacheScope scope = BuildingInfoCacheRegistry.scope(provider);
+        BuildingInfo cached = scope.buildingInfo.get(coord);
+        if (cached != null) {
+            BuildingInfoDiagnostics.recordBuildingInfoMemoryHit();
+            return cached;
+        }
+
+        ReentrantLock lock = scope.buildingLocks.computeIfAbsent(coord, ignored -> new ReentrantLock());
+        long waitStartNs = System.nanoTime();
+        if (!lock.tryLock()) {
+            // Do not make a server or cooperative generation worker wait for a
+            // different worker that is constructing this coordinate.
+            BuildingInfo created = lc2h$invokeCreate(coord, provider);
+            BuildingInfo published = scope.buildingInfo.putIfAbsent(coord, created);
+            return published == null ? created : published;
+        }
+        try {
+            BuildingInfoDiagnostics.recordBuildingInfoLockWait(System.nanoTime() - waitStartNs);
+            cached = scope.buildingInfo.get(coord);
+            if (cached != null) {
+                BuildingInfoDiagnostics.recordBuildingInfoMemoryHit();
+                return cached;
+            }
+            BuildingInfo created = lc2h$invokeCreate(coord, provider);
+            BuildingInfo published = scope.buildingInfo.putIfAbsent(coord, created);
+            BuildingInfo result = published == null ? created : published;
+            if (published == null) {
+                BuildingInfoDiagnostics.recordBuildingInfoCreate();
+            }
+            return result;
+        } finally {
+            lock.unlock();
+            if (!scope.buildingInfo.containsKey(coord) && !lock.isLocked() && !lock.hasQueuedThreads()) {
+                scope.buildingLocks.remove(coord, lock);
+            }
+        }
+    }
+
     @Unique
     private static LostChunkCharacteristics lc2h$nativeResolve(
         ChunkCoord coord, IDimensionInfo provider) {
         if (coord == null || coord.dimension() == null) {
             return getChunkCharacteristicsLocked(coord, provider);
         }
-        Object lock = getDimensionLock(coord.dimension());
-        if (lock == null) {
+        BuildingInfoCacheScope scope = BuildingInfoCacheRegistry.scope(provider);
+        ReentrantLock lock = scope.buildingLocks.computeIfAbsent(coord, ignored -> new ReentrantLock());
+        if (!lock.tryLock()) {
             return getChunkCharacteristicsLocked(coord, provider);
         }
-        synchronized (lock) {
+        try {
             return getChunkCharacteristicsLocked(coord, provider);
+        } finally {
+            lock.unlock();
         }
     }
 

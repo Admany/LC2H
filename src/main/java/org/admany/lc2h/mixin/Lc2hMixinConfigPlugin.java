@@ -18,6 +18,7 @@ public final class Lc2hMixinConfigPlugin implements IMixinConfigPlugin {
         "org.admany.lc2h.mixin.accessor.minecraft.ServerChunkCacheInvoker"
     );
     private static volatile boolean announced;
+    private static final boolean NEOFORGE = classPresent("net.neoforged.fml.loading.FMLLoader");
 
     @Override
     public void onLoad(String mixinPackage) {
@@ -34,6 +35,9 @@ public final class Lc2hMixinConfigPlugin implements IMixinConfigPlugin {
 
     @Override
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
+        if (NEOFORGE) {
+            return false;
+        }
         if ("org.admany.lc2h.mixin.minecraft.worldgen.MixinWorldGenRegionPreCaptureTrace".equals(mixinClassName)
             || "org.admany.lc2h.mixin.minecraft.worldgen.MixinPlacedFeaturePreCaptureTrace".equals(mixinClassName)) {
             return Boolean.parseBoolean(System.getProperty("lc2h.precaptureTrace.enabled", "false"));
@@ -65,5 +69,14 @@ public final class Lc2hMixinConfigPlugin implements IMixinConfigPlugin {
 
     @Override
     public void postApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {
+    }
+
+    private static boolean classPresent(String name) {
+        try {
+            Class.forName(name, false, Lc2hMixinConfigPlugin.class.getClassLoader());
+            return true;
+        } catch (ClassNotFoundException ignored) {
+            return false;
+        }
     }
 }

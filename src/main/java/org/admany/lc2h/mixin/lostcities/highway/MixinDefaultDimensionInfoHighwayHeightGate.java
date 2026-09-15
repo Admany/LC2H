@@ -3,7 +3,6 @@ package org.admany.lc2h.mixin.lostcities.highway;
 import mcjty.lostcities.varia.ChunkCoord;
 import mcjty.lostcities.worldgen.ChunkHeightmap;
 import mcjty.lostcities.worldgen.DefaultDimensionInfo;
-import org.admany.lc2h.worldgen.lostcities.HighwayHeightmapPrefetchContext;
 import org.admany.lc2h.worldgen.terrain.NaturalHeightSampler;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -21,10 +20,6 @@ public abstract class MixinDefaultDimensionInfoHighwayHeightGate {
     )
     private ChunkHeightmap lc2h$avoidColdHeightBuildDuringHubScoring(DefaultDimensionInfo instance,
                                                                       ChunkCoord coord) {
-        if (!HighwayHeightmapPrefetchContext.isActive()) {
-            return instance.getHeightmap(coord);
-        }
-
         int height = instance.getProfile().GROUNDLEVEL;
         NaturalHeightSampler.LevelSampler sampler = NaturalHeightSampler.forLevel(instance.getWorld());
         if (sampler != null) {

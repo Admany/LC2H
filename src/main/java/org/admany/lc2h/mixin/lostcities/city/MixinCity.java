@@ -23,6 +23,7 @@ import org.admany.lc2h.data.cache.LostCitiesCacheBudgetManager;
 import org.admany.lc2h.data.cache.NormalCityCenterRadiusCache;
 import org.admany.lc2h.data.cache.NormalCityFactorTileCache;
 import org.admany.lc2h.worldgen.lostcities.PlannerHotPath;
+import org.admany.lc2h.worldgen.lostcities.LostCitiesGuiPreviewGuard;
 import org.admany.lc2h.worldgen.lostcities.PredefinedCityCoordinateIndex;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
@@ -88,7 +89,7 @@ public abstract class MixinCity {
      * height/style checks for every consumer.
      */
     @Unique
-    private static final ConcurrentHashMap<IDimensionInfo,
+    private static final ConcurrentHashMap<Object,
         ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, Float>>>
         LC2H_CITY_FACTOR_CACHE = new ConcurrentHashMap<>();
     /** Share one cold factor calculation across overlapping worldgen workers. */
@@ -245,18 +246,19 @@ public abstract class MixinCity {
         if (profile.isSpace() || profile.isSpheres()) {
             return lc2h$getCityFactorUncached(coord, provider, profile);
         }
+        Object cacheScope = LostCitiesGuiPreviewGuard.cacheScope(provider, profile);
         ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, Float>> byProfile =
-            LC2H_CITY_FACTOR_CACHE.computeIfAbsent(provider, ignored -> new ConcurrentHashMap<>());
+            LC2H_CITY_FACTOR_CACHE.computeIfAbsent(cacheScope, ignored -> new ConcurrentHashMap<>());
         ConcurrentHashMap<Long, Float> factors =
             byProfile.computeIfAbsent(profile, ignored -> new ConcurrentHashMap<>());
         long packed = lc2h$packedChunkKey(coord.chunkX(), coord.chunkZ());
         Float cached = factors.get(packed);
         if (cached != null) {
             LostCitiesCacheBudgetManager.recordAccess(LC2H_CITY_FACTOR_BUDGET,
-                new CityFactorKey(provider, profile, packed));
+                new CityFactorKey(cacheScope, profile, packed));
             return cached;
         }
-        CityFactorKey key = new CityFactorKey(provider, profile, packed);
+        CityFactorKey key = new CityFactorKey(cacheScope, profile, packed);
         CompletableFuture<Float> created = new CompletableFuture<>();
         CompletableFuture<Float> existing = LC2H_CITY_FACTOR_FLIGHTS.putIfAbsent(key, created);
         if (existing != null) {
@@ -992,7 +994,7 @@ public abstract class MixinCity {
             return false;
         }
         ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, Float>> byProfile =
-            LC2H_CITY_FACTOR_CACHE.get(factorKey.provider());
+            LC2H_CITY_FACTOR_CACHE.get(factorKey.scope());
         if (byProfile == null) {
             return false;
         }
@@ -1005,13 +1007,13 @@ public abstract class MixinCity {
             byProfile.remove(factorKey.profile(), factors);
         }
         if (byProfile.isEmpty()) {
-            LC2H_CITY_FACTOR_CACHE.remove(factorKey.provider(), byProfile);
+            LC2H_CITY_FACTOR_CACHE.remove(factorKey.scope(), byProfile);
         }
         return removed;
     }
 
     @Unique
-    private record CityFactorKey(IDimensionInfo provider,
+    private record CityFactorKey(Object scope,
                                  LostCityProfile profile,
                                  long packed) {
     }

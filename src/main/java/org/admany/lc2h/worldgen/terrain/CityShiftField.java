@@ -30,6 +30,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicLong;
@@ -78,12 +79,17 @@ public final class CityShiftField {
         Integer.getInteger("lc2h.terrain.shift.asyncThreads", 1)));
     private static final int ASYNC_BUILD_QUEUE = Math.max(4, Math.min(64,
         Integer.getInteger("lc2h.terrain.shift.asyncQueue", 32)));
+    private static final int ROLE_BUILD_THREADS = Math.max(1, Math.min(4,
+        Integer.getInteger("lc2h.terrain.shift.roleAsyncThreads", 2)));
+    private static final int ROLE_BUILD_QUEUE = Math.max(16, Math.min(256,
+        Integer.getInteger("lc2h.terrain.shift.roleAsyncQueue", 128)));
     private static final long ASYNC_RETRY_DELAY_NANOS = TimeUnit.SECONDS.toNanos(1L);
     private static final long WORLDGEN_QUIET_NANOS = TimeUnit.MILLISECONDS.toNanos(Math.max(50L,
         Long.getLong("lc2h.terrain.shift.worldgenQuietMs", 350L)));
     private static final int ROLE_YIELD_INTERVAL = Math.max(1, Math.min(32,
         Integer.getInteger("lc2h.terrain.shift.roleYieldInterval", 8)));
     private static final AtomicInteger ASYNC_THREAD_IDS = new AtomicInteger();
+    private static final AtomicInteger ROLE_THREAD_IDS = new AtomicInteger();
     private static final ThreadPoolExecutor ASYNC_BUILD_EXECUTOR =
         new ThreadPoolExecutor(
             ASYNC_BUILD_THREADS,
@@ -99,7 +105,25 @@ public final class CityShiftField {
                 return thread;
             },
             new ThreadPoolExecutor.AbortPolicy());
+    private static final ThreadPoolExecutor ROLE_BUILD_EXECUTOR =
+        new ThreadPoolExecutor(
+            ROLE_BUILD_THREADS,
+            ROLE_BUILD_THREADS,
+            30L,
+            TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(ROLE_BUILD_QUEUE),
+            runnable -> {
+                Thread thread = new Thread(runnable,
+                    "lc2h-role-builder-" + ROLE_THREAD_IDS.incrementAndGet());
+                thread.setDaemon(true);
+                thread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1));
+                return thread;
+            },
+            new ThreadPoolExecutor.AbortPolicy());
     private static final AtomicLong LIFECYCLE = new AtomicLong();
+
+    private static final ThreadLocal<Boolean> ROLE_TILE_BUILD_CONTEXT =
+        ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     private static final AtomicLong REGIONS_BUILT = new AtomicLong();
     private static final AtomicLong REGION_HITS = new AtomicLong();
@@ -126,6 +150,12 @@ public final class CityShiftField {
     private static final AtomicLong ROLE_FLIGHT_WAITS = new AtomicLong();
     private static final AtomicLong ROLE_CACHE_PUBLISHES = new AtomicLong();
     private static final AtomicLong ROLE_DUPLICATE_SUPPRESSED = new AtomicLong();
+    private static final AtomicLong ROLE_ASYNC_SUBMITTED = new AtomicLong();
+    private static final AtomicLong ROLE_ASYNC_COMPLETED = new AtomicLong();
+    private static final AtomicLong ROLE_ASYNC_REJECTED = new AtomicLong();
+    private static final AtomicLong ROLE_ASYNC_FAILED = new AtomicLong();
+    private static final AtomicLong ROLE_BUILD_NANOS = new AtomicLong();
+    private static final AtomicLong ROLE_TILES_BUILT = new AtomicLong();
     private static final AtomicLong ROLE_HEIGHT_ESTIMATES = new AtomicLong();
     private static final AtomicLong RAW_CITY_FACTOR_FALLBACKS = new AtomicLong();
     private static final AtomicLong CITY_LEVEL_DIRECT_LOOKUPS = new AtomicLong();
@@ -210,6 +240,7 @@ public final class CityShiftField {
     public static void clear() {
         LIFECYCLE.incrementAndGet();
         REGION_FLIGHTS.values().forEach(flight -> flight.cancel(false));
+        ROLES.values().forEach(RoleCache::cancel);
         CACHE.clear();
         CACHE_ORDER.clear();
         REGION_FLIGHTS.clear();
@@ -224,6 +255,9 @@ public final class CityShiftField {
             return;
         }
         PREWARM_REQUESTS.incrementAndGet();
+        long lifecycle = LIFECYCLE.get();
+        prepareRoleWindow(context,
+            Math.floorDiv(chunkX, REGION_SIDE), Math.floorDiv(chunkZ, REGION_SIDE), lifecycle);
         Region ready = region(context,
             Math.floorDiv(chunkX, REGION_SIDE), Math.floorDiv(chunkZ, REGION_SIDE));
         if (ready != null) {
@@ -514,6 +548,15 @@ public final class CityShiftField {
             + ", roleFlightWaits=" + ROLE_FLIGHT_WAITS.get()
             + ", roleCachePublishes=" + ROLE_CACHE_PUBLISHES.get()
             + ", roleDuplicateSuppressed=" + ROLE_DUPLICATE_SUPPRESSED.get()
+            + ", roleAsync[submitted=" + ROLE_ASYNC_SUBMITTED.get()
+            + " completed=" + ROLE_ASYNC_COMPLETED.get()
+            + " rejected=" + ROLE_ASYNC_REJECTED.get()
+            + " failed=" + ROLE_ASYNC_FAILED.get()
+            + " tiles=" + ROLE_TILES_BUILT.get()
+            + " buildMs=" + String.format(java.util.Locale.ROOT, "%.1f",
+                ROLE_BUILD_NANOS.get() / 1.0E6D)
+            + " active=" + ROLE_BUILD_EXECUTOR.getActiveCount()
+            + " queued=" + ROLE_BUILD_EXECUTOR.getQueue().size() + "]"
             + ", activeRegionFlights=" + REGION_FLIGHTS.size()
             + ", asyncSubmitted=" + ASYNC_SUBMITTED.get()
             + ", asyncCompleted=" + ASYNC_COMPLETED.get()
@@ -527,6 +570,21 @@ public final class CityShiftField {
             + ", blendWidthBlocks=" + BLEND_WIDTH_BLOCKS
             + ", blendSoftness=" + String.format(java.util.Locale.ROOT, "%.3f", BLEND_SOFTNESS)
             + ", " + IntercityHighwayIndex.diagnostics();
+    }
+
+    private static CompletableFuture<Void> prepareRoleWindow(Context context,
+                                                              int regionX,
+                                                              int regionZ,
+                                                              long lifecycle) {
+        if (context == null || lifecycle != LIFECYCLE.get()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        int halo = context.settings().halo();
+        int side = REGION_SIDE + halo * 2;
+        int originX = regionX * REGION_SIDE - halo;
+        int originZ = regionZ * REGION_SIDE - halo;
+        RoleCache cache = ROLES.computeIfAbsent(context.provider(), ignored -> new RoleCache());
+        return cache.prepare(context, originX, originZ, side, lifecycle);
     }
 
     private static Region region(Context context, int regionX, int regionZ) {
@@ -576,6 +634,46 @@ public final class CityShiftField {
                                          RegionKey key,
                                          CompletableFuture<Region> created,
                                          long lifecycle) {
+        if (lifecycle != LIFECYCLE.get()) {
+            created.cancel(false);
+            REGION_FLIGHTS.remove(key, created);
+            return;
+        }
+        CompletableFuture<Void> roles;
+        try {
+            roles = prepareRoleWindow(context, regionX, regionZ, lifecycle);
+        } catch (Throwable failure) {
+            failRegion(key, created, failure);
+            return;
+        }
+        roles.whenComplete((ignored, failure) -> {
+            if (failure != null || lifecycle != LIFECYCLE.get()) {
+                if (lifecycle != LIFECYCLE.get()) {
+                    created.cancel(false);
+                    REGION_FLIGHTS.remove(key, created);
+                } else {
+                    failRegion(key, created, failure == null
+                        ? new CancellationException("role tile build cancelled")
+                        : failure);
+                }
+                return;
+            }
+            try {
+                ASYNC_BUILD_EXECUTOR.execute(() -> finishRegionBuild(
+                    context, regionX, regionZ, key, created, lifecycle));
+            } catch (RejectedExecutionException rejected) {
+                ASYNC_REJECTED.incrementAndGet();
+                failRegion(key, created, rejected);
+            }
+        });
+    }
+
+    private static void finishRegionBuild(Context context,
+                                           int regionX,
+                                           int regionZ,
+                                           RegionKey key,
+                                           CompletableFuture<Region> created,
+                                           long lifecycle) {
         try {
             if (lifecycle != LIFECYCLE.get()) {
                 created.cancel(false);
@@ -612,14 +710,19 @@ public final class CityShiftField {
         } catch (CancellationException ignored) {
             created.cancel(false);
         } catch (Throwable failure) {
-            ASYNC_FAILED.incrementAndGet();
-            /* Retry after a transient builder failure so the chunk does not
-             * fall back to an unmodified edge. */
-            ASYNC_RETRY_AFTER.put(key, System.nanoTime() + ASYNC_RETRY_DELAY_NANOS);
-            created.completeExceptionally(failure);
+            failRegion(key, created, failure);
         } finally {
             REGION_FLIGHTS.remove(key, created);
         }
+    }
+
+    private static void failRegion(RegionKey key,
+                                   CompletableFuture<Region> created,
+                                   Throwable failure) {
+        ASYNC_FAILED.incrementAndGet();
+        ASYNC_RETRY_AFTER.put(key, System.nanoTime() + ASYNC_RETRY_DELAY_NANOS);
+        created.completeExceptionally(failure);
+        REGION_FLIGHTS.remove(key, created);
     }
 
     private static Region awaitRegion(CompletableFuture<Region> flight) {
@@ -1127,8 +1230,9 @@ public final class CityShiftField {
             if (profile.isFloating() && BuildingInfo.isVoidChunk(coord, provider)) {
                 return false;
             }
-            boolean city = PlannerHotPath.run(() ->
-                BuildingInfo.isCityRaw(coord, provider, profile));
+            boolean city = Boolean.TRUE.equals(ROLE_TILE_BUILD_CONTEXT.get())
+                ? BuildingInfo.isCityRaw(coord, provider, profile)
+                : PlannerHotPath.run(() -> BuildingInfo.isCityRaw(coord, provider, profile));
             if (city) {
                 return true;
             }
@@ -1388,6 +1492,10 @@ public final class CityShiftField {
          * Lost Cities placement path to avoid route-cache lock cycles. */
             ChunkRoleProbe.Probe stable = ChunkRoleProbe.peekStableTerrainProbe(
                 provider, context.dimension(), chunkX, chunkZ);
+            if (stable == null && Boolean.TRUE.equals(ROLE_TILE_BUILD_CONTEXT.get())) {
+                stable = ChunkRoleProbe.getStableTerrainProbe(
+                    provider, context.dimension(), chunkX, chunkZ);
+            }
             boolean city;
             if (stable != null) {
                 STABLE_ROLE_HITS.incrementAndGet();
@@ -1457,8 +1565,9 @@ public final class CityShiftField {
                                             int naturalHeight) {
         try {
             CITY_LEVEL_DIRECT_LOOKUPS.incrementAndGet();
-            int level = PlannerHotPath.run(() ->
-                BuildingInfo.getCityLevel(coord, context.provider()));
+            int level = Boolean.TRUE.equals(ROLE_TILE_BUILD_CONTEXT.get())
+                ? BuildingInfo.getCityLevel(coord, context.provider())
+                : PlannerHotPath.run(() -> BuildingInfo.getCityLevel(coord, context.provider()));
             return Math.max(0, Math.min(8, level));
         } catch (Throwable ignored) {
             CITY_LEVEL_HEIGHT_FALLBACKS.incrementAndGet();
@@ -1477,25 +1586,138 @@ public final class CityShiftField {
         private final ConcurrentHashMap<Long, RoleTile> tiles = new ConcurrentHashMap<>();
         private final ConcurrentLinkedQueue<RoleTileToken> order = new ConcurrentLinkedQueue<>();
 
+        CompletableFuture<Void> prepare(Context context,
+                                        int originX,
+                                        int originZ,
+                                        int side,
+                                        long lifecycle) {
+            int minTileX = Math.floorDiv(originX, ROLE_TILE_SIDE);
+            int maxTileX = Math.floorDiv(originX + side - 1, ROLE_TILE_SIDE);
+            int minTileZ = Math.floorDiv(originZ, ROLE_TILE_SIDE);
+            int maxTileZ = Math.floorDiv(originZ + side - 1, ROLE_TILE_SIDE);
+            CompletableFuture<?>[] futures = new CompletableFuture[
+                (maxTileX - minTileX + 1) * (maxTileZ - minTileZ + 1)];
+            int index = 0;
+            for (int tileZ = minTileZ; tileZ <= maxTileZ; tileZ++) {
+                for (int tileX = minTileX; tileX <= maxTileX; tileX++) {
+                    futures[index++] = prepareTile(context, tileX, tileZ, lifecycle);
+                }
+            }
+            return CompletableFuture.allOf(futures);
+        }
+
+        void cancel() {
+            for (RoleTile tile : tiles.values()) {
+                tile.ready.cancel(false);
+            }
+        }
+
+        private CompletableFuture<Void> prepareTile(Context context,
+                                                     int tileX,
+                                                     int tileZ,
+                                                     long lifecycle) {
+            long tileKey = PackedCoordinateKey.of(tileX, tileZ);
+            RoleTile tile = tile(tileKey);
+            if (tile.built) {
+                return tile.ready;
+            }
+            if (tile.buildStarted.compareAndSet(false, true)) {
+                ROLE_ASYNC_SUBMITTED.incrementAndGet();
+                try {
+                    ROLE_BUILD_EXECUTOR.execute(() -> buildTile(
+                        context, tileX, tileZ, tileKey, tile, lifecycle));
+                } catch (RejectedExecutionException rejected) {
+                    ROLE_ASYNC_REJECTED.incrementAndGet();
+                    tile.buildStarted.set(false);
+                    tiles.remove(tileKey, tile);
+                    tile.ready.completeExceptionally(rejected);
+                }
+            }
+            return tile.ready;
+        }
+
+        private void buildTile(Context context,
+                               int tileX,
+                               int tileZ,
+                               long tileKey,
+                               RoleTile tile,
+                               long lifecycle) {
+            long started = System.nanoTime();
+            Boolean previousContext = ROLE_TILE_BUILD_CONTEXT.get();
+            ROLE_TILE_BUILD_CONTEXT.set(Boolean.TRUE);
+            try {
+                if (lifecycle != LIFECYCLE.get()) {
+                    tile.ready.cancel(false);
+                    return;
+                }
+                int originX = tileX * ROLE_TILE_SIDE;
+                int originZ = tileZ * ROLE_TILE_SIDE;
+                for (int localZ = 0; localZ < ROLE_TILE_SIDE; localZ++) {
+                    if (lifecycle != LIFECYCLE.get()) {
+                        tile.ready.cancel(false);
+                        return;
+                    }
+                    for (int localX = 0; localX < ROLE_TILE_SIDE; localX++) {
+                        long resolved = computePackedRole(
+                            context, originX + localX, originZ + localZ);
+                        if (resolved == 0L) {
+                            resolved = noRoleValue();
+                        }
+                        tile.values.set(localZ * ROLE_TILE_SIDE + localX, resolved);
+                        ROLE_CACHE_PUBLISHES.incrementAndGet();
+                    }
+                }
+                if (lifecycle != LIFECYCLE.get()) {
+                    tile.ready.cancel(false);
+                    return;
+                }
+                tile.built = true;
+                ROLE_TILES_BUILT.incrementAndGet();
+                ROLE_ASYNC_COMPLETED.incrementAndGet();
+                ROLE_BUILD_NANOS.addAndGet(System.nanoTime() - started);
+                tile.ready.complete(null);
+            } catch (Throwable failure) {
+                ROLE_ASYNC_FAILED.incrementAndGet();
+                tiles.remove(tileKey, tile);
+                tile.ready.completeExceptionally(failure);
+            } finally {
+                if (Boolean.TRUE.equals(previousContext)) {
+                    ROLE_TILE_BUILD_CONTEXT.set(Boolean.TRUE);
+                } else {
+                    ROLE_TILE_BUILD_CONTEXT.remove();
+                }
+            }
+        }
+
+        private RoleTile tile(long tileKey) {
+            RoleTile existing = tiles.get(tileKey);
+            if (existing != null) {
+                return existing;
+            }
+            RoleTile created = new RoleTile();
+            RoleTile previous = tiles.putIfAbsent(tileKey, created);
+            RoleTile result = previous == null ? created : previous;
+            if (previous == null) {
+                order.add(new RoleTileToken(tileKey, created));
+                trim();
+            }
+            return result;
+        }
+
         long getOrCompute(Context context, int chunkX, int chunkZ) {
             int tileX = Math.floorDiv(chunkX, ROLE_TILE_SIDE);
             int tileZ = Math.floorDiv(chunkZ, ROLE_TILE_SIDE);
             long tileKey = PackedCoordinateKey.of(tileX, tileZ);
-            RoleTile tile = tiles.get(tileKey);
-            if (tile == null) {
-                RoleTile created = new RoleTile();
-                RoleTile previous = tiles.putIfAbsent(tileKey, created);
-                tile = previous == null ? created : previous;
-                if (previous == null) {
-                    order.add(new RoleTileToken(tileKey, created));
-                    trim();
-                }
-            }
+            RoleTile tile = tile(tileKey);
             int index = Math.floorMod(chunkZ, ROLE_TILE_SIDE) * ROLE_TILE_SIDE
                 + Math.floorMod(chunkX, ROLE_TILE_SIDE);
             long cached = tile.values.get(index);
             if (cached != 0L) {
                 return normalizeCachedRole(context, chunkX, chunkZ, cached);
+            }
+            if (!Boolean.TRUE.equals(ROLE_TILE_BUILD_CONTEXT.get()) && !tile.built) {
+                ROLE_DUPLICATE_SUPPRESSED.incrementAndGet();
+                return noRoleValue();
             }
             CompletableFuture<Long> created = new CompletableFuture<>();
             CompletableFuture<Long> flight = tile.flights.putIfAbsent(index, created);
@@ -1516,8 +1738,6 @@ public final class CityShiftField {
             try {
                 long resolved = computePackedRole(context, chunkX, chunkZ);
                 if (resolved == 0L) {
-                    // Keep the safe fallback and remember it. Some LC branches can
-                    // throw during startup, so do not repeat that exception per region.
                     resolved = noRoleValue();
                 }
                 /* Store the height with the role so overlapping regions can
@@ -1556,6 +1776,10 @@ public final class CityShiftField {
                 if (oldest == null) {
                     return;
                 }
+                if (oldest.tile().buildStarted.get() && !oldest.tile().built) {
+                    order.offer(oldest);
+                    return;
+                }
                 /* A stale queue token must not evict a newer incarnation of
                  * the same tile after a rapid window churn. */
                 tiles.remove(oldest.key(), oldest.tile());
@@ -1572,6 +1796,9 @@ public final class CityShiftField {
             new AtomicLongArray(ROLE_TILE_SIDE * ROLE_TILE_SIDE);
         private final ConcurrentHashMap<Integer, CompletableFuture<Long>> flights =
             new ConcurrentHashMap<>();
+        private final CompletableFuture<Void> ready = new CompletableFuture<>();
+        private final AtomicBoolean buildStarted = new AtomicBoolean();
+        private volatile boolean built;
     }
 
     public record ShiftSettings(boolean enabled,

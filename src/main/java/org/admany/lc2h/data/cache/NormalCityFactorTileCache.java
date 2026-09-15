@@ -4,6 +4,7 @@ import mcjty.lostcities.config.LostCityProfile;
 import mcjty.lostcities.worldgen.IDimensionInfo;
 import org.admany.lc2h.util.PackedCoordinateKey;
 import org.admany.lc2h.worldgen.lostcities.PlannerHotPath;
+import org.admany.lc2h.worldgen.lostcities.LostCitiesGuiPreviewGuard;
 
 import java.lang.ref.WeakReference;
 import java.util.concurrent.CompletableFuture;
@@ -12,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.Objects;
 
 /** Exact 32 by 32 city-factor fields shared by overlapping LC planners. */
 public final class NormalCityFactorTileCache {
@@ -21,7 +23,7 @@ public final class NormalCityFactorTileCache {
     private static final int MAX_TILES = Math.max(128,
         Integer.getInteger("lc2h.city.normalFactorCacheTiles", 2_048));
 
-    private static final ConcurrentHashMap<IDimensionInfo,
+    private static final ConcurrentHashMap<Object,
         ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, TileState>>> TILES =
         new ConcurrentHashMap<>();
     private static final ConcurrentLinkedQueue<TileToken> ORDER = new ConcurrentLinkedQueue<>();
@@ -41,14 +43,15 @@ public final class NormalCityFactorTileCache {
         int tileX = Math.floorDiv(chunkX, TILE_SIDE);
         int tileZ = Math.floorDiv(chunkZ, TILE_SIDE);
         long tileKey = PackedCoordinateKey.of(tileX, tileZ);
+        Object scope = LostCitiesGuiPreviewGuard.cacheScope(provider, profile);
         long epoch = EPOCH.get();
         LocalTile local = LOCAL.get();
-        if (local != null && local.matches(epoch, provider, profile, tileKey)) {
+        if (local != null && local.matches(epoch, scope, profile, tileKey)) {
             return local.values[index(chunkX, chunkZ)];
         }
 
         ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, TileState>> byProfile =
-            TILES.computeIfAbsent(provider, ignored -> new ConcurrentHashMap<>());
+            TILES.computeIfAbsent(scope, ignored -> new ConcurrentHashMap<>());
         ConcurrentHashMap<Long, TileState> tiles =
             byProfile.computeIfAbsent(profile, ignored -> new ConcurrentHashMap<>());
         TileState state = tiles.get(tileKey);
@@ -68,16 +71,16 @@ public final class NormalCityFactorTileCache {
             } catch (RuntimeException | Error failure) {
                 state.future.completeExceptionally(failure);
                 tiles.remove(tileKey, state);
-                prune(provider, profile, byProfile, tiles);
+                prune(scope, profile, byProfile, tiles);
                 throw failure;
             }
             if (result.cacheable()) {
-                ORDER.offer(new TileToken(provider, profile, tiles, tileKey, state));
+                ORDER.offer(new TileToken(scope, profile, tiles, tileKey, state));
                 TILE_COUNT.incrementAndGet();
                 trim();
             } else {
                 tiles.remove(tileKey, state);
-                prune(provider, profile, byProfile, tiles);
+                prune(scope, profile, byProfile, tiles);
             }
         } else {
             result = state.future.getNow(null);
@@ -97,7 +100,7 @@ public final class NormalCityFactorTileCache {
             }
         }
 
-        LOCAL.set(new LocalTile(epoch, new WeakReference<>(provider),
+        LOCAL.set(new LocalTile(epoch, new WeakReference<>(scope),
             new WeakReference<>(profile), tileKey, result.values()));
         return result.values()[index(chunkX, chunkZ)];
     }
@@ -140,21 +143,21 @@ public final class NormalCityFactorTileCache {
             }
             TILE_COUNT.decrementAndGet();
             ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, TileState>> byProfile =
-                TILES.get(oldest.provider);
+                TILES.get(oldest.scope);
             if (byProfile != null) {
-                prune(oldest.provider, oldest.profile, byProfile, oldest.tiles);
+                prune(oldest.scope, oldest.profile, byProfile, oldest.tiles);
             }
         }
     }
 
-    private static void prune(IDimensionInfo provider,
+    private static void prune(Object scope,
                               LostCityProfile profile,
                               ConcurrentHashMap<LostCityProfile, ConcurrentHashMap<Long, TileState>> byProfile,
                               ConcurrentHashMap<Long, TileState> tiles) {
         if (tiles.isEmpty()) {
             byProfile.remove(profile, tiles);
             if (byProfile.isEmpty()) {
-                TILES.remove(provider, byProfile);
+                TILES.remove(scope, byProfile);
             }
         }
     }
@@ -171,7 +174,7 @@ public final class NormalCityFactorTileCache {
         private final CompletableFuture<BuildResult> future = new CompletableFuture<>();
     }
 
-    private record TileToken(IDimensionInfo provider,
+    private record TileToken(Object scope,
                              LostCityProfile profile,
                              ConcurrentHashMap<Long, TileState> tiles,
                              long tileKey,
@@ -179,16 +182,16 @@ public final class NormalCityFactorTileCache {
     }
 
     private record LocalTile(long epoch,
-                             WeakReference<IDimensionInfo> provider,
+                             WeakReference<Object> scope,
                              WeakReference<LostCityProfile> profile,
                              long tileKey,
                              float[] values) {
         private boolean matches(long expectedEpoch,
-                                IDimensionInfo expectedProvider,
+                                Object expectedScope,
                                 LostCityProfile expectedProfile,
                                 long expectedTileKey) {
             return epoch == expectedEpoch
-                && provider.get() == expectedProvider
+                && Objects.equals(scope.get(), expectedScope)
                 && profile.get() == expectedProfile
                 && tileKey == expectedTileKey;
         }

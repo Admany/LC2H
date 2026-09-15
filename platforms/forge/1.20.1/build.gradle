@@ -325,9 +325,9 @@ dependencies {
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
 
 
-    implementation fg.deobf(files(quantifiedJar))
-    implementation fg.deobf(files(lostCitiesJar))
-    testImplementation fg.deobf(files(lostCitiesJar))
+    implementation fg.deobf("local.libs:quantified-api-omni:${project.property('quantified_version')}")
+    implementation fg.deobf("local.libs:lostcities:${project.property('lostcities_version')}")
+    testImplementation fg.deobf("local.libs:lostcities:${project.property('lostcities_version')}")
 
     implementation 'com.github.oshi:oshi-core:6.4.5'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'

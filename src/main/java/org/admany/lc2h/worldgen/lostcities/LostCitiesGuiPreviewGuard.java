@@ -6,12 +6,14 @@ import mcjty.lostcities.worldgen.IDimensionInfo;
 
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Bound uncached railway and highway work in the Lost Cities preview. */
 public final class LostCitiesGuiPreviewGuard {
     private static final int MAX_NEW_COMPUTATIONS_PER_FRAME = Math.max(8,
         Integer.getInteger("lc2h.guiPreview.maxNewComputationsPerFrame", 64));
     private static final ThreadLocal<State> STATE = ThreadLocal.withInitial(State::new);
+    private static final AtomicLong PREVIEW_REVISION = new AtomicLong();
 
     private LostCitiesGuiPreviewGuard() {
     }
@@ -31,6 +33,26 @@ public final class LostCitiesGuiPreviewGuard {
         State state = STATE.get();
         state.attempted.clear();
         state.newComputations = 0;
+    }
+
+    public static void refreshPreview() {
+        PREVIEW_REVISION.incrementAndGet();
+        clear();
+    }
+
+    public static Object cacheScope(IDimensionInfo provider, LostCityProfile profile) {
+        if (!isPreview(provider)) {
+            return provider;
+        }
+        return new PreviewScope(profile, provider.getSeed(), provider.getType(), PREVIEW_REVISION.get());
+    }
+
+    public static Object cacheScope(IDimensionInfo provider) {
+        return cacheScope(provider, isPreview(provider) ? provider.getProfile() : null);
+    }
+
+    public static boolean isPreviewScope(Object scope) {
+        return scope instanceof PreviewScope;
     }
 
     /**
@@ -76,5 +98,8 @@ public final class LostCitiesGuiPreviewGuard {
     }
 
     private record PreviewKey(String operation, String coord, String profile, int profileIdentity) {
+    }
+
+    private record PreviewScope(LostCityProfile profile, long seed, Object dimension, long revision) {
     }
 }

@@ -53,6 +53,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Mixin(value = BuildingInfo.class, remap = false)
 public abstract class MixinBuildingInfo {
@@ -347,6 +348,19 @@ public abstract class MixinBuildingInfo {
     @Shadow public static Random getBuildingRandom(int chunkX, int chunkZ, long seed) { return null; }
     @Invoker("<init>")
     static BuildingInfo lc2h$create(ChunkCoord key, IDimensionInfo provider) { throw new AssertionError(); }
+
+    @Redirect(
+        method = "<init>",
+        at = @At(
+            value = "INVOKE",
+            target = "Lmcjty/lostcities/worldgen/lost/BuildingInfo;getDimensionLock(Lnet/minecraft/resources/ResourceKey;)Ljava/lang/Object;",
+            remap = false
+        ),
+        require = 0
+    )
+    private Object lc2h$perInstanceMemoizationLock(net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) {
+        return new Object();
+    }
 
     @Unique
     private static int lc2h$levelBasedOnHeight(int height, LostCityProfile profile) {
@@ -1037,12 +1051,15 @@ public abstract class MixinBuildingInfo {
         if (coord == null || coord.dimension() == null) {
             return getChunkCharacteristicsLocked(coord, provider);
         }
-        Object lock = getDimensionLock(coord.dimension());
-        if (lock == null) {
+        BuildingInfoCacheScope scope = lc2h$scope(provider);
+        ReentrantLock lock = scope.buildingLocks.computeIfAbsent(coord, ignored -> new ReentrantLock());
+        if (!lock.tryLock()) {
             return getChunkCharacteristicsLocked(coord, provider);
         }
-        synchronized (lock) {
+        try {
             return getChunkCharacteristicsLocked(coord, provider);
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -1317,6 +1334,10 @@ public abstract class MixinBuildingInfo {
         AsyncMultiChunkPlanner.ensureIntegrated(provider, key);
         BuildingInfoCacheScope scope = lc2h$scope(provider);
 
+        if (key == null) {
+            return lc2h$create(null, provider);
+        }
+
         BuildingInfo cached = scope.buildingInfo.get(key);
         if (cached != null) {
             BuildingInfoDiagnostics.recordBuildingInfoMemoryHit();
@@ -1324,30 +1345,27 @@ public abstract class MixinBuildingInfo {
             return cached;
         }
 
-        Object dimensionLock = key == null || key.dimension() == null
-            ? null
-            : getDimensionLock(key.dimension());
-        if (dimensionLock == null) {
-            return lc2h$constructBuildingInfo(scope, key, provider);
-        }
-        synchronized (dimensionLock) {
-            return lc2h$constructBuildingInfo(scope, key, provider);
-        }
+        return lc2h$constructBuildingInfo(scope, key, provider);
     }
 
     @Unique
     private static BuildingInfo lc2h$constructBuildingInfo(BuildingInfoCacheScope scope,
                                                             ChunkCoord key,
                                                             IDimensionInfo provider) {
-        Object lock = scope.buildingLocks.computeIfAbsent(key, k -> new Object());
+        ReentrantLock lock = scope.buildingLocks.computeIfAbsent(key, k -> new ReentrantLock());
         long lockWaitStartNs = System.nanoTime();
-        synchronized (lock) {
+        if (!lock.tryLock()) {
+            // Never block a generation worker behind another coordinate build.
+            BuildingInfo created = lc2h$create(key, provider);
+            BuildingInfo published = scope.buildingInfo.putIfAbsent(key, created);
+            return published == null ? created : published;
+        }
+        try {
             BuildingInfoDiagnostics.recordBuildingInfoLockWait(System.nanoTime() - lockWaitStartNs);
             BuildingInfo cached = scope.buildingInfo.get(key);
             if (cached != null) {
                 BuildingInfoDiagnostics.recordBuildingInfoMemoryHit();
                 LostCitiesCacheBudgetManager.recordAccess(LC2H_BUILDING_INFO_BUDGET, key);
-                scope.buildingLocks.remove(key, lock);
                 return cached;
             }
             try {
@@ -1372,7 +1390,10 @@ public abstract class MixinBuildingInfo {
                 } catch (Throwable ignored) {
                 }
                 throw t;
-            } finally {
+            }
+        } finally {
+            lock.unlock();
+            if (!scope.buildingInfo.containsKey(key) && !lock.isLocked() && !lock.hasQueuedThreads()) {
                 scope.buildingLocks.remove(key, lock);
             }
         }

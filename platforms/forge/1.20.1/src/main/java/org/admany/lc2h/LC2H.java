@@ -112,6 +112,10 @@ public class LC2H {
 
     @SuppressWarnings("removal")
     public LC2H() {
+        try {
+            org.admany.lc2h.worldgen.apply.ShadowMutationFinalizer.prewarm();
+        } catch (Throwable ignored) {
+        }
         MinecraftForge.EVENT_BUS.register(this);
 
         FMLJavaModLoadingContext.get().getModEventBus().addListener(this::onCommonSetup);

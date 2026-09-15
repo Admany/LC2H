@@ -65,7 +65,10 @@ public final class LostCitiesGenerationLocks {
     }
 
     public static void withChunkStripeLock(ResourceKey<Level> dimension, int chunkX, int chunkZ, Runnable action) {
-        if (!isEnabled() || action == null) {
+        if (action == null) {
+            return;
+        }
+        if (!isEnabled() || PlannerHotPath.shouldAvoidBlocking()) {
             if (action != null) action.run();
             return;
         }
@@ -96,7 +99,7 @@ public final class LostCitiesGenerationLocks {
     }
 
     public static LockToken acquireChunkStripeLock(ResourceKey<Level> dimension, int chunkX, int chunkZ) {
-        if (!isEnabled()) {
+        if (!isEnabled() || PlannerHotPath.shouldAvoidBlocking()) {
             return new LockToken(null, false);
         }
 

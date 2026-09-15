@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Per-provider mutable cache state for the BuildingInfo replacement.
@@ -34,7 +35,8 @@ public final class BuildingInfoCacheScope {
     public final ConcurrentMap<ChunkCoord, Boolean> highway = new ConcurrentHashMap<>();
     public final ConcurrentMap<ChunkCoord, Long> multiHeightStats = new ConcurrentHashMap<>();
     public final ConcurrentMap<Map.Entry<ChunkCoord, ChunkCoord>, Boolean> multiBoundary = new ConcurrentHashMap<>();
-    public final ConcurrentMap<ChunkCoord, Object> buildingLocks = new ConcurrentHashMap<>();
+    /** Per-coordinate construction locks. Lost Cities uses one dimension-wide monitor; that monitor is not safe on parallel generation workers. */
+    public final ConcurrentMap<ChunkCoord, ReentrantLock> buildingLocks = new ConcurrentHashMap<>();
 
     public void clear() {
         cityInfo.clear();

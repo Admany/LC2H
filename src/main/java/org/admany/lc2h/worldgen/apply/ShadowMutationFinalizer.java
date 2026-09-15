@@ -25,7 +25,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
-final class ShadowMutationFinalizer {
+public final class ShadowMutationFinalizer {
 
     private static final int MAX_PLAN_RETRIES = Math.max(1, Integer.getInteger("lc2h.shadowApply.max_plan_retries", 6));
     private static final long MAX_PLAN_AGE_MS = Math.max(5_000L, Long.getLong("lc2h.shadowApply.max_plan_age_ms", 120_000L));
@@ -40,6 +40,10 @@ final class ShadowMutationFinalizer {
     }
 
     private ShadowMutationFinalizer() {
+    }
+
+    public static void prewarm() {
+        Stage.values();
     }
 
     record Result(int applied,

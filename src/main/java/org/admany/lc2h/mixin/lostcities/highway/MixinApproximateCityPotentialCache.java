@@ -2,14 +2,12 @@ package org.admany.lc2h.mixin.lostcities.highway;
 
 import mcjty.lostcities.worldgen.highway.ApproximateCityPotential;
 import mcjty.lostcities.worldgen.lost.CityRarityMap;
+import it.unimi.dsi.fastutil.longs.Long2FloatLinkedOpenHashMap;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
-
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Keeps highway potential lookups exact without allocating two Random objects
@@ -25,6 +23,9 @@ public abstract class MixinApproximateCityPotentialCache {
     @Unique private static final double LC2H_DOUBLE_UNIT = 0x1.0p-53;
     @Unique private static final int LC2H_MAX_POTENTIALS = Math.max(16_384,
         Integer.getInteger("lc2h.highway.potentialCacheSize", 262_144));
+    @Unique private static final int LC2H_CACHE_STRIPES = 64;
+    @Unique private static final int LC2H_MAX_PER_STRIPE =
+        Math.max(256, (LC2H_MAX_POTENTIALS + LC2H_CACHE_STRIPES - 1) / LC2H_CACHE_STRIPES);
 
     @Shadow @Final private double cityChance;
     @Shadow @Final private int cityMinRadius;
@@ -37,10 +38,7 @@ public abstract class MixinApproximateCityPotentialCache {
     @Shadow @Final private ApproximateCityPotential.Modifier modifier;
 
     @Unique
-    private final ConcurrentHashMap<Long, Float> lc2h$potentials = new ConcurrentHashMap<>();
-
-    @Unique
-    private final ConcurrentLinkedQueue<PotentialToken> lc2h$potentialOrder = new ConcurrentLinkedQueue<>();
+    private final PotentialStripe[] lc2h$potentialStripes = lc2h$newStripes();
 
     /**
      * @author Admany
@@ -50,8 +48,9 @@ public abstract class MixinApproximateCityPotentialCache {
     @Overwrite
     public float getPotential(int chunkX, int chunkZ) {
         long key = lc2h$key(chunkX, chunkZ);
-        Float cached = lc2h$potentials.get(key);
-        if (cached != null) {
+        PotentialStripe stripe = lc2h$potentialStripes[lc2h$stripe(key)];
+        float cached = stripe.get(key);
+        if (!Float.isNaN(cached)) {
             return cached;
         }
 
@@ -76,13 +75,7 @@ public abstract class MixinApproximateCityPotentialCache {
         factor = modifier.modify(chunkX, chunkZ, factor);
         float result = Math.min(Math.max(factor, 0.0F), 1.0F);
 
-        Float previous = lc2h$potentials.putIfAbsent(key, result);
-        if (previous != null) {
-            return previous;
-        }
-        lc2h$potentialOrder.add(new PotentialToken(key, result));
-        lc2h$trimPotentials();
-        return result;
+        return stripe.putIfAbsent(key, result);
     }
 
     @Unique
@@ -138,14 +131,12 @@ public abstract class MixinApproximateCityPotentialCache {
     }
 
     @Unique
-    private void lc2h$trimPotentials() {
-        while (lc2h$potentials.size() > LC2H_MAX_POTENTIALS) {
-            PotentialToken oldest = lc2h$potentialOrder.poll();
-            if (oldest == null) {
-                return;
-            }
-            lc2h$potentials.remove(oldest.key(), oldest.value());
+    private static PotentialStripe[] lc2h$newStripes() {
+        PotentialStripe[] stripes = new PotentialStripe[LC2H_CACHE_STRIPES];
+        for (int i = 0; i < stripes.length; i++) {
+            stripes[i] = new PotentialStripe();
         }
+        return stripes;
     }
 
     @Unique
@@ -154,6 +145,33 @@ public abstract class MixinApproximateCityPotentialCache {
     }
 
     @Unique
-    private record PotentialToken(long key, float value) {
+    private static int lc2h$stripe(long key) {
+        long mixed = key ^ (key >>> 33) ^ (key << 11);
+        return (int) mixed & (LC2H_CACHE_STRIPES - 1);
+    }
+
+    @Unique
+    private static final class PotentialStripe {
+        private final Long2FloatLinkedOpenHashMap values = new Long2FloatLinkedOpenHashMap();
+
+        private PotentialStripe() {
+            values.defaultReturnValue(Float.NaN);
+        }
+
+        private synchronized float get(long key) {
+            return values.getAndMoveToLast(key);
+        }
+
+        private synchronized float putIfAbsent(long key, float value) {
+            float existing = values.getAndMoveToLast(key);
+            if (!Float.isNaN(existing)) {
+                return existing;
+            }
+            values.putAndMoveToLast(key, value);
+            while (values.size() > LC2H_MAX_PER_STRIPE) {
+                values.removeFirstFloat();
+            }
+            return value;
+        }
     }
 }

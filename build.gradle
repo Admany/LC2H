@@ -61,7 +61,8 @@ tasks.register('buildOmniJar', Jar) {
             'Implementation-Title': 'lc2h-omni',
             'MixinConfigs': 'mixins.lc2h.json',
             'Implementation-Version': versionName,
-            'Implementation-Vendor': providers.gradleProperty('mod_authors').getOrElse('Admany')
+            'Implementation-Vendor': providers.gradleProperty('mod_authors').getOrElse('Admany'),
+            'Implementation-Timestamp': new Date().format("yyyy-MM-dd'T'HH:mm:ssZ")
         )
     }
 }
