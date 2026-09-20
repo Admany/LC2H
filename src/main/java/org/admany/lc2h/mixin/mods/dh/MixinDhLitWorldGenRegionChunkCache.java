@@ -34,7 +34,8 @@ public abstract class MixinDhLitWorldGenRegionChunkCache {
      * to getChunk(...). A cached immutable wrapper can be returned before that
      * lock without changing chunk ownership or generation semantics.
      */
-    @Inject(method = "m_6325_", at = @At("HEAD"), cancellable = true, require = 1)
+    @Inject(method = "m_6325_(II)Lnet/minecraft/world/level/chunk/ChunkAccess;",
+        at = @At("HEAD"), cancellable = true, require = 1)
     private void lc2h$reuseFullImposterChunk(int chunkX,
                                             int chunkZ,
                                             CallbackInfoReturnable<ChunkAccess> cir) {
@@ -46,7 +47,8 @@ public abstract class MixinDhLitWorldGenRegionChunkCache {
      * the four-argument lookup. ImposterProtoChunk wraps a completed
      * LevelChunk, so it satisfies every requested status.
      */
-    @Inject(method = "m_46819_", at = @At("HEAD"), cancellable = true, require = 1)
+    @Inject(method = "m_46819_(IILnet/minecraft/world/level/chunk/ChunkStatus;)Lnet/minecraft/world/level/chunk/ChunkAccess;",
+        at = @At("HEAD"), cancellable = true, require = 1)
     private void lc2h$reuseStatusImposterChunk(int chunkX,
                                               int chunkZ,
                                               ChunkStatus requiredStatus,
@@ -54,7 +56,8 @@ public abstract class MixinDhLitWorldGenRegionChunkCache {
         lc2h$returnCached(chunkX, chunkZ, cir);
     }
 
-    @Inject(method = "m_6522_", at = @At("HEAD"), cancellable = true, require = 1)
+    @Inject(method = "m_6522_(IILnet/minecraft/world/level/chunk/ChunkStatus;Z)Lnet/minecraft/world/level/chunk/ChunkAccess;",
+        at = @At("HEAD"), cancellable = true, require = 1)
     private void lc2h$reuseImposterChunk(int chunkX,
                                         int chunkZ,
                                         ChunkStatus requiredStatus,
@@ -63,7 +66,8 @@ public abstract class MixinDhLitWorldGenRegionChunkCache {
         lc2h$returnCached(chunkX, chunkZ, cir);
     }
 
-    @Inject(method = "m_6522_", at = @At("RETURN"), cancellable = true, require = 1)
+    @Inject(method = "m_6522_(IILnet/minecraft/world/level/chunk/ChunkStatus;Z)Lnet/minecraft/world/level/chunk/ChunkAccess;",
+        at = @At("RETURN"), cancellable = true, require = 1)
     private void lc2h$cacheImposterChunk(int chunkX,
                                         int chunkZ,
                                         ChunkStatus requiredStatus,

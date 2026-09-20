@@ -191,7 +191,7 @@ public class ChunkPostProcessor {
     private static final String DATA_ROOT = "lc2h";
     private static final String DATA_FLAG = "doubleblock_repaired";
     private static final String DATA_SCAN_VERSION_FLAG = "postprocess_scan_version";
-    private static final int CURRENT_SCAN_VERSION = 5;
+    private static final int CURRENT_SCAN_VERSION = 6;
 
     private static final Map<ChunkScanKey, ScanCursor> CHUNK_SCAN_PROGRESS = new ConcurrentHashMap<>();
     private static final Set<ChunkScanKey> INFLIGHT_CHUNK_SCANS = Collections.newSetFromMap(new ConcurrentHashMap<>());
@@ -798,9 +798,17 @@ public class ChunkPostProcessor {
         if (isPotentialFloatingSourceFluid(state)) {
             return removeFloatingFluidColumn(level, pos, state.getFluidState());
         }
-        level.removeBlockEntity(pos);
-        int flags = isAttachmentDecoration(state) ? 3 : SAFE_SET_FLAGS;
-        level.setBlock(pos, AIR_STATE, flags);
+        LevelChunk chunk = level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
+        boolean updateNeighbors = isAttachmentDecoration(state);
+        if (chunk == null || (updateNeighbors && !hasLoadedNeighborhood(level, pos))) {
+            enqueueFloatingCheck(level, pos.immutable());
+            return 0;
+        }
+        int flags = updateNeighbors ? 3 : SAFE_SET_FLAGS;
+        if (!level.setBlock(pos, AIR_STATE, flags)) {
+            return 0;
+        }
+        chunk.removeBlockEntity(pos);
         return 1;
     }
 
@@ -3460,38 +3468,46 @@ public class ChunkPostProcessor {
     }
 
     private static boolean isCityChunkCached(ServerLevel level, int cx, int cz) {
+        return Boolean.TRUE.equals(cityChunkStatusIfKnown(level, cx, cz));
+    }
+
+    public static Boolean cityChunkStatusIfKnown(ServerLevel level, int cx, int cz) {
+        if (level == null) {
+            return null;
+        }
         ChunkScanKey key = chunkKey(level.dimension().location(), cx, cz);
         Boolean cached = CITY_CHUNK_CACHE.get(key);
         if (cached != null) {
             return cached;
         }
-        IDimensionInfo dimInfo = getDimensionInfo(level);
-        if (dimInfo == null) {
-            return false;
-        }
-
         mcjty.lostcities.varia.ChunkCoord coord =
             new mcjty.lostcities.varia.ChunkCoord(level.dimension(), cx, cz);
         try {
             mcjty.lostcities.api.LostChunkCharacteristics snapshot =
                 ChunkRoleProbe.peekCharacteristics(coord);
             if (snapshot != null) {
-                boolean isCity = snapshot.isCity;
-                CITY_CHUNK_CACHE.put(key, isCity);
-                return isCity;
+                CITY_CHUNK_CACHE.put(key, snapshot.isCity);
+                return snapshot.isCity;
             }
+        } catch (Throwable ignored) {
+        }
+        IDimensionInfo dimInfo = getDimensionInfo(level);
+        if (dimInfo == null) {
+            return Boolean.FALSE;
+        }
+        try {
             ChunkRoleProbe.Probe stable = ChunkRoleProbe.peekStableTerrainProbe(
                 dimInfo, level.dimension(), cx, cz);
             if (stable == null) {
                 ChunkRoleProbe.requestStableTerrainProbe(
                     dimInfo, level.dimension(), cx, cz);
-                return false;
+                return null;
             }
             boolean isCity = stable.isCity();
             CITY_CHUNK_CACHE.put(key, isCity);
             return isCity;
         } catch (Throwable ignored) {
-            return false;
+            return null;
         }
     }
 }

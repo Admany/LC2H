@@ -48,6 +48,7 @@
     "lostcities.spawn.MixinForgeEventHandlersBedFix",
     "minecraft.worldgen.MixinWorldGenRegion",
       "minecraft.worldgen.MixinBlenderCityEdge",
+      "minecraft.worldgen.MixinGeodeFeatureCityShift",
       "minecraft.worldgen.MixinNoiseBasedChunkGeneratorTerrainGate",
       "minecraft.worldgen.MixinNoiseChunkCityDensityTransform",
     "minecraft.worldgen.MixinWorldGenRegionPreCaptureTrace",
@@ -77,7 +78,6 @@
     "mods.midgard.MixinTreeFromStructureNBTFeatureV2Midgard",
     "mods.dh.MixinDhApiTerrainDataPoint",
     "mods.dh.MixinDhLitWorldGenRegionChunkCache",
-    "mods.dh.DhBatchGenerationEnvironmentAccessor",
     "mods.create.MixinRegistrateDevEnvironment"
   ],
   "client": [

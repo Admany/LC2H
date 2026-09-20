@@ -8,6 +8,7 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.levelgen.blending.Blender;
+import net.minecraft.world.level.levelgen.blending.BlendingData;
 import org.admany.lc2h.mixin.accessor.minecraft.BlenderFactory;
 import org.admany.lc2h.config.ConfigManager;
 import org.admany.lc2h.util.server.DimensionInfoAccessor;
@@ -17,7 +18,9 @@ import org.admany.lc2h.worldgen.terrain.CityDensityShiftField;
 import org.admany.lc2h.worldgen.terrain.MountainCityBlendDiagnostics;
 import org.admany.lc2h.worldgen.terrain.CityShiftField;
 import org.admany.lc2h.worldgen.terrain.NaturalHeightSampler;
+import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -28,6 +31,9 @@ import java.util.Arrays;
 /** Applies the Lost Cities terrain adjustment to Minecraft's Blender. */
 @Mixin(Blender.class)
 public abstract class MixinBlenderCityEdge implements CityDensityTransform {
+
+    @Shadow @Final private Long2ObjectOpenHashMap<BlendingData> heightAndBiomeBlendingData;
+    @Shadow @Final private Long2ObjectOpenHashMap<BlendingData> densityBlendingData;
 
     /* NoiseChunk interpolates cell corners. Keep the cell-constant variant for
      * comparison runs. */
@@ -112,7 +118,14 @@ public abstract class MixinBlenderCityEdge implements CityDensityTransform {
             return;
         }
 
-        Blender blender = BlenderFactory.lc2h$create(new Long2ObjectOpenHashMap<>(), new Long2ObjectOpenHashMap<>());
+        Blender existing = cir.getReturnValue();
+        if (existing == null) {
+            return;
+        }
+        MixinBlenderCityEdge existingState = (MixinBlenderCityEdge) (Object) existing;
+        Blender blender = BlenderFactory.lc2h$create(
+            new Long2ObjectOpenHashMap<>(existingState.heightAndBiomeBlendingData),
+            new Long2ObjectOpenHashMap<>(existingState.densityBlendingData));
         MixinBlenderCityEdge state = (MixinBlenderCityEdge) (Object) blender;
         state.lc2h$context = context;
         state.lc2h$sampleKeys = new long[512];
@@ -134,18 +147,15 @@ public abstract class MixinBlenderCityEdge implements CityDensityTransform {
         cir.setReturnValue(blender);
     }
 
-    @Inject(method = "blendOffsetAndFactor", at = @At("HEAD"), cancellable = true)
-    private void lc2h$blendOffsetAndFactor(int blockX, int blockZ, CallbackInfoReturnable<Blender.BlendingOutput> cir) {
-        if (!this.lc2h$active) {
-            return;
+    @Inject(method = "blendOffsetAndFactor", at = @At("RETURN"))
+    private void lc2h$recordBlendOffsetAndFactor(int blockX, int blockZ,
+                                                 CallbackInfoReturnable<Blender.BlendingOutput> cir) {
+        if (this.lc2h$active) {
+            MountainCityBlendDiagnostics.blendCall();
         }
-        MountainCityBlendDiagnostics.blendCall();
-        // Height/offset blending creates a plane. The NoiseChunk coordinate
-        // transform owns all shaping now, so Blender itself must be neutral.
-        cir.setReturnValue(new Blender.BlendingOutput(1.0D, 0.0D));
     }
 
-    @Inject(method = "blendDensity", at = @At("HEAD"), cancellable = true)
+    @Inject(method = "blendDensity", at = @At("RETURN"), cancellable = true)
     private void lc2h$blendNativeDensity(net.minecraft.world.level.levelgen.DensityFunction.FunctionContext context,
                                          double input,
                                          CallbackInfoReturnable<Double> cir) {
@@ -155,7 +165,6 @@ public abstract class MixinBlenderCityEdge implements CityDensityTransform {
         MountainCityBlendDiagnostics.densityOffsetCall();
         double shift = this.lc2h$verticalDensityShift(context.blockX(), context.blockZ());
         if (shift <= 0.0D || DENSITY_OFFSET_SCALE == 0.0D) {
-            cir.setReturnValue(input);
             return;
         }
         MountainCityBlendDiagnostics.densityPositiveShift();
@@ -164,30 +173,26 @@ public abstract class MixinBlenderCityEdge implements CityDensityTransform {
         // Use resident heights only; do not load a cold chunk here.
         boolean surfaceKnown = nativeSurface != Integer.MIN_VALUE;
         if (!surfaceKnown) {
-            // No resident height means no terrain adjustment yet.
             MountainCityBlendDiagnostics.densitySurfaceFallback();
+            return;
         }
         // Apply the shift only near the native surface.
-        int depthBelowSurface = surfaceKnown
-            ? nativeSurface - context.blockY() : 0;
-        if (surfaceKnown && (depthBelowSurface < 0
-            || depthBelowSurface >= DENSITY_OFFSET_VERTICAL_BAND)) {
+        int depthBelowSurface = nativeSurface - context.blockY();
+        if (depthBelowSurface < 0 || depthBelowSurface >= DENSITY_OFFSET_VERTICAL_BAND) {
             MountainCityBlendDiagnostics.densityDepthReject();
-            cir.setReturnValue(input);
             return;
         }
         // Leave deep solid and air regions unchanged.
         double band = DENSITY_OFFSET_INPUT_BAND;
+        double blendedDensity = cir.getReturnValueD();
         // Keep the air side of the density function unchanged.
-        double gate = band <= 0.0D ? (input > 0.0D ? 1.0D : 0.0D)
-            : (input > 0.0D ? Math.max(0.0D, 1.0D - input / band) : 0.0D);
-        if (surfaceKnown) {
-            gate *= 1.0D - (double) depthBelowSurface / DENSITY_OFFSET_VERTICAL_BAND;
-        }
+        double gate = band <= 0.0D ? (blendedDensity > 0.0D ? 1.0D : 0.0D)
+            : (blendedDensity > 0.0D ? Math.max(0.0D, 1.0D - blendedDensity / band) : 0.0D);
+        gate *= 1.0D - (double) depthBelowSurface / DENSITY_OFFSET_VERTICAL_BAND;
         if (gate > 0.0D) {
             MountainCityBlendDiagnostics.densityShifted(shift);
         }
-        cir.setReturnValue(input - shift * DENSITY_OFFSET_SCALE * gate);
+        cir.setReturnValue(blendedDensity - shift * DENSITY_OFFSET_SCALE * gate);
     }
 
     @Override
